@@ -14,6 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -64,7 +65,13 @@ vi.mock("@features/csm-cases/components/AsyncProjectMultiSelect", () => ({
 // CsmAnnouncementCreatePage imports BackendApiError from the real API client
 // module, which reads window.config at module load and throws outside a
 // configured runtime — mirrors CreateSecurityReportPage.test.tsx.
+// useBackendApi is also mocked here: useResolveAnnouncementAudience calls it
+// unconditionally (React Query hooks always run, even when `enabled: false`
+// for the default "specific" scope these tests exercise), so a real client
+// would hit the same window.config problem.
+const projectSearchPostMock = vi.fn();
 vi.mock("@api/backend/client", () => ({
+  useBackendApi: () => ({ post: projectSearchPostMock }),
   BackendApiError: class BackendApiError extends Error {
     status: number;
     constructor(status: number, message: string) {
@@ -76,6 +83,15 @@ vi.mock("@api/backend/client", () => ({
 
 // Imported after the mocks above so the module picks them up.
 import CsmAnnouncementCreatePage from "@features/csm-announcements/pages/CsmAnnouncementCreatePage";
+
+function renderPage(): ReturnType<typeof render> {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <CsmAnnouncementCreatePage />
+    </QueryClientProvider>,
+  );
+}
 
 function selectProjects(...values: string[]): void {
   const select = screen.getByLabelText("Projects") as HTMLSelectElement;
@@ -99,10 +115,11 @@ describe("CsmAnnouncementCreatePage", () => {
     navigateMock.mockReset();
     postCaseMutateAsyncMock.mockReset();
     showErrorMock.mockReset();
+    projectSearchPostMock.mockReset();
   });
 
   it("keeps Create disabled until title, description, and at least one project are filled", () => {
-    render(<CsmAnnouncementCreatePage />);
+    renderPage();
     const submit = screen.getByRole("button", { name: /create announcement/i });
     expect(submit).toBeDisabled();
 
@@ -116,7 +133,7 @@ describe("CsmAnnouncementCreatePage", () => {
 
   it("fans out one POST /cases call per selected project, with the same subject/description", async () => {
     postCaseMutateAsyncMock.mockResolvedValue({ id: "ann-1" });
-    render(<CsmAnnouncementCreatePage />);
+    renderPage();
 
     fillSubjectAndDescription();
     selectProjects("proj-1", "proj-2");
@@ -151,7 +168,7 @@ describe("CsmAnnouncementCreatePage", () => {
         ? Promise.resolve({ id: "ann-1" })
         : Promise.reject(new Error("network down")),
     );
-    render(<CsmAnnouncementCreatePage />);
+    renderPage();
 
     fillSubjectAndDescription();
     selectProjects("proj-1", "proj-2");
@@ -167,7 +184,7 @@ describe("CsmAnnouncementCreatePage", () => {
 
   it("surfaces a single error and does not navigate when every project fails", async () => {
     postCaseMutateAsyncMock.mockRejectedValue(new Error("network down"));
-    render(<CsmAnnouncementCreatePage />);
+    renderPage();
 
     fillSubjectAndDescription();
     selectProjects("proj-1");
@@ -179,5 +196,74 @@ describe("CsmAnnouncementCreatePage", () => {
       );
     });
     expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves 'All customer projects' via the entity service and fans create-case calls out across the resolved ids, with the default exclusions applied", async () => {
+    projectSearchPostMock.mockResolvedValue({
+      projects: [
+        { id: "resolved-1", name: "Resolved One", key: "R1", account: { id: "a1", name: "Acme" } },
+        { id: "resolved-2", name: "Resolved Two", key: "R2", account: { id: "a2", name: "Globex" } },
+      ],
+      total: 2,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+    });
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "ann-1" });
+    renderPage();
+
+    fillSubjectAndDescription();
+    fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
+
+    // Both default exclusion checkboxes are on and reach the request body.
+    await waitFor(() => {
+      expect(projectSearchPostMock).toHaveBeenCalledWith(
+        "/projects/search",
+        expect.objectContaining({
+          excludeSubscriptionTypes: ["cloud_support", "cloud_evaluation_support"],
+          excludeClosureStates: ["Restricted", "Suspended"],
+        }),
+      );
+    });
+
+    const submit = await screen.findByRole("button", { name: /create announcement/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
+    });
+    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "resolved-1" }),
+    );
+    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "resolved-2" }),
+    );
+  });
+
+  it("unchecking an exclusion drops it from the resolved-audience request", async () => {
+    projectSearchPostMock.mockResolvedValue({
+      projects: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+    });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /exclude cloud support/i }),
+    );
+
+    await waitFor(() => {
+      expect(projectSearchPostMock).toHaveBeenCalledWith(
+        "/projects/search",
+        expect.objectContaining({
+          excludeSubscriptionTypes: undefined,
+          excludeClosureStates: ["Restricted", "Suspended"],
+        }),
+      );
+    });
   });
 });

@@ -17,11 +17,24 @@
 import { Box, Button, Card, Grid, TextField, Typography } from "@wso2/oxygen-ui";
 import { ArrowLeft } from "@wso2/oxygen-ui-icons-react";
 import { useMemo, useState, type JSX } from "react";
+import type { BeSubscriptionType } from "@api/backend/types";
 import Editor from "@components/rich-text-editor/Editor";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
-import AsyncProjectMultiSelect from "@features/csm-cases/components/AsyncProjectMultiSelect";
 import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
+import { useResolveAnnouncementAudience } from "@features/csm-announcements/api/useResolveAnnouncementAudience";
+import AudienceScopeControls, {
+  type AnnouncementAudienceScope,
+} from "@features/csm-announcements/components/AudienceScopeControls";
+import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
 import { useNavTransition } from "@hooks/useNavTransition";
+
+/**
+ * The two default exclusions offered for the "all customer projects" scope,
+ * mirroring the ServiceNow flow conditions this replaces (see
+ * AudienceScopeControls' own doc comment for the Account Life Cycle caveat).
+ */
+const CLOUD_SUBSCRIPTION_TYPES: BeSubscriptionType[] = ["cloud_support", "cloud_evaluation_support"];
+const CLOSED_STATES: string[] = ["Restricted", "Suspended"];
 
 /** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
 function isEmptyHtml(html: string): boolean {
@@ -36,32 +49,57 @@ const BACK_TARGET = "/announcements";
  * severity/issueType/deployment/deployedProduct/attachments, just a subject
  * and description.
  *
- * A single announcement "record" per selected project: the backend's
- * `POST /cases` create call takes exactly one `projectId`, so a
- * multi-project pick here fans out into one independent create call per
- * project (same subject/description on each), not one record with a target
- * list. Submitting is therefore a batch: if some calls fail while others
- * succeed, the succeeded ones stand (no auto-retry) and the failures are
- * reported by project so the engineer can retry just those.
+ * Two audience scopes (see AudienceScopeControls): a hand-picked project
+ * list, same as before, or "all customer projects" resolved from the entity
+ * service under a pair of default exclusions. Either way, a single
+ * announcement "record" per project: the backend's `POST /cases` create call
+ * takes exactly one `projectId`, so the resolved/picked list fans out into
+ * one independent create call per project (same subject/description on
+ * each), not one record with a target list — there is still no batch entity
+ * (see the announcement-enhancement brief's Phase 3). Submitting is
+ * therefore a batch: if some calls fail while others succeed, the succeeded
+ * ones stand (no auto-retry) and the failures are reported by project so the
+ * engineer can retry just those.
  */
 export default function CsmAnnouncementCreatePage(): JSX.Element {
   const navigate = useNavTransition();
   const { showError } = useErrorBanner();
 
+  const [scope, setScope] = useState<AnnouncementAudienceScope>("specific");
   const [projectIds, setProjectIds] = useState<string[]>([]);
+  const [excludeCloudTypes, setExcludeCloudTypes] = useState(true);
+  const [excludeClosedStates, setExcludeClosedStates] = useState(true);
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const postCase = usePostCsmCase();
 
+  const audienceFilters = useMemo(
+    () => ({
+      excludeSubscriptionTypes: excludeCloudTypes ? CLOUD_SUBSCRIPTION_TYPES : [],
+      excludeClosureStates: excludeClosedStates ? CLOSED_STATES : [],
+    }),
+    [excludeCloudTypes, excludeClosedStates],
+  );
+  const resolvedAudience = useResolveAnnouncementAudience(scope === "all", audienceFilters);
+
+  // The scope actually being sent: today's hand-picked list, or every id
+  // resolved for "all customer projects" (see AudienceScopeControls' own doc
+  // comment on what that scope does and doesn't filter).
+  const targetProjectIds = useMemo(
+    () => (scope === "all" ? resolvedAudience.projects.map((p) => p.id) : projectIds),
+    [scope, resolvedAudience.projects, projectIds],
+  );
+
   const canSubmit = useMemo(
     () =>
-      projectIds.length > 0 &&
+      targetProjectIds.length > 0 &&
+      !(scope === "all" && resolvedAudience.isLoading) &&
       subject.trim().length > 0 &&
       !isEmptyHtml(description) &&
       !submitting,
-    [projectIds, subject, description, submitting],
+    [targetProjectIds, scope, resolvedAudience.isLoading, subject, description, submitting],
   );
 
   const handleSubmit = async (): Promise<void> => {
@@ -70,7 +108,7 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
 
     const trimmedSubject = subject.trim();
     const results = await Promise.allSettled(
-      projectIds.map((projectId) =>
+      targetProjectIds.map((projectId) =>
         postCase.mutateAsync({
           type: "announcement",
           projectId,
@@ -81,10 +119,10 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
     );
     setSubmitting(false);
 
-    // The multi-select doesn't expose picked project names to this page (it
-    // only reports ids via onChange), so a failure is reported by id — still
-    // enough for the engineer to identify which project(s) to retry.
-    const failedProjectIds = projectIds.filter(
+    // Neither audience source exposes picked project names for a failure
+    // report beyond what's already resolved, so a failure is reported by id
+    // — still enough for the engineer to identify which project(s) to retry.
+    const failedProjectIds = targetProjectIds.filter(
       (_, i) => results[i].status === "rejected",
     );
 
@@ -93,14 +131,14 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
       return;
     }
 
-    const succeededCount = projectIds.length - failedProjectIds.length;
+    const succeededCount = targetProjectIds.length - failedProjectIds.length;
     if (succeededCount > 0) {
       // Partial failure: the succeeded creates already landed and aren't
       // retried automatically, so navigate away and surface exactly which
       // project(s) still need a retry.
       showError(
-        `The announcement was created for ${succeededCount} of ${projectIds.length} project${
-          projectIds.length === 1 ? "" : "s"
+        `The announcement was created for ${succeededCount} of ${targetProjectIds.length} project${
+          targetProjectIds.length === 1 ? "" : "s"
         }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds.join(
           ", ",
         )}. Create it again for the failed project${failedProjectIds.length === 1 ? "" : "s"} only.`,
@@ -128,13 +166,29 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
       <Card variant="outlined" sx={{ p: 3 }}>
         <Grid container spacing={2.5}>
           <Grid size={{ xs: 12 }}>
-            <AsyncProjectMultiSelect
-              id="announcement-create-projects"
-              label="Projects"
-              values={projectIds}
-              onChange={setProjectIds}
+            <AudienceScopeControls
+              scope={scope}
+              onScopeChange={setScope}
+              projectIds={projectIds}
+              onProjectIdsChange={setProjectIds}
+              excludeCloudTypes={excludeCloudTypes}
+              onExcludeCloudTypesChange={setExcludeCloudTypes}
+              excludeClosedStates={excludeClosedStates}
+              onExcludeClosedStatesChange={setExcludeClosedStates}
+              disabled={submitting}
             />
           </Grid>
+
+          {scope === "all" && (
+            <Grid size={{ xs: 12 }}>
+              <ResolvedAudienceList
+                projects={resolvedAudience.projects}
+                total={resolvedAudience.total}
+                isLoading={resolvedAudience.isLoading}
+                isError={resolvedAudience.isError}
+              />
+            </Grid>
+          )}
 
           <Grid size={{ xs: 12 }}>
             <TextField

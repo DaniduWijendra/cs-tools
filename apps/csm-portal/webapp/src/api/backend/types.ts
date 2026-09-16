@@ -1730,10 +1730,14 @@ export interface BeProject {
   sfId?: string;
   name?: string;
   projectKey?: string;
+  /** The project's short key, e.g. "WSO2-1000" (ServiceNow/entity-service field name: `key`). */
+  key?: string;
   subscriptionType?: BeSubscriptionType;
   /** Whether this project is eligible to raise service requests, as
    *  precomputed by the backing data source. */
   hasSr?: boolean;
+  /** "Open" | "Suspended" | "Restricted" (ServiceNow data source only). */
+  closureState?: string | null;
   startDate?: string | null;
   endDate?: string | null;
   createdAt?: string;
@@ -1745,6 +1749,12 @@ export interface BeProjectSearchPayload {
   searchQuery?: string;
   /** Filter to projects belonging to this account (ServiceNow data source only). */
   accountId?: string;
+  /** Excludes projects whose closure state is any of the given values, e.g.
+   *  ["Restricted", "Suspended"] (ServiceNow data source only). */
+  excludeClosureStates?: string[];
+  /** Excludes projects whose subscription type is any of the given values
+   *  (ServiceNow data source only). */
+  excludeSubscriptionTypes?: BeSubscriptionType[];
 }
 
 export interface BeProjectSearchResponse extends BeSearchResponseBase {
