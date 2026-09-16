@@ -195,6 +195,108 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 
 	token := middleware.UserIDTokenFromContext(ctx)
 
+	if len(req.ExcludeClosureStates) == 0 && len(req.ExcludeSubscriptionTypes) == 0 {
+		views, total, err := s.fetchProjectsPage(ctx, req, accountSysid, token, req.Pagination.Limit, req.Pagination.Offset)
+		if err != nil {
+			return domain.SearchProjectsResponse{}, err
+		}
+		return domain.SearchProjectsResponse{
+			Projects: views,
+			Total:    total,
+			Limit:    req.Pagination.Limit,
+			Offset:   req.Pagination.Offset,
+			HasMore:  req.Pagination.Offset+len(views) < total,
+		}, nil
+	}
+
+	// ServiceNow's projects/search endpoint has no filter parameter for
+	// excluding a set of closure states or subscription types (unlike
+	// ClosureStatus's own single-value include filter above), so this pages
+	// through every match with a bounded loop, filters in Go, then applies the
+	// caller's requested offset/limit over the filtered result.
+	filtered, err := s.fetchAllProjectsFiltered(ctx, req, accountSysid, token)
+	if err != nil {
+		return domain.SearchProjectsResponse{}, err
+	}
+
+	total := len(filtered)
+	start := req.Pagination.Offset
+	if start > total {
+		start = total
+	}
+	end := start + req.Pagination.Limit
+	if end > total {
+		end = total
+	}
+
+	return domain.SearchProjectsResponse{
+		Projects: filtered[start:end],
+		Total:    total,
+		Limit:    req.Pagination.Limit,
+		Offset:   req.Pagination.Offset,
+		HasMore:  end < total,
+	}, nil
+}
+
+// maxExcludeFilterPages bounds fetchAllProjectsFiltered's paging loop against
+// a wrong/always-true upstream hasMore signal, mirroring the same safety-bound
+// convention the webapp's own paged-query hooks use.
+const maxExcludeFilterPages = 200
+
+// snExcludeFilterPageSize is the page size fetchAllProjectsFiltered uses
+// internally, independent of the caller's own requested limit — that limit
+// applies to the filtered result, not to how many rows are fetched from
+// ServiceNow per round trip. Capped at maxLimit (50): that's the backing data
+// source's own hard ceiling per page (see maxLimit's doc comment in
+// user_service.go), not just this service's own default.
+const snExcludeFilterPageSize = maxLimit
+
+// fetchAllProjectsFiltered pages through every ServiceNow match for req
+// (ignoring req.Pagination — the caller applies that to the returned slice)
+// and returns the subset that matches neither ExcludeClosureStates nor
+// ExcludeSubscriptionTypes.
+func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req domain.SearchProjectsRequest, accountSysid, token string) ([]domain.ProjectView, error) {
+	excludeClosure := make(map[string]struct{}, len(req.ExcludeClosureStates))
+	for _, v := range req.ExcludeClosureStates {
+		excludeClosure[v] = struct{}{}
+	}
+	excludeType := make(map[domain.SubscriptionType]struct{}, len(req.ExcludeSubscriptionTypes))
+	for _, v := range req.ExcludeSubscriptionTypes {
+		excludeType[v] = struct{}{}
+	}
+
+	var filtered []domain.ProjectView
+	offset := 0
+	for page := 0; page < maxExcludeFilterPages; page++ {
+		views, total, err := s.fetchProjectsPage(ctx, req, accountSysid, token, snExcludeFilterPageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range views {
+			if v.ClosureState != nil {
+				if _, excluded := excludeClosure[*v.ClosureState]; excluded {
+					continue
+				}
+			}
+			if _, excluded := excludeType[v.SubscriptionType]; excluded {
+				continue
+			}
+			filtered = append(filtered, v)
+		}
+		offset += len(views)
+		if offset >= total || len(views) == 0 {
+			break
+		}
+	}
+	return filtered, nil
+}
+
+// fetchProjectsPage calls ServiceNow's projects/search endpoint for one page
+// and maps the response to domain.ProjectView, returning the page alongside
+// ServiceNow's own reported total match count. limit/offset are passed
+// separately from req.Pagination so fetchAllProjectsFiltered can page with its
+// own internal page size independent of the caller's requested window.
+func (s *snProjectService) fetchProjectsPage(ctx context.Context, req domain.SearchProjectsRequest, accountSysid, token string, limit, offset int) ([]domain.ProjectView, int, error) {
 	payload := snSearchProjectsPayload{
 		Filters: snProjectFilters{
 			SearchQuery:      req.SearchQuery,
@@ -208,33 +310,33 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 			ArrTodayGte:      req.ArrTodayGte,
 			SubRegion:        req.SubRegion,
 		},
-		Pagination: snProjectPagination{Limit: req.Pagination.Limit, Offset: req.Pagination.Offset},
+		Pagination: snProjectPagination{Limit: limit, Offset: offset},
 	}
 	raw, err := s.client.Post(ctx, "/projects/search", token, payload)
 	if err != nil {
-		return domain.SearchProjectsResponse{}, err
+		return nil, 0, err
 	}
 
 	var snResp snProjectsResponse
 	if err := json.Unmarshal(raw, &snResp); err != nil {
-		return domain.SearchProjectsResponse{}, fmt.Errorf("sn projects: parse response: %w", err)
+		return nil, 0, fmt.Errorf("sn projects: parse response: %w", err)
 	}
 
 	views := make([]domain.ProjectView, 0, len(snResp.Projects))
 	for _, p := range snResp.Projects {
 		createdOn, err := time.Parse(snCreatedOnLayout, p.CreatedOn)
 		if err != nil {
-			return domain.SearchProjectsResponse{}, fmt.Errorf("sn projects: parse createdOn %q: %w", p.CreatedOn, err)
+			return nil, 0, fmt.Errorf("sn projects: parse createdOn %q: %w", p.CreatedOn, err)
 		}
 		subType, err := snTypeNameToSubscriptionType(p.Type.Name)
 		if err != nil {
-			return domain.SearchProjectsResponse{}, fmt.Errorf("sn projects: project %q: %w", p.ID, err)
+			return nil, 0, fmt.Errorf("sn projects: project %q: %w", p.ID, err)
 		}
 		var startDate *time.Time
 		if p.StartDate != nil && *p.StartDate != "" {
 			parsed, err := time.Parse(snDateLayout, *p.StartDate)
 			if err != nil {
-				return domain.SearchProjectsResponse{}, fmt.Errorf("sn projects: parse startDate %q: %w", *p.StartDate, err)
+				return nil, 0, fmt.Errorf("sn projects: parse startDate %q: %w", *p.StartDate, err)
 			}
 			startDate = &parsed
 		}
@@ -242,7 +344,7 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 		if p.EndDate != "" {
 			parsed, err := time.Parse(snDateLayout, p.EndDate)
 			if err != nil {
-				return domain.SearchProjectsResponse{}, fmt.Errorf("sn projects: parse endDate %q: %w", p.EndDate, err)
+				return nil, 0, fmt.Errorf("sn projects: parse endDate %q: %w", p.EndDate, err)
 			}
 			endDate = &parsed
 		}
@@ -288,14 +390,7 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 		})
 	}
 
-	total := snResp.TotalRecords
-	return domain.SearchProjectsResponse{
-		Projects: views,
-		Total:    total,
-		Limit:    req.Pagination.Limit,
-		Offset:   req.Pagination.Offset,
-		HasMore:  req.Pagination.Offset+len(views) < total,
-	}, nil
+	return views, snResp.TotalRecords, nil
 }
 
 // snProjectDetailsResponse mirrors the Choreo GET /projects/{id} response.
@@ -624,6 +719,16 @@ func validateProjectSearchFilters(req domain.SearchProjectsRequest) error {
 	if req.EndDateTo != "" {
 		if _, err := time.Parse(snDateLayout, req.EndDateTo); err != nil {
 			return &apierror.ValidationError{Msg: "endDateTo must be a valid date (yyyy-MM-dd)"}
+		}
+	}
+	for _, s := range req.ExcludeClosureStates {
+		if _, ok := validClosureStatuses[s]; !ok {
+			return &apierror.ValidationError{Msg: "excludeClosureStates must each be one of: Open, Suspended, Restricted"}
+		}
+	}
+	for _, t := range req.ExcludeSubscriptionTypes {
+		if _, ok := validSubscriptionTypes[t]; !ok {
+			return &apierror.ValidationError{Msg: "excludeSubscriptionTypes contains invalid value: " + string(t)}
 		}
 	}
 	return nil

@@ -6686,6 +6686,31 @@ components:
         searchQuery:
           type: string
           description: Case-insensitive match against name, key, and subscription_type.
+        excludeClosureStates:
+          type: array
+          items:
+            type: string
+            enum: [Open, Suspended, Restricted]
+          description: >-
+            Excludes projects whose closure state is any of the given values.
+            ServiceNow data source only; rejected on the Postgres data source.
+        excludeSubscriptionTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - development_support
+              - managed_cloud_subscription
+              - evaluation_subscription
+              - subscription
+              - cloud_evaluation_support
+              - internal
+              - platformer_subscription
+              - cloud_support
+              - professional_services
+          description: >-
+            Excludes projects whose subscription type is any of the given values.
+            ServiceNow data source only; rejected on the Postgres data source.
 
     ProjectAccountRef:
       type: object
