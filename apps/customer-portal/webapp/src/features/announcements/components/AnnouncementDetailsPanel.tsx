@@ -17,6 +17,7 @@
 import {
   Box,
   Button,
+  Chip,
   Paper,
   Skeleton,
   Stack,
@@ -24,7 +25,7 @@ import {
   useTheme,
 } from "@wso2/oxygen-ui";
 import DOMPurify from "dompurify";
-import { ArrowLeft, Calendar, FileText } from "@wso2/oxygen-ui-icons-react";
+import { ArrowLeft, Calendar, FileText, Shield } from "@wso2/oxygen-ui-icons-react";
 import { DESCRIPTION_PURIFY_CONFIG } from "@utils/common";
 import type { JSX } from "react";
 import CaseDetailsActionRow from "@features/support/components/case-details/header/CaseDetailsActionRow";
@@ -181,6 +182,15 @@ export default function AnnouncementDetailsPanel({
                     {statusLabel}
                   </Typography>
                 </Box>
+              )}
+              {data.isSecurityAnnouncement && (
+                <Chip
+                  icon={<Shield size={14} />}
+                  label="Security Announcement"
+                  size="small"
+                  color="error"
+                  variant="outlined"
+                />
               )}
             </Box>
             {data.status?.label?.toLowerCase() !== "closed" && (

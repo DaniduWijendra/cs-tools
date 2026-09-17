@@ -301,6 +301,8 @@ export type CaseDetails = AuditMetadata & {
   watchList?: Array<{ id?: string; userName?: string; name?: string; email?: string }> | null;
   escalationLevel?: EscalationLevel | null;
   isEscalated?: boolean | null;
+  /** True when this announcement carries the CSM portal's fixed "Security Announcement" tag. */
+  isSecurityAnnouncement?: boolean;
 };
 
 // Item type for a single case comment.

@@ -49,6 +49,43 @@ describe("AnnouncementDetailsPanel", () => {
     expect(screen.getByText("Back")).toBeInTheDocument();
   });
 
+  it("shows a Security Announcement badge when the case carries the tag", () => {
+    render(
+      <AnnouncementDetailsPanel
+        data={{
+          title: "Critical vulnerability disclosed",
+          number: "ANN-101",
+          description: "<p>Details</p>",
+          status: { id: "1", label: "Open" },
+          createdOn: "2024-01-15T10:00:00Z",
+          isSecurityAnnouncement: true,
+        } as never}
+        isLoading={false}
+        isError={false}
+        onBack={() => {}}
+      />,
+    );
+    expect(screen.getByText("Security Announcement")).toBeInTheDocument();
+  });
+
+  it("does not show the badge for an ordinary announcement", () => {
+    render(
+      <AnnouncementDetailsPanel
+        data={{
+          title: "Maintenance window",
+          number: "ANN-100",
+          description: "<p>Scheduled downtime</p>",
+          status: { id: "1", label: "Open" },
+          createdOn: "2024-01-15T10:00:00Z",
+        } as never}
+        isLoading={false}
+        isError={false}
+        onBack={() => {}}
+      />,
+    );
+    expect(screen.queryByText("Security Announcement")).not.toBeInTheDocument();
+  });
+
   it("renders back button while loading", () => {
     render(
       <AnnouncementDetailsPanel
