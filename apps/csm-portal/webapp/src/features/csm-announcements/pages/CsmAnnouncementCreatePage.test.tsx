@@ -241,6 +241,67 @@ describe("CsmAnnouncementCreatePage", () => {
     );
   });
 
+  it("attaches a fixed security label to every created case when 'This is a security announcement' is checked", async () => {
+    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+      Promise.resolve({ id: `case-for-${projectId}` }),
+    );
+    projectSearchPostMock.mockResolvedValue({ id: "tag-1", label: "Security Announcement", color: null });
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("checkbox", { name: /this is a security announcement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(projectSearchPostMock).toHaveBeenCalledTimes(2);
+    });
+    expect(projectSearchPostMock).toHaveBeenCalledWith("/cases/case-for-proj-1/tags", {
+      label: "Security Announcement",
+    });
+    expect(projectSearchPostMock).toHaveBeenCalledWith("/cases/case-for-proj-2/tags", {
+      label: "Security Announcement",
+    });
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+    // No tag failures, so submitting must not surface an error banner.
+    expect(showErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("does not attach a tag when the security checkbox is left unchecked", async () => {
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-1" });
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+    expect(projectSearchPostMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a tag-attach failure separately from a create failure — the case still stands", async () => {
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-1" });
+    projectSearchPostMock.mockRejectedValue(new Error("tag service down"));
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    fireEvent.click(screen.getByRole("checkbox", { name: /this is a security announcement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(
+        expect.stringContaining("security label couldn't be attached"),
+      );
+    });
+    // The case itself was created successfully, so this is still a navigate-away, not a blocking failure.
+    expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+  });
+
   it("unchecking an exclusion drops it from the resolved-audience request", async () => {
     projectSearchPostMock.mockResolvedValue({
       projects: [],
