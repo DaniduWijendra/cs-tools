@@ -24,10 +24,17 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { ArrowLeft } from "@wso2/oxygen-ui-icons-react";
-import { useMemo, useState, type JSX } from "react";
-import type { BeSubscriptionType } from "@api/backend/types";
+import { ArrowLeft, FlaskConical } from "@wso2/oxygen-ui-icons-react";
+import { useEffect, useMemo, useState, type JSX } from "react";
+import { Link } from "react-router";
+import { useBackendApi } from "@api/backend/client";
+import type {
+  BeProjectSearchPayload,
+  BeProjectSearchResponse,
+  BeSubscriptionType,
+} from "@api/backend/types";
 import Editor from "@components/rich-text-editor/Editor";
+import { DRY_RUN_TEST_PROJECT_KEY } from "@config/announcementDryRunConfig";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAddTagToCase } from "@features/csm-cases/api/useCaseTags";
 import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
@@ -58,6 +65,15 @@ const CLOSED_STATES: string[] = ["Restricted", "Suspended"];
  * vocabulary on the backend.
  */
 const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
+
+/**
+ * Fixed tag attached to every "Send test" dry-run case, so a test send is
+ * identifiable (and, in a later pass, excludable from customer-facing
+ * counts/registry views the way the ServiceNow process already marks its own
+ * dry-run cases) — see DRY_RUN_TEST_PROJECT_KEY's own doc comment for the
+ * project side of this.
+ */
+const TEST_SEND_TAG_LABEL = "Test Send";
 
 /** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
 function isEmptyHtml(html: string): boolean {
@@ -91,6 +107,14 @@ const BACK_TARGET = "/announcements";
  * (the case already exists by then) — it's tracked and reported separately
  * from a create failure, since the fix is "add the label by hand," not
  * "retry the create."
+ *
+ * "Send test" is a dry run: it creates exactly one real case (same
+ * subject/description/security label) in a single fixed test project — see
+ * DRY_RUN_TEST_PROJECT_KEY — mirroring the ServiceNow process's own
+ * `Project Key = DCPSUB` dry-run step, so an engineer can open the real case
+ * and check formatting/rendering before sending to actual customer projects.
+ * It's independent of audience/scope entirely: no project needs to be picked
+ * or resolved to send a test, since the test project is fixed regardless.
  */
 export default function CsmAnnouncementCreatePage(): JSX.Element {
   const navigate = useNavTransition();
@@ -104,9 +128,78 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
   const [description, setDescription] = useState("");
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [sendingTest, setSendingTest] = useState(false);
+  const [testSendResult, setTestSendResult] = useState<
+    { caseId: string; displayId: string } | null
+  >(null);
 
+  const api = useBackendApi();
   const postCase = usePostCsmCase();
   const addTag = useAddTagToCase();
+
+  // A test-send confirmation is scoped to the content it was actually sent
+  // for — clear it once the draft changes so the "view test case" link never
+  // implies it reflects content the requester has since edited.
+  useEffect(() => {
+    setTestSendResult(null);
+  }, [subject, description]);
+
+  const canSendTest = useMemo(
+    () =>
+      subject.trim().length > 0 &&
+      !isEmptyHtml(description) &&
+      !submitting &&
+      !sendingTest,
+    [subject, description, submitting, sendingTest],
+  );
+
+  const handleSendTest = async (): Promise<void> => {
+    if (!canSendTest) return;
+    setSendingTest(true);
+    setTestSendResult(null);
+
+    try {
+      const searchRes = await api.post<BeProjectSearchPayload, BeProjectSearchResponse>(
+        "/projects/search",
+        { searchQuery: DRY_RUN_TEST_PROJECT_KEY, pagination: { offset: 0, limit: 10 } },
+      );
+      const testProject = (searchRes.projects ?? []).find(
+        (p) => p.key?.toLowerCase() === DRY_RUN_TEST_PROJECT_KEY.toLowerCase(),
+      );
+      if (!testProject) {
+        showError(
+          `Could not find the test project "${DRY_RUN_TEST_PROJECT_KEY}". Check the CSM_PORTAL_ANNOUNCEMENT_TEST_PROJECT_KEY configuration.`,
+        );
+        return;
+      }
+
+      const created = await postCase.mutateAsync({
+        type: "announcement",
+        projectId: testProject.id,
+        subject: subject.trim(),
+        description,
+      });
+      // Best-effort: the test case already exists even if either tag fails
+      // to attach, so a tag failure here doesn't block reporting success —
+      // same "the case is the source of truth, not the tag" reasoning as the
+      // real-send path below.
+      await Promise.allSettled([
+        addTag.mutateAsync({ caseId: created.id, label: TEST_SEND_TAG_LABEL }),
+        ...(isSecurityAnnouncement
+          ? [addTag.mutateAsync({ caseId: created.id, label: SECURITY_ANNOUNCEMENT_TAG_LABEL })]
+          : []),
+      ]);
+
+      setTestSendResult({
+        caseId: created.id,
+        displayId: created.internalId || created.number || created.id,
+      });
+    } catch {
+      showError("Could not create the test announcement. Please try again.");
+    } finally {
+      setSendingTest(false);
+    }
+  };
 
   const audienceFilters = useMemo(
     () => ({
@@ -311,17 +404,61 @@ export default function CsmAnnouncementCreatePage(): JSX.Element {
           </Grid>
         </Grid>
 
-        <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 1.5, mt: 2.5 }}>
-          <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={() => void handleSubmit()}
-            disabled={!canSubmit}
-          >
-            {submitting ? "Creating…" : "Create announcement"}
-          </Button>
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 1.5,
+            mt: 2.5,
+            pt: 2,
+            borderTop: 1,
+            borderColor: "divider",
+          }}
+        >
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5, minWidth: 0 }}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<FlaskConical size={16} />}
+              onClick={() => void handleSendTest()}
+              disabled={!canSendTest}
+              sx={{ alignSelf: "flex-start" }}
+            >
+              {sendingTest ? "Sending test…" : "Send test"}
+            </Button>
+            <Typography variant="caption" color="text.secondary">
+              Creates one real case in the <strong>{DRY_RUN_TEST_PROJECT_KEY}</strong> test project so
+              you can check formatting before sending to customers.
+            </Typography>
+            {testSendResult && (
+              <Typography variant="caption" color="success.main">
+                Test case created ({testSendResult.displayId}) —{" "}
+                <Link
+                  to={`/announcements/${testSendResult.caseId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  view it
+                </Link>
+                .
+              </Typography>
+            )}
+          </Box>
+
+          <Box sx={{ display: "flex", gap: 1.5, flexShrink: 0 }}>
+            <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              onClick={() => void handleSubmit()}
+              disabled={!canSubmit}
+            >
+              {submitting ? "Creating…" : "Create announcement"}
+            </Button>
+          </Box>
         </Box>
       </Card>
     </Box>

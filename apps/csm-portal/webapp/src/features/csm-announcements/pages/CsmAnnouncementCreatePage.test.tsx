@@ -16,6 +16,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
@@ -25,6 +26,21 @@ const showErrorMock = vi.fn();
 
 vi.mock("react-router", () => ({
   useNavigate: () => navigateMock,
+  // The "view test case" link after a successful "Send test" uses react-router's
+  // Link; a plain anchor is enough for these tests, which only assert its
+  // presence/href, not real client-side routing.
+  Link: ({
+    to,
+    children,
+    ...rest
+  }: {
+    to: string;
+    children?: ReactNode;
+  } & Record<string, unknown>) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
 }));
 vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: showErrorMock }),
@@ -300,6 +316,70 @@ describe("CsmAnnouncementCreatePage", () => {
     });
     // The case itself was created successfully, so this is still a navigate-away, not a blocking failure.
     expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+  });
+
+  it("Send test creates one case in the configured test project (DCPSUB) and shows a link to it", async () => {
+    projectSearchPostMock.mockImplementation((url: string, body: unknown) => {
+      if (url === "/projects/search") {
+        return Promise.resolve({
+          projects: [
+            { id: "other-1", name: "Other", key: "OTHER" },
+            { id: "dcpsub-id", name: "DCPSUB Test Project", key: "DCPSUB" },
+          ],
+          total: 2,
+          limit: 10,
+          offset: 0,
+          hasMore: false,
+        });
+      }
+      // Tag-attach calls (POST /cases/{id}/tags) also flow through this mock.
+      void body;
+      return Promise.resolve({ id: "tag-1", label: "Test Send", color: null });
+    });
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-test-1", internalId: "WSO2-9001" });
+    renderPage();
+
+    fillSubjectAndDescription();
+    fireEvent.click(screen.getByRole("button", { name: /send test/i }));
+
+    await waitFor(() => {
+      expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "announcement", projectId: "dcpsub-id" }),
+      );
+    });
+
+    expect(await screen.findByText(/WSO2-9001/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /view it/i });
+    expect(link).toHaveAttribute("href", "/announcements/case-test-1");
+
+    // Doesn't touch the real create flow or navigate away.
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("Send test surfaces an error and creates nothing when the test project can't be found", async () => {
+    projectSearchPostMock.mockResolvedValue({
+      projects: [],
+      total: 0,
+      limit: 10,
+      offset: 0,
+      hasMore: false,
+    });
+    renderPage();
+
+    fillSubjectAndDescription();
+    fireEvent.click(screen.getByRole("button", { name: /send test/i }));
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("DCPSUB"));
+    });
+    expect(postCaseMutateAsyncMock).not.toHaveBeenCalled();
+  });
+
+  it("Send test is disabled until subject and description are filled, independent of any project selection", () => {
+    renderPage();
+    expect(screen.getByRole("button", { name: /send test/i })).toBeDisabled();
+    fillSubjectAndDescription();
+    expect(screen.getByRole("button", { name: /send test/i })).toBeEnabled();
   });
 
   it("unchecking an exclusion drops it from the resolved-audience request", async () => {
