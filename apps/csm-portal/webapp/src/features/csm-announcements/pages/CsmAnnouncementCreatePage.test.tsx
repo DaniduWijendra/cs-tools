@@ -382,6 +382,25 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(screen.getByRole("button", { name: /send test/i })).toBeEnabled();
   });
 
+  it("defaults to the customer-announcement form and switches to the EOL placeholder", () => {
+    renderPage();
+
+    // Default kind: the customer form's own fields are present.
+    expect(screen.getByLabelText(/subject/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/product version \/ eol announcements need/i),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("radio", { name: /product version \/ eol announcement/i }),
+    );
+
+    // Switching kind unmounts the customer form entirely and shows the
+    // EOL placeholder instead — no form fields from the other kind linger.
+    expect(screen.queryByLabelText(/subject/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/product version \/ eol announcements need/i)).toBeInTheDocument();
+  });
+
   it("unchecking an exclusion drops it from the resolved-audience request", async () => {
     projectSearchPostMock.mockResolvedValue({
       projects: [],
