@@ -18,6 +18,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -223,5 +224,57 @@ func TestSNProjectService_SearchProjects_ExcludeFiltersPageThroughUpstream(t *te
 		if p.ClosureState != nil && *p.ClosureState == "Restricted" {
 			t.Fatalf("result contains an excluded Restricted project: %+v", p)
 		}
+	}
+}
+
+// TestSNProjectService_SearchProjects_ExcludeFiltersErrorsRatherThanTruncate
+// verifies that when fetchAllProjectsFiltered's safety-bound page count is
+// reached before every upstream match has been fetched, SearchProjects
+// returns an error rather than silently reporting the partial slice
+// collected so far as the complete, authoritative result — a caller
+// resolving an announcement audience must never under-count real recipients
+// without being told the count is incomplete.
+func TestSNProjectService_SearchProjects_ExcludeFiltersErrorsRatherThanTruncate(t *testing.T) {
+	// One more row than the safety bound can ever fetch, so the loop always
+	// exhausts maxExcludeFilterPages while offset is still short of total.
+	const totalUpstream = maxExcludeFilterPages*snExcludeFilterPageSize + 1
+
+	client := newTestSNClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Pagination struct {
+				Limit  int `json:"limit"`
+				Offset int `json:"offset"`
+			} `json:"pagination"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		rows := make([]map[string]any, 0, payload.Pagination.Limit)
+		for i := 0; i < payload.Pagination.Limit; i++ {
+			idx := payload.Pagination.Offset + i
+			if idx >= totalUpstream {
+				break
+			}
+			id := fmt.Sprintf("%032d", idx%1_000_000_000)
+			rows = append(rows, snTestProject(id, fmt.Sprintf("Project %d", idx), fmt.Sprintf("P%d", idx), "Subscription", "Open"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"projects": rows, "totalRecords": totalUpstream,
+			"offset": payload.Pagination.Offset, "limit": payload.Pagination.Limit,
+		})
+	}))
+
+	svc := NewServiceNowProjectService(client, nil)
+	_, err := svc.SearchProjects(contextWithUserIDToken("token"), domain.SearchProjectsRequest{
+		Pagination:           domain.Pagination{Limit: maxLimit, Offset: 0},
+		ExcludeClosureStates: []string{"Restricted"},
+	})
+	if err == nil {
+		t.Fatal("expected an error when the result set exceeds the safety bound, got nil (silent truncation)")
+	}
+	var svcErr *apierror.ServiceUnavailableError
+	if !errors.As(err, &svcErr) {
+		t.Fatalf("expected *apierror.ServiceUnavailableError, got %T: %v", err, err)
 	}
 }

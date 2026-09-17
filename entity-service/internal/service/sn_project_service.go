@@ -285,10 +285,19 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 		}
 		offset += len(views)
 		if offset >= total || len(views) == 0 {
-			break
+			return filtered, nil
 		}
 	}
-	return filtered, nil
+	// The loop above ran out of pages before exhausting every upstream match
+	// (offset never reached total). Returning `filtered` here would silently
+	// report a truncated slice as the complete, authoritative result — the
+	// caller derives Total and HasMore directly from its length, so a caller
+	// resolving an announcement audience could under-count real recipients
+	// and never know. Fail loudly instead of guessing.
+	return nil, &apierror.ServiceUnavailableError{Msg: fmt.Sprintf(
+		"too many matching projects to apply excludeClosureStates/excludeSubscriptionTypes safely (exceeded %d upstream pages of %d) — narrow the search with an additional filter",
+		maxExcludeFilterPages, snExcludeFilterPageSize,
+	)}
 }
 
 // fetchProjectsPage calls ServiceNow's projects/search endpoint for one page
