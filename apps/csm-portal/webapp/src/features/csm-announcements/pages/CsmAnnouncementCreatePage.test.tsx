@@ -26,8 +26,8 @@ const showErrorMock = vi.fn();
 
 vi.mock("react-router", () => ({
   useNavigate: () => navigateMock,
-  // The "view test case" link after a successful "Send test" uses react-router's
-  // Link; a plain anchor is enough for these tests, which only assert its
+  // The "view it" link after a successful dry run uses react-router's Link;
+  // a plain anchor is enough for these tests, which only assert its
   // presence/href, not real client-side routing.
   Link: ({
     to,
@@ -318,7 +318,7 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
   });
 
-  it("Send test creates one case in the configured test project (DCPSUB) and shows a link to it", async () => {
+  it("the dry run creates one case in the configured test project (DCPSUB) and shows a link to it", async () => {
     projectSearchPostMock.mockImplementation((url: string, body: unknown) => {
       if (url === "/projects/search") {
         return Promise.resolve({
@@ -334,13 +334,13 @@ describe("CsmAnnouncementCreatePage", () => {
       }
       // Tag-attach calls (POST /cases/{id}/tags) also flow through this mock.
       void body;
-      return Promise.resolve({ id: "tag-1", label: "Test Send", color: null });
+      return Promise.resolve({ id: "tag-1", label: "Dry Run", color: null });
     });
     postCaseMutateAsyncMock.mockResolvedValue({ id: "case-test-1", internalId: "WSO2-9001" });
     renderPage();
 
     fillSubjectAndDescription();
-    fireEvent.click(screen.getByRole("button", { name: /send test/i }));
+    fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
 
     await waitFor(() => {
       expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
@@ -356,7 +356,7 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(navigateMock).not.toHaveBeenCalled();
   });
 
-  it("Send test surfaces an error and creates nothing when the test project can't be found", async () => {
+  it("the dry run surfaces an error and creates nothing when the test project can't be found", async () => {
     projectSearchPostMock.mockResolvedValue({
       projects: [],
       total: 0,
@@ -367,7 +367,7 @@ describe("CsmAnnouncementCreatePage", () => {
     renderPage();
 
     fillSubjectAndDescription();
-    fireEvent.click(screen.getByRole("button", { name: /send test/i }));
+    fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
 
     await waitFor(() => {
       expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("DCPSUB"));
@@ -375,11 +375,11 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(postCaseMutateAsyncMock).not.toHaveBeenCalled();
   });
 
-  it("Send test is disabled until subject and description are filled, independent of any project selection", () => {
+  it("the dry run button is disabled until subject and description are filled, independent of any project selection", () => {
     renderPage();
-    expect(screen.getByRole("button", { name: /send test/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /run dry run/i })).toBeDisabled();
     fillSubjectAndDescription();
-    expect(screen.getByRole("button", { name: /send test/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /run dry run/i })).toBeEnabled();
   });
 
   it("defaults to the customer-announcement form and switches to the EOL placeholder", () => {

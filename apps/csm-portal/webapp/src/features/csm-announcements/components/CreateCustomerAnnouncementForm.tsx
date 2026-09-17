@@ -67,13 +67,16 @@ const CLOSED_STATES: string[] = ["Restricted", "Suspended"];
 const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
 
 /**
- * Fixed tag attached to every "Send test" dry-run case, so a test send is
- * identifiable (and, in a later pass, excludable from customer-facing
- * counts/registry views the way the ServiceNow process already marks its own
- * dry-run cases) — see DRY_RUN_TEST_PROJECT_KEY's own doc comment for the
- * project side of this.
+ * Fixed tag attached to every dry-run case, so it's identifiable (and, in a
+ * later pass, excludable from customer-facing counts/registry views the way
+ * the ServiceNow process already marks its own dry-run cases) — see
+ * DRY_RUN_TEST_PROJECT_KEY's own doc comment for the project side of this.
+ * "Dry Run" rather than an invented phrase: the ServiceNow flow this
+ * replaces is itself literally named "DRY RUN - Create Announcements in All
+ * Customer Projects," so this keeps the same term engineers already
+ * associate with this step.
  */
-const TEST_SEND_TAG_LABEL = "Test Send";
+const DRY_RUN_TAG_LABEL = "Dry Run";
 
 /** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
 function isEmptyHtml(html: string): boolean {
@@ -109,13 +112,18 @@ const BACK_TARGET = "/announcements";
  * from a create failure, since the fix is "add the label by hand," not
  * "retry the create."
  *
- * "Send test" is a dry run: it creates exactly one real case (same
- * subject/description/security label) in a single fixed test project — see
- * DRY_RUN_TEST_PROJECT_KEY — mirroring the ServiceNow process's own
- * `Project Key = DCPSUB` dry-run step, so an engineer can open the real case
- * and check formatting/rendering before sending to actual customer projects.
+ * "Dry run" creates exactly one real case (same subject/description/security
+ * label) in a single fixed test project — see DRY_RUN_TEST_PROJECT_KEY —
+ * mirroring the ServiceNow process's own `Project Key = DCPSUB` dry-run step
+ * (that flow is literally named "DRY RUN - Create Announcements in All
+ * Customer Projects," which is why this keeps the same term rather than a
+ * paraphrase like "send test"), so an engineer can open the real case and
+ * check formatting/rendering before sending to actual customer projects.
  * It's independent of audience/scope entirely: no project needs to be picked
- * or resolved to send a test, since the test project is fixed regardless.
+ * or resolved to dry-run, since the test project is fixed regardless. Given
+ * its own prominent section (not folded into the Cancel/Create row) because
+ * the source process treats it as the mandatory first step before any real
+ * send, not an optional afterthought.
  */
 export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const navigate = useNavTransition();
@@ -129,8 +137,8 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const [description, setDescription] = useState("");
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [sendingTest, setSendingTest] = useState(false);
-  const [testSendResult, setTestSendResult] = useState<
+  const [runningDryRun, setRunningDryRun] = useState(false);
+  const [dryRunResult, setDryRunResult] = useState<
     { caseId: string; displayId: string } | null
   >(null);
 
@@ -138,26 +146,26 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const postCase = usePostCsmCase();
   const addTag = useAddTagToCase();
 
-  // A test-send confirmation is scoped to the content it was actually sent
-  // for — clear it once the draft changes so the "view test case" link never
-  // implies it reflects content the requester has since edited.
+  // A dry-run confirmation is scoped to the content it was actually run
+  // against — clear it once the draft changes so the "view dry run" link
+  // never implies it reflects content the requester has since edited.
   useEffect(() => {
-    setTestSendResult(null);
+    setDryRunResult(null);
   }, [subject, description]);
 
-  const canSendTest = useMemo(
+  const canRunDryRun = useMemo(
     () =>
       subject.trim().length > 0 &&
       !isEmptyHtml(description) &&
       !submitting &&
-      !sendingTest,
-    [subject, description, submitting, sendingTest],
+      !runningDryRun,
+    [subject, description, submitting, runningDryRun],
   );
 
-  const handleSendTest = async (): Promise<void> => {
-    if (!canSendTest) return;
-    setSendingTest(true);
-    setTestSendResult(null);
+  const handleRunDryRun = async (): Promise<void> => {
+    if (!canRunDryRun) return;
+    setRunningDryRun(true);
+    setDryRunResult(null);
 
     try {
       const searchRes = await api.post<BeProjectSearchPayload, BeProjectSearchResponse>(
@@ -180,25 +188,25 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         subject: subject.trim(),
         description,
       });
-      // Best-effort: the test case already exists even if either tag fails
-      // to attach, so a tag failure here doesn't block reporting success —
-      // same "the case is the source of truth, not the tag" reasoning as the
-      // real-send path below.
+      // Best-effort: the dry-run case already exists even if either tag
+      // fails to attach, so a tag failure here doesn't block reporting
+      // success — same "the case is the source of truth, not the tag"
+      // reasoning as the real-send path below.
       await Promise.allSettled([
-        addTag.mutateAsync({ caseId: created.id, label: TEST_SEND_TAG_LABEL }),
+        addTag.mutateAsync({ caseId: created.id, label: DRY_RUN_TAG_LABEL }),
         ...(isSecurityAnnouncement
           ? [addTag.mutateAsync({ caseId: created.id, label: SECURITY_ANNOUNCEMENT_TAG_LABEL })]
           : []),
       ]);
 
-      setTestSendResult({
+      setDryRunResult({
         caseId: created.id,
         displayId: created.internalId || created.number || created.id,
       });
     } catch {
-      showError("Could not create the test announcement. Please try again.");
+      showError("Could not run the dry run. Please try again.");
     } finally {
-      setSendingTest(false);
+      setRunningDryRun(false);
     }
   };
 
@@ -392,12 +400,62 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         </Grid>
       </Grid>
 
+      <Card
+        variant="outlined"
+        sx={{
+          mt: 2.5,
+          p: 2.5,
+          bgcolor: "action.hover",
+          borderColor: "warning.main",
+          display: "flex",
+          flexDirection: "column",
+          gap: 1.25,
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <FlaskConical size={18} />
+          <Typography variant="subtitle1" fontWeight={700}>
+            Dry run
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            (do this before sending to customers)
+          </Typography>
+        </Box>
+        <Typography variant="body2" color="text.secondary">
+          Creates one real case in the <strong>{DRY_RUN_TEST_PROJECT_KEY}</strong> test project
+          with this exact subject, description, and label, so you can open it and check
+          formatting before it goes out to real customer projects.
+        </Typography>
+        <Box>
+          <Button
+            variant="contained"
+            color="warning"
+            startIcon={<FlaskConical size={16} />}
+            onClick={() => void handleRunDryRun()}
+            disabled={!canRunDryRun}
+          >
+            {runningDryRun ? "Running dry run…" : "Run dry run"}
+          </Button>
+        </Box>
+        {dryRunResult && (
+          <Typography variant="body2" color="success.main">
+            Dry run case created ({dryRunResult.displayId}) —{" "}
+            <Link
+              to={`/announcements/${dryRunResult.caseId}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              view it
+            </Link>
+            .
+          </Typography>
+        )}
+      </Card>
+
       <Box
         sx={{
           display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
+          justifyContent: "flex-end",
           gap: 1.5,
           mt: 2.5,
           pt: 2,
@@ -405,48 +463,16 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           borderColor: "divider",
         }}
       >
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5, minWidth: 0 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<FlaskConical size={16} />}
-            onClick={() => void handleSendTest()}
-            disabled={!canSendTest}
-            sx={{ alignSelf: "flex-start" }}
-          >
-            {sendingTest ? "Sending test…" : "Send test"}
-          </Button>
-          <Typography variant="caption" color="text.secondary">
-            Creates one real case in the <strong>{DRY_RUN_TEST_PROJECT_KEY}</strong> test project so
-            you can check formatting before sending to customers.
-          </Typography>
-          {testSendResult && (
-            <Typography variant="caption" color="success.main">
-              Test case created ({testSendResult.displayId}) —{" "}
-              <Link
-                to={`/announcements/${testSendResult.caseId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                view it
-              </Link>
-              .
-            </Typography>
-          )}
-        </Box>
-
-        <Box sx={{ display: "flex", gap: 1.5, flexShrink: 0 }}>
-          <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={() => void handleSubmit()}
-            disabled={!canSubmit}
-          >
-            {submitting ? "Creating…" : "Create announcement"}
-          </Button>
-        </Box>
+        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          onClick={() => void handleSubmit()}
+          disabled={!canSubmit}
+        >
+          {submitting ? "Creating…" : "Create announcement"}
+        </Button>
       </Box>
     </Card>
   );
