@@ -345,7 +345,25 @@ type CaseDetails struct {
 	// the label is built here — the same split as case status and severity.
 	EscalationLevel *IDLabelRef `json:"escalationLevel,omitempty"`
 	IsEscalated     *bool       `json:"isEscalated,omitempty"`
+	// IsSecurityAnnouncement is derived from c.Tags, not exposed as the raw
+	// tag list — case tags are otherwise CSM-internal and deliberately
+	// trimmed from this response (see TestMapCaseDetails_TrimsFieldsWithNoConsumer).
+	// The CSM portal's announcement create flow (apps/csm-portal/webapp) tags
+	// every case in a security announcement with the exact fixed label
+	// securityAnnouncementTagLabel; this field is that one narrow, purpose-built
+	// fact surfaced to the customer, not a door back open to arbitrary internal
+	// tags. Omitted (false) when the case carries no such tag, so an ordinary
+	// announcement's response is unchanged.
+	IsSecurityAnnouncement bool `json:"isSecurityAnnouncement,omitempty"`
 }
+
+// securityAnnouncementTagLabel is the exact tag label the CSM portal's
+// announcement create form attaches to a case when "This is a security
+// announcement" is checked (SECURITY_ANNOUNCEMENT_TAG_LABEL in
+// CsmAnnouncementCreatePage.tsx) — kept in sync by hand across the Go backend
+// and the TypeScript frontend that writes it, since there is no shared
+// constant between the two.
+const securityAnnouncementTagLabel = "Security Announcement"
 
 // MapCaseDetails builds the portal response from entity-service's CaseView.
 func MapCaseDetails(c entity.CaseView) CaseDetails {
@@ -382,44 +400,58 @@ func MapCaseDetails(c entity.CaseView) CaseDetails {
 	}
 
 	return CaseDetails{
-		ID:                  c.ID,
-		InternalID:          c.InternalID,
-		Number:              c.Number,
-		Title:               c.Subject,
-		Description:         c.Description,
-		Product:             entityRefToIDLabel(c.ProductDetails),
-		Account:             account,
-		AssignedEngineer:    assignedEngineer,
-		Project:             &IDLabelRef{ID: c.ProjectDetails.ID, Label: c.ProjectDetails.Name},
-		Type:                caseTypeRefFromPointer(c.Type),
-		DeployedProduct:     deployedProductRefToIDLabel(c.DeployedProductDetails),
-		RelatedCase:         relatedCase,
-		Conversation:        entityRefToIDLabel(c.Conversation),
-		IssueType:           caseIssueTypeRef(&c.IssueType),
-		EngagementType:      caseEngagementTypeRef(c.EngagementType),
-		Catalog:             entityRefToIDLabel(c.Catalog),
-		CatalogItem:         entityRefToIDLabel(c.CatalogItem),
-		ChangeRequests:      changeRequests,
-		AssignedTeam:        entityRefToIDLabel(c.AssignedTeam),
-		Deployment:          entityRefToIDLabel(c.DeploymentDetails),
-		Severity:            caseSeverityRef(&c.Severity),
-		Status:              caseStatusRef(c.State),
-		CreatedOn:           c.CreatedOn,
-		UpdatedOn:           c.UpdatedOn,
-		ClosedOn:            c.ClosedOn,
-		CreatedBy:           c.CreatedByDetails.Name,
-		ParentCase:          mapNumberRef(c.ParentCase),
-		ResolvedOn:          c.ResolvedOn,
-		WatchList:           watchList,
-		SLAResponseTime:     c.SLAResponseTime,
-		ClosedBy:            mapRef(c.ClosedBy),
-		HasAutoClosed:       c.HasAutoClosed,
-		EngagementStartDate: c.EngagementStartDate,
-		EngagementEndDate:   c.EngagementEndDate,
-		Duration:            c.Duration,
-		EscalationLevel:     caseEscalationLevelRef(c.EscalationLevel),
-		IsEscalated:         c.IsEscalated,
+		ID:                     c.ID,
+		InternalID:             c.InternalID,
+		Number:                 c.Number,
+		Title:                  c.Subject,
+		Description:            c.Description,
+		Product:                entityRefToIDLabel(c.ProductDetails),
+		Account:                account,
+		AssignedEngineer:       assignedEngineer,
+		Project:                &IDLabelRef{ID: c.ProjectDetails.ID, Label: c.ProjectDetails.Name},
+		Type:                   caseTypeRefFromPointer(c.Type),
+		DeployedProduct:        deployedProductRefToIDLabel(c.DeployedProductDetails),
+		RelatedCase:            relatedCase,
+		Conversation:           entityRefToIDLabel(c.Conversation),
+		IssueType:              caseIssueTypeRef(&c.IssueType),
+		EngagementType:         caseEngagementTypeRef(c.EngagementType),
+		Catalog:                entityRefToIDLabel(c.Catalog),
+		CatalogItem:            entityRefToIDLabel(c.CatalogItem),
+		ChangeRequests:         changeRequests,
+		AssignedTeam:           entityRefToIDLabel(c.AssignedTeam),
+		Deployment:             entityRefToIDLabel(c.DeploymentDetails),
+		Severity:               caseSeverityRef(&c.Severity),
+		Status:                 caseStatusRef(c.State),
+		CreatedOn:              c.CreatedOn,
+		UpdatedOn:              c.UpdatedOn,
+		ClosedOn:               c.ClosedOn,
+		CreatedBy:              c.CreatedByDetails.Name,
+		ParentCase:             mapNumberRef(c.ParentCase),
+		ResolvedOn:             c.ResolvedOn,
+		WatchList:              watchList,
+		SLAResponseTime:        c.SLAResponseTime,
+		ClosedBy:               mapRef(c.ClosedBy),
+		HasAutoClosed:          c.HasAutoClosed,
+		EngagementStartDate:    c.EngagementStartDate,
+		EngagementEndDate:      c.EngagementEndDate,
+		Duration:               c.Duration,
+		EscalationLevel:        caseEscalationLevelRef(c.EscalationLevel),
+		IsEscalated:            c.IsEscalated,
+		IsSecurityAnnouncement: hasSecurityAnnouncementTag(c.Tags),
 	}
+}
+
+// hasSecurityAnnouncementTag reports whether tags carries the fixed
+// "Security Announcement" label — see IsSecurityAnnouncement's own doc
+// comment on CaseDetails for why this is exposed as a derived bool rather
+// than the raw tag list.
+func hasSecurityAnnouncementTag(tags []entity.Tag) bool {
+	for _, t := range tags {
+		if t.Label == securityAnnouncementTagLabel {
+			return true
+		}
+	}
+	return false
 }
 
 // caseTypeRefFromPointer mirrors caseTypeRef for CaseView.Type, which is a

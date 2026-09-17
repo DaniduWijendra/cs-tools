@@ -135,4 +135,57 @@ func TestMapCaseDetails_OmitsAbsentFields(t *testing.T) {
 	}
 }
 
+// TestMapCaseDetails_IsSecurityAnnouncement verifies isSecurityAnnouncement is
+// derived from whether the case's tags carry the exact "Security Announcement"
+// label (the CSM portal's fixed tag, not a customer-visible raw tag list —
+// see IsSecurityAnnouncement's own doc comment on CaseDetails), and that an
+// unrelated tag doesn't false-positive.
+func TestMapCaseDetails_IsSecurityAnnouncement(t *testing.T) {
+	t.Run("present when the exact tag is attached", func(t *testing.T) {
+		raw, err := json.Marshal(MapCaseDetails(entity.CaseView{
+			Tags: []entity.Tag{{Label: "Security Announcement"}},
+		}))
+		if err != nil {
+			t.Fatalf("marshal returned error: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("result is not valid JSON: %v", err)
+		}
+		if got["isSecurityAnnouncement"] != true {
+			t.Errorf("isSecurityAnnouncement = %v, want true", got["isSecurityAnnouncement"])
+		}
+	})
+
+	t.Run("omitted when no tag matches", func(t *testing.T) {
+		raw, err := json.Marshal(MapCaseDetails(entity.CaseView{
+			Tags: []entity.Tag{{Label: "vip-customer"}, {Label: "needs-follow-up"}},
+		}))
+		if err != nil {
+			t.Fatalf("marshal returned error: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("result is not valid JSON: %v", err)
+		}
+		if _, present := got["isSecurityAnnouncement"]; present {
+			t.Errorf("isSecurityAnnouncement = %v, want omitted for an unrelated tag set", got["isSecurityAnnouncement"])
+		}
+	})
+
+	t.Run("omitted when the case has no tags at all", func(t *testing.T) {
+		raw, err := json.Marshal(MapCaseDetails(entity.CaseView{}))
+		if err != nil {
+			t.Fatalf("marshal returned error: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("result is not valid JSON: %v", err)
+		}
+		if _, present := got["isSecurityAnnouncement"]; present {
+			t.Errorf("isSecurityAnnouncement = %v, want omitted with no tags", got["isSecurityAnnouncement"])
+		}
+	})
+}
+
 func strPtr(s string) *string { return &s }
