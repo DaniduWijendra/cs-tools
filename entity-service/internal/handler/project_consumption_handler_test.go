@@ -60,12 +60,8 @@ func (s *stubProjectConsumptionService) ProcessLicenseDownload(_ context.Context
 func TestGetDeploymentLicense_Success(t *testing.T) {
 	stub := &stubProjectConsumptionService{
 		licenseResp: domain.License{
-			Signature: "test-signature",
-			SubscriptionData: domain.SubscriptionData{
-				DeploymentID:    "dep-1",
-				DeploymentName:  "Production",
-				SubscriptionKey: "sub-key",
-			},
+			Signature:        "test-signature",
+			SubscriptionData: json.RawMessage(`{"deploymentId":"dep-1","deploymentName":"Production","subscriptionKey":"sub-key","usageDataPublishingUrl":"https://example.invalid/usage"}`),
 		},
 	}
 	h := NewProjectConsumptionHandler(stub)
@@ -252,15 +248,18 @@ func TestGetDeploymentLicense_E2E_ChoreoFlow(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"result": map[string]any{
 				"success": true,
-				"license": domain.License{
-					Signature: "valid-choreo-hmac-signature",
-					SubscriptionData: domain.SubscriptionData{
-						DeploymentID:    r.PathValue("deploymentId"),
-						DeploymentName:  "Production-E2E",
-						SubscriptionKey: "sub-prod-key",
-						ClientID:        "ck-999",
-						ClientSecret:    "cs-999",
-						Secrets:         "sec-999",
+				// usageDataPublishingUrl stands in for the signed fields this
+				// service does not model; it must reach the caller untouched.
+				"license": map[string]any{
+					"signature": "valid-choreo-hmac-signature",
+					"subscriptionData": map[string]any{
+						"deploymentId":           r.PathValue("deploymentId"),
+						"deploymentName":         "Production-E2E",
+						"subscriptionKey":        "sub-prod-key",
+						"clientId":               "ck-999",
+						"clientSecret":           "cs-999",
+						"secrets":                "sec-999",
+						"usageDataPublishingUrl": "https://example.invalid/usage",
 					},
 				},
 			},
@@ -316,11 +315,22 @@ func TestGetDeploymentLicense_E2E_ChoreoFlow(t *testing.T) {
 	if lic.Signature != "valid-choreo-hmac-signature" {
 		t.Errorf("got signature %q, want valid-choreo-hmac-signature", lic.Signature)
 	}
-	if lic.SubscriptionData.DeploymentName != "Production-E2E" {
-		t.Errorf("got deploymentName %q, want Production-E2E", lic.SubscriptionData.DeploymentName)
+	// Every field ServiceNow signed must arrive intact — including the ones no
+	// struct in this service names, since the customer's product recomputes the
+	// canonical string over all of them to verify the signature.
+	var sub map[string]any
+	if err := json.Unmarshal(lic.SubscriptionData, &sub); err != nil {
+		t.Fatalf("subscriptionData is not valid JSON: %v", err)
 	}
-	if lic.SubscriptionData.ClientID != "ck-999" {
-		t.Errorf("got clientID %q, want ck-999", lic.SubscriptionData.ClientID)
+	for k, want := range map[string]string{
+		"deploymentName":         "Production-E2E",
+		"clientId":               "ck-999",
+		"secrets":                "sec-999",
+		"usageDataPublishingUrl": "https://example.invalid/usage",
+	} {
+		if sub[k] != want {
+			t.Errorf("subscriptionData[%q] = %v, want %q", k, sub[k], want)
+		}
 	}
 
 	expectedSteps := []string{

@@ -7456,6 +7456,17 @@ components:
 
     DeploymentLicenseSubscriptionData:
       type: object
+      description: >
+        The signed subscription data, passed through from ServiceNow byte for
+        byte. ServiceNow computes an HMAC over the canonicalised form of this
+        object — every key sorted, key and value concatenated — and the
+        customer's product recomputes that string to verify the signature, so
+        this service never reshapes, reorders or drops any part of it.
+
+        The properties below are the ones callers can rely on; the object is
+        deliberately open, because ServiceNow signs whatever it sends and a
+        field this spec has not caught up with must still reach the customer.
+      additionalProperties: true
       properties:
         deploymentId:
           type: string
@@ -7469,6 +7480,14 @@ components:
           type: string
         secrets:
           type: string
+          description: >
+            The shuffled subscription secrets. A flat hex string, not an
+            object — 12 positions of 4 four-character sub-chunks.
+        usageDataPublishingUrl:
+          type: string
+          description: >
+            Where the customer's product publishes its usage data. Signed, and
+            required for the product to function.
       required:
         - deploymentId
         - deploymentName

@@ -160,6 +160,9 @@ func TestClient_GetDeploymentLicense(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// usageDataPublishingUrl and deploymentType are part of what ServiceNow
+		// signs but were absent from the struct this client used to decode
+		// into. They stand in here for "any field this service does not model".
 		w.Write([]byte(`{
 			"result": {
 				"success": true,
@@ -170,7 +173,9 @@ func TestClient_GetDeploymentLicense(t *testing.T) {
 						"subscriptionKey": "key-1",
 						"clientId": "cid",
 						"clientSecret": "sec",
-						"secrets": "shuffled"
+						"secrets": "shuffled",
+						"usageDataPublishingUrl": "https://example.invalid/usage",
+						"deploymentType": "Stress"
 					},
 					"signature": "sig123"
 				}
@@ -187,7 +192,22 @@ func TestClient_GetDeploymentLicense(t *testing.T) {
 	if lic.Signature != "sig123" {
 		t.Errorf("got signature %s, want sig123", lic.Signature)
 	}
-	if lic.SubscriptionData.DeploymentName != "Prod" {
-		t.Errorf("got deployment name %s, want Prod", lic.SubscriptionData.DeploymentName)
+
+	// The signature is an HMAC over the canonicalised subscription data, so
+	// every field has to survive the round trip — including the ones this
+	// service has no struct field for.
+	var got map[string]any
+	if err := json.Unmarshal(lic.SubscriptionData, &got); err != nil {
+		t.Fatalf("subscriptionData did not survive as JSON: %v", err)
+	}
+	for k, want := range map[string]string{
+		"deploymentName":         "Prod",
+		"secrets":                "shuffled",
+		"usageDataPublishingUrl": "https://example.invalid/usage",
+		"deploymentType":         "Stress",
+	} {
+		if got[k] != want {
+			t.Errorf("subscriptionData[%q] = %v, want %q — a dropped field breaks signature verification", k, got[k], want)
+		}
 	}
 }

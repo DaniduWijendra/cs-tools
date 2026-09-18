@@ -16,7 +16,10 @@
 
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ConsumptionStatus is a step in a project's product-consumption provisioning
 // state machine. The flow is resumable: a caller reads the current status and
@@ -117,20 +120,27 @@ type UpdateProjectConsumptionResponse struct {
 	Result  ProjectConsumptionView `json:"result"`
 }
 
-// SubscriptionData carries the deployment's license/subscription details.
-type SubscriptionData struct {
-	DeploymentID    string `json:"deploymentId"`
-	DeploymentName  string `json:"deploymentName"`
-	SubscriptionKey string `json:"subscriptionKey"`
-	ClientID        string `json:"clientId"`
-	ClientSecret    string `json:"clientSecret"`
-	Secrets         string `json:"secrets"`
-}
-
 // License is the deployment license payload issued by ServiceNow.
+//
+// SubscriptionData is carried verbatim and deliberately NOT modelled as a
+// struct. ServiceNow signs an HMAC over the canonicalised subscription data —
+// every key sorted, key and value concatenated — so the customer's product
+// recomputes that string from the licence it receives. Any field this service
+// fails to carry across changes the string the product computes, and the
+// signature no longer verifies.
+//
+// A closed struct silently drops the fields it does not name, and the payload
+// has more than the obvious ones: usageDataPublishingUrl, which is also where
+// the product publishes its usage, is signed but was absent from the struct
+// this replaces. The Ballerina implementation this was ported from gets it
+// right by declaring an open record (`json...`); json.RawMessage is the Go
+// equivalent, and it guarantees byte-fidelity rather than best-effort field
+// coverage.
+//
+// Do not "improve" this into a struct.
 type License struct {
-	SubscriptionData SubscriptionData `json:"subscriptionData"`
-	Signature        string           `json:"signature"`
+	SubscriptionData json.RawMessage `json:"subscriptionData"`
+	Signature        string          `json:"signature"`
 }
 
 // DeploymentLicenseRequest is the request body for

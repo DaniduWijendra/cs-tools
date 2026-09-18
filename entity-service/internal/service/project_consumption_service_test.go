@@ -400,10 +400,8 @@ func TestProcessLicenseDownload_FullFlow(t *testing.T) {
 			SecondarySecretKey: "sk-123",
 		},
 		licenseRes: domain.License{
-			Signature: "test-sig",
-			SubscriptionData: domain.SubscriptionData{
-				DeploymentID: "11111111-1111-1111-1111-111111111111",
-			},
+			Signature:        "test-sig",
+			SubscriptionData: json.RawMessage(`{"deploymentId":"11111111-1111-1111-1111-111111111111"}`),
 		},
 	}
 	svc := NewProjectConsumptionService(repo, choreo, true)
