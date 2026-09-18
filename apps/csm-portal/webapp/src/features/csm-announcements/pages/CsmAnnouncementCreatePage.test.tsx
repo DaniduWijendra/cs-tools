@@ -15,7 +15,7 @@
 // under the License.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -229,6 +229,9 @@ describe("CsmAnnouncementCreatePage", () => {
     await waitFor(() => expect(rejecters).toHaveLength(2));
     rejecters[0](new Error("boom"));
     await waitFor(() => expect(screen.getByText(/1 failed/)).toBeInTheDocument());
+    // The failed project's own id is visible as a chip immediately, not
+    // only after the whole batch finishes and the error banner fires.
+    expect(screen.getByText("proj-1")).toBeInTheDocument();
 
     resolvers[1]();
     await waitFor(() => {
@@ -236,7 +239,7 @@ describe("CsmAnnouncementCreatePage", () => {
     });
   });
 
-  it("reports which project failed on a partial failure, keeps the succeeded one, and still navigates back", async () => {
+  it("reports which project failed on a partial failure, keeps the succeeded one, shows it in the progress card, and stays on the page instead of navigating away", async () => {
     postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
       projectId === "proj-1"
         ? Promise.resolve({ id: "ann-1" })
@@ -253,7 +256,13 @@ describe("CsmAnnouncementCreatePage", () => {
         expect.stringContaining("proj-2"),
       );
     });
-    expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    // A create failure means proj-2 never got the announcement — the page
+    // stays put (no navigate) so its id stays visible on the progress card
+    // for the sender to identify and retry, rather than only living in a
+    // toast that's gone the moment the page changes.
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(screen.getByText("proj-2")).toBeInTheDocument();
+    expect(screen.getByText(/didn.t receive the announcement/i)).toBeInTheDocument();
   });
 
   it("surfaces a single error and does not navigate when every project fails", async () => {
@@ -316,6 +325,43 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "resolved-2" }),
     );
+  });
+
+  it("shows a failed project's own short key, not its raw id, on the progress card and in the error banner", async () => {
+    projectSearchPostMock.mockResolvedValue({
+      projects: [
+        { id: "resolved-1", name: "Resolved One", key: "CUPPTSUB", account: { id: "a1", name: "Acme" } },
+        { id: "resolved-2", name: "Resolved Two", key: "R2", account: { id: "a2", name: "Globex" } },
+      ],
+      total: 2,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+    });
+    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+      projectId === "resolved-1"
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ id: "ann-2" }),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
+    const submit = await screen.findByRole("button", { name: /create announcement/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("CUPPTSUB"));
+    });
+    // The raw uuid-style id never appears in the banner — only its key.
+    expect(showErrorMock).not.toHaveBeenCalledWith(expect.stringContaining("resolved-1"));
+    // Same on the progress card's own failed-project chip (scoped to that
+    // card specifically — the resolved-audience list above it also shows
+    // each project's key, so a page-wide query would match both).
+    const progressCard = screen.getByRole("status");
+    expect(within(progressCard).getByText("CUPPTSUB")).toBeInTheDocument();
+    expect(within(progressCard).queryByText("resolved-1")).not.toBeInTheDocument();
   });
 
   it("attaches a fixed security label to every created case when 'This is a security announcement' is checked", async () => {
@@ -660,6 +706,30 @@ describe("CsmAnnouncementCreatePage", () => {
       await waitFor(() => {
         expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
       });
+    });
+
+    it("shows the failed project in the progress card and stays on the page when a create call fails", async () => {
+      mockEolBackend();
+      postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+        projectId === "proj-a"
+          ? Promise.resolve({ id: "ann-eol-1" })
+          : Promise.reject(new Error("network down")),
+      );
+      renderPage();
+      switchToEolKind();
+      await selectProductAndVersion();
+      expect(await screen.findByText("Project A")).toBeInTheDocument();
+
+      fillSubjectAndDescription();
+      fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+      await waitFor(() => {
+        expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-b"));
+      });
+      // proj-b never got the announcement — stay on this page instead of
+      // navigating away, so its id stays visible on the progress card.
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(screen.getByText("proj-b")).toBeInTheDocument();
     });
 
     it("the dry run creates one case in the configured test project, tagged Dry Run only", async () => {

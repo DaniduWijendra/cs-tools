@@ -28,7 +28,7 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { useMemo, useState, type JSX } from "react";
+import { useCallback, useMemo, useState, type JSX } from "react";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAnnouncementDryRun, DRY_RUN_TAG_LABEL } from "@features/csm-announcements/api/useAnnouncementDryRun";
@@ -110,6 +110,21 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     productVersionId || undefined,
   );
 
+  // id → short key ("CUPPTSUB"), so a failed project can be shown by
+  // something readable instead of its raw id — same idea as the
+  // customer-announcement form's own projectLabel.
+  const projectKeyById = useMemo(() => {
+    const m = new Map<string, string>();
+    resolvedAudience.projects.forEach((p) => {
+      if (p.key) m.set(p.id, p.key);
+    });
+    return m;
+  }, [resolvedAudience.projects]);
+  const projectLabel = useCallback(
+    (projectId: string) => projectKeyById.get(projectId) ?? projectId,
+    [projectKeyById],
+  );
+
   const { runningDryRun, dryRunResult, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
     subject,
     description,
@@ -150,7 +165,13 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
 
     const trimmedSubject = subject.trim();
     const targetProjectIds = resolvedAudience.projects.map((p) => p.id);
-    setSendProgress({ total: targetProjectIds.length, completed: 0, succeeded: 0, failed: 0 });
+    setSendProgress({
+      total: targetProjectIds.length,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      failedProjectIds: [],
+    });
     const results = await settleWithConcurrencyLimit(
       targetProjectIds,
       ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
@@ -161,13 +182,17 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
           subject: trimmedSubject,
           description,
         }),
-      (result) => {
+      (result, projectId) => {
         setSendProgress((prev) =>
           prev && {
             ...prev,
             completed: prev.completed + 1,
             succeeded: prev.succeeded + (result.status === "fulfilled" ? 1 : 0),
             failed: prev.failed + (result.status === "rejected" ? 1 : 0),
+            failedProjectIds:
+              result.status === "rejected"
+                ? [...prev.failedProjectIds, projectId]
+                : prev.failedProjectIds,
           },
         );
       },
@@ -182,21 +207,21 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     }
 
     const succeededCount = targetProjectIds.length - failedProjectIds.length;
-    if (succeededCount > 0) {
-      // Partial failure: the succeeded creates already landed and aren't
-      // retried automatically — same "navigate away, report exactly what
-      // still needs attention" shape as the customer-announcement flow.
-      showError(
-        `The announcement was created for ${succeededCount} of ${targetProjectIds.length} project${
-          targetProjectIds.length === 1 ? "" : "s"
-        }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds.join(
-          ", ",
-        )} — create it again for the failed project${failedProjectIds.length === 1 ? "" : "s"} only.`,
-      );
-      navigate(BACK_TARGET);
-    } else {
-      showError("Could not create the announcement. Please try again.");
-    }
+    showError(
+      succeededCount > 0
+        ? `The announcement was created for ${succeededCount} of ${targetProjectIds.length} project${
+            targetProjectIds.length === 1 ? "" : "s"
+          }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds
+            .map(projectLabel)
+            .join(", ")} — create it again for the failed project${
+            failedProjectIds.length === 1 ? "" : "s"
+          } only.`
+        : "Could not create the announcement. Please try again.",
+    );
+    // Stay on this page instead of navigating away — at least one customer
+    // project never got the announcement, so the failed-project chips on
+    // the progress card above need to stay visible for the sender to act
+    // on, same reasoning as the customer-announcement form's own handleSubmit.
   };
 
   const selectedVersion = (versions ?? []).find((v) => v.id === productVersionId);
@@ -326,7 +351,9 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
         onRunDryRun={() => void handleRunDryRun()}
       />
 
-      {sendProgress && <AnnouncementSendProgress progress={sendProgress} />}
+      {sendProgress && (
+        <AnnouncementSendProgress progress={sendProgress} projectLabel={projectLabel} />
+      )}
 
       <Box
         sx={{

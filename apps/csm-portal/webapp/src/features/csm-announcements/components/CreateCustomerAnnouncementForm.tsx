@@ -24,7 +24,7 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { useMemo, useState, type JSX } from "react";
+import { useCallback, useMemo, useState, type JSX } from "react";
 import type { BeSubscriptionType } from "@api/backend/types";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
@@ -122,6 +122,10 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [sendProgress, setSendProgress] = useState<AnnouncementSendProgressState | null>(null);
+  // Populated as the user picks "specific" projects (see
+  // AudienceScopeControls' onProjectKeysChange) so a failed project can be
+  // shown by its short key instead of its raw id.
+  const [pickedProjectKeyById, setPickedProjectKeyById] = useState<Map<string, string>>(new Map());
 
   const postCase = usePostCsmCase();
   const addTag = useAddTagToCase();
@@ -155,6 +159,24 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     [scope, resolvedAudience.projects, projectIds],
   );
 
+  // id → short key ("CUPPTSUB") for whichever audience source is active, so
+  // a failed project can be shown by something readable instead of its raw
+  // id — in both the live progress card and the summary error message.
+  const projectKeyById = useMemo(() => {
+    if (scope === "all") {
+      const m = new Map<string, string>();
+      resolvedAudience.projects.forEach((p) => {
+        if (p.key) m.set(p.id, p.key);
+      });
+      return m;
+    }
+    return pickedProjectKeyById;
+  }, [scope, resolvedAudience.projects, pickedProjectKeyById]);
+  const projectLabel = useCallback(
+    (projectId: string) => projectKeyById.get(projectId) ?? projectId,
+    [projectKeyById],
+  );
+
   const canSubmit = useMemo(
     () =>
       targetProjectIds.length > 0 &&
@@ -182,7 +204,13 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const handleSubmit = async (): Promise<void> => {
     if (!canSubmit) return;
     setSubmitting(true);
-    setSendProgress({ total: targetProjectIds.length, completed: 0, succeeded: 0, failed: 0 });
+    setSendProgress({
+      total: targetProjectIds.length,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      failedProjectIds: [],
+    });
 
     const trimmedSubject = subject.trim();
     // Tag failures are tracked separately from create failures: the case
@@ -212,7 +240,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         }
         return created;
       },
-      (result) => {
+      (result, projectId) => {
         // Fires as each project's own create call actually settles (not in
         // original-index order) — what drives the live "N/total" card below,
         // independent of the final failure report assembled after every
@@ -223,6 +251,10 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
             completed: prev.completed + 1,
             succeeded: prev.succeeded + (result.status === "fulfilled" ? 1 : 0),
             failed: prev.failed + (result.status === "rejected" ? 1 : 0),
+            failedProjectIds:
+              result.status === "rejected"
+                ? [...prev.failedProjectIds, projectId]
+                : prev.failedProjectIds,
           },
         );
       },
@@ -242,36 +274,48 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     }
 
     const succeededCount = targetProjectIds.length - failedProjectIds.length;
-    if (succeededCount > 0) {
-      // Partial failure: the succeeded creates already landed and aren't
-      // retried automatically, so navigate away and surface exactly which
-      // project(s) still need attention — a failed create needs retrying,
-      // a failed tag attach just needs the label added by hand.
-      const messages: string[] = [];
-      if (failedProjectIds.length > 0) {
-        messages.push(
-          `created for ${succeededCount} of ${targetProjectIds.length} project${
-            targetProjectIds.length === 1 ? "" : "s"
-          }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds.join(
-            ", ",
-          )} — create it again for the failed project${failedProjectIds.length === 1 ? "" : "s"} only`,
-        );
-      } else {
-        messages.push(`created for all ${targetProjectIds.length} project${targetProjectIds.length === 1 ? "" : "s"}`);
-      }
-      if (failedTagProjectIds.length > 0) {
-        messages.push(
-          `the security label couldn't be attached for project${
-            failedTagProjectIds.length === 1 ? "" : "s"
-          } ${failedTagProjectIds.join(", ")} — add it manually on ${
-            failedTagProjectIds.length === 1 ? "that case" : "those cases"
-          }`,
-        );
-      }
-      showError(`The announcement was ${messages.join("; ")}.`);
-      navigate(BACK_TARGET);
-    } else {
+    if (succeededCount === 0) {
+      // Every create call failed — nothing to report per-project beyond
+      // what the progress card's own failed-id chips already show.
       showError("Could not create the announcement. Please try again.");
+      return;
+    }
+
+    const messages: string[] = [];
+    if (failedProjectIds.length > 0) {
+      messages.push(
+        `created for ${succeededCount} of ${targetProjectIds.length} project${
+          targetProjectIds.length === 1 ? "" : "s"
+        }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds
+          .map(projectLabel)
+          .join(", ")} — create it again for the failed project${
+          failedProjectIds.length === 1 ? "" : "s"
+        } only`,
+      );
+    } else {
+      messages.push(`created for all ${targetProjectIds.length} project${targetProjectIds.length === 1 ? "" : "s"}`);
+    }
+    if (failedTagProjectIds.length > 0) {
+      messages.push(
+        `the security label couldn't be attached for project${
+          failedTagProjectIds.length === 1 ? "" : "s"
+        } ${failedTagProjectIds.map(projectLabel).join(", ")} — add it manually on ${
+          failedTagProjectIds.length === 1 ? "that case" : "those cases"
+        }`,
+      );
+    }
+    showError(`The announcement was ${messages.join("; ")}.`);
+
+    // A create failure means at least one customer project never got the
+    // announcement at all — stay on this page (instead of navigating back
+    // to the list) so the failed-project chips on the progress card above
+    // stay visible for the sender to identify and retry, rather than only
+    // living in a toast that's gone the moment they navigate elsewhere. A
+    // tag-attach-only failure doesn't block navigation: every case was
+    // created successfully, so there's nothing left here that needs the
+    // sender's attention beyond what the error banner already told them.
+    if (failedProjectIds.length === 0) {
+      navigate(BACK_TARGET);
     }
   };
 
@@ -290,6 +334,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
             onExcludeClosedStatesChange={setExcludeClosedStates}
             excludedProjectKeys={excludedProjectKeysQuery.data ?? []}
             disabled={submitting}
+            onProjectKeysChange={setPickedProjectKeyById}
           />
         </Grid>
 
@@ -367,7 +412,9 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         onRunDryRun={() => void handleRunDryRun()}
       />
 
-      {sendProgress && <AnnouncementSendProgress progress={sendProgress} />}
+      {sendProgress && (
+        <AnnouncementSendProgress progress={sendProgress} projectLabel={projectLabel} />
+      )}
 
       <Box
         sx={{

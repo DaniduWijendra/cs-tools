@@ -46,6 +46,13 @@ interface AudienceScopeControlsProps {
    */
   excludedProjectKeys: string[];
   disabled?: boolean;
+  /**
+   * Fires with the picked projects' own short keys (e.g. "CUPPTSUB") whenever
+   * the "specific projects" selection changes — so a caller that needs to
+   * label a project by something more readable than its raw id (e.g. a
+   * failed-send report) has one available without a separate lookup.
+   */
+  onProjectKeysChange?: (keyById: Map<string, string>) => void;
 }
 
 /**
@@ -84,6 +91,7 @@ export default function AudienceScopeControls({
   onExcludeClosedStatesChange,
   excludedProjectKeys,
   disabled,
+  onProjectKeysChange,
 }: AudienceScopeControlsProps): JSX.Element {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
@@ -110,6 +118,17 @@ export default function AudienceScopeControls({
           label="Projects"
           values={projectIds}
           onChange={onProjectIdsChange}
+          onSelectedProjectsChange={
+            onProjectKeysChange
+              ? (selected) => {
+                  const keyById = new Map<string, string>();
+                  selected.forEach((o) => {
+                    if (o.key) keyById.set(o.id, o.key);
+                  });
+                  onProjectKeysChange(keyById);
+                }
+              : undefined
+          }
         />
       )}
 

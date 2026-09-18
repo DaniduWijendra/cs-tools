@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { Box, Card, LinearProgress, Typography } from "@wso2/oxygen-ui";
+import { Box, Card, Chip, LinearProgress, Typography } from "@wso2/oxygen-ui";
 import { CheckCircle, Megaphone, XCircle } from "@wso2/oxygen-ui-icons-react";
 import type { JSX } from "react";
 
@@ -23,10 +23,25 @@ export interface AnnouncementSendProgressState {
   completed: number;
   succeeded: number;
   failed: number;
+  /**
+   * The project id of every case-create call that has rejected so far, in
+   * the order they failed. This is the part that actually matters to the
+   * sender: a bare failed *count* doesn't tell them which customer projects
+   * didn't get the announcement and need a manual retry — only the ids do.
+   */
+  failedProjectIds: string[];
 }
 
 interface AnnouncementSendProgressProps {
   progress: AnnouncementSendProgressState;
+  /**
+   * Resolves a project id to a human-readable label (its short key, e.g.
+   * "CUPPTSUB") for display. `failedProjectIds` itself stays raw ids — that's
+   * what the rest of the form's own retry/error-message logic keys off —
+   * this only affects what the chip below shows. Defaults to the id itself
+   * when omitted, or when a given id has no known key yet.
+   */
+  projectLabel?: (projectId: string) => string;
 }
 
 /**
@@ -41,16 +56,18 @@ interface AnnouncementSendProgressProps {
  *
  * Stays mounted after the batch finishes, showing the final tally ("N/N",
  * "Announcement sent") — for a full success both forms navigate away
- * immediately after, so this is only visible for a moment, but on a partial
- * or total failure the form stays on screen (no navigate) and this card's
- * final counts sit alongside the existing error banner, which separately
- * reports the outcome by project id for retrying. A fresh submit resets the
- * counts back to 0 before the next batch starts.
+ * immediately after, so this is only visible for a moment. On a case-create
+ * failure (partial or total) the form deliberately stays on screen instead
+ * of navigating away, so this card's own failed-project-id chips remain
+ * visible for the sender to act on directly, alongside the existing error
+ * banner's own summary. A fresh submit resets everything (including the
+ * failed-id list) back to empty before the next batch starts.
  */
 export default function AnnouncementSendProgress({
   progress,
+  projectLabel = (projectId) => projectId,
 }: AnnouncementSendProgressProps): JSX.Element {
-  const { total, completed, succeeded, failed } = progress;
+  const { total, completed, succeeded, failed, failedProjectIds } = progress;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   return (
@@ -102,6 +119,25 @@ export default function AnnouncementSendProgress({
           </Box>
         )}
       </Box>
+
+      {failedProjectIds.length > 0 && (
+        <Box>
+          <Typography variant="caption" color="error.main" fontWeight={600} sx={{ display: "block", mb: 0.5 }}>
+            Didn&apos;t receive the announcement — retry these project{failedProjectIds.length === 1 ? "" : "s"}:
+          </Typography>
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+            {failedProjectIds.map((projectId) => (
+              <Chip
+                key={projectId}
+                label={projectLabel(projectId)}
+                size="small"
+                color="error"
+                variant="outlined"
+              />
+            ))}
+          </Box>
+        </Box>
+      )}
     </Card>
   );
 }
