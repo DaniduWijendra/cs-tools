@@ -23,10 +23,14 @@
 // They are skipped unless ENTITY_TEST_DATABASE_URL is set, so an ordinary
 // `go test ./...` on a machine with no database stays green:
 //
+// Apply every migration in order rather than picking files by hand — these
+// tests read columns and enum types spread across several of them (the
+// choreo_application_status_enum and the project table from 000009, the two
+// secret-key columns from 000067), and a hand-picked subset fails on the first
+// query rather than at setup:
+//
 //	createdb entity_test
-//	psql -d entity_test -f migrations/000001_users_table.up.sql
-//	psql -d entity_test -f migrations/000008_accounts_table.up.sql
-//	psql -d entity_test -f migrations/000009_projects_table.up.sql
+//	for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d entity_test -f "$f"; done
 //	ENTITY_TEST_DATABASE_URL="postgres:///entity_test" go test -v -run TestIntegration ./internal/repository/
 
 package repository

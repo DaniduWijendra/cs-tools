@@ -198,15 +198,25 @@ rather than async.
 
 ### Product-consumption provisioning state
 
-`project_consumption` (migration `000014`) stores where a project has got to in the
-product-consumption provisioning flow: the Choreo application created for it, that application's
-OAuth2 credentials, and the two subscription secret keys a deployment's license is built from.
-Exposed at `GET /projects/{id}/consumption` and `PATCH /projects/{id}/consumption`.
+Where a project has got to in the product-consumption provisioning flow — the Choreo application
+created for it, that application's OAuth2 credentials, and the two subscription secret keys a
+deployment's license is built from — is stored on the **`project` table**, mirroring the ServiceNow
+`customer_project` record field for field (`choreo_application_status`, `choreo_application_id`,
+`client_id`, `client_secret`, and `primary_secret_key`/`secondary_secret_key` from migration
+`000067`). Exposed at `GET /projects/{id}/consumption` and `PATCH /projects/{id}/consumption`.
 
-This is the mirror image of the ServiceNow-only routes — it exists **only** on the Postgres path.
-On the ServiceNow path the same state lives on the `customer_project` record and is reached through
-the product-consumption scripted REST API, which the Choreo subscription operation calls directly;
-neither this service nor the ServiceNow integration service is in that path at all.
+These two routes are gated on a database being configured, **not** on the data source: the flow
+mirrors its state into Postgres alongside ServiceNow, and the deployments that need it run
+`DATA_SOURCE=servicenow`, so gating on the data source would disable the feature exactly where it
+is used. ServiceNow remains the source of truth for the status itself, read through the Choreo
+subscription operation (`internal/choreosubscription`); Postgres is written alongside and any
+divergence is logged.
+
+`POST /projects/{id}/deployments/{deploymentId}/license` is registered **independently of the
+database**. Issuing a licence reads status from ServiceNow and runs through the Choreo operation;
+Postgres is touched only to mirror state, which is best-effort and skipped entirely when there is
+no repository. It needs the operation's own configuration instead — see the deployment-licence
+variables below.
 
 The status is a step number, and it only ever moves forward: `1` pending, `2` application created,
 `3` subscribed, `4` credentials generated, `5` secret keys generated. The flow is resumable by
@@ -224,11 +234,17 @@ rather than storing these values in the clear.
 |---|---|
 | `CONSUMPTION_SECRET_KEY` | Base64-encoded 32-byte AES key (`openssl rand -base64 32`). Optional — absent disables the two routes. Rotating it makes already-stored credentials undecryptable |
 
-Only the provisioning state is served here. **License generation itself is not implemented on the
-Postgres path** and still runs in ServiceNow: it depends on the secret-shuffling and payload-signing
-script includes (`LicenseFileContentSigner`), whose output is a live contract with every deployed
-customer product, so it needs a bit-exact port verified against ServiceNow rather than a
-reimplementation from the design docs.
+**License issuance still runs in ServiceNow.** This service drives the five-step provisioning
+sequence through the Choreo subscription operation and returns the licence ServiceNow issues; the
+signed payload is passed through byte for byte, never reshaped, because the customer's product
+verifies an HMAC computed over it and a dropped field breaks that verification.
+
+`internal/license` implements the secret obfuscation and signature that ServiceNow's script
+includes produce, verified against a real record — but it is **not wired to the licence path**.
+Switching issuance over is gated on a compatibility decision: the specification flattens `secrets`
+from an object into a single string, which changes the canonical string and therefore invalidates
+every licence a deployed customer product already holds. That needs a transition plan — a verifier
+accepting both forms, or a versioned licence file — before the switch, not after.
 
 ### SLA clocks
 

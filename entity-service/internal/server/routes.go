@@ -80,24 +80,32 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// the feature exactly where it is needed. ServiceNow remains the source of
 	// truth for status, reached through the Choreo subscription operation.
 	//
-	// It needs both a pool and an encryption key, since it stores OAuth2
-	// credentials and subscription secret keys. A missing or malformed key
-	// leaves the handler nil and the routes unregistered rather than falling
-	// back to storing those values in the clear.
+	// The two halves are configured independently, because they need different
+	// things and failing one must not take out the other.
 	//
-	// Every path that leaves the routes unregistered says so at startup. A
+	// Reading and writing the stored state needs a pool and an encryption key,
+	// since it holds OAuth2 credentials and subscription secret keys; a missing
+	// or malformed key leaves those routes unregistered rather than falling
+	// back to storing the values in the clear. Issuing a licence needs neither:
+	// the sequence reads status from ServiceNow and runs through the Choreo
+	// operation, touching Postgres only to mirror state, which is best-effort
+	// and skipped entirely when there is no repository. Gating the licence
+	// route on the database would take licence downloads out of any deployment
+	// that happens not to have one — and the customer portal now issues every
+	// licence through this service.
+	//
+	// Every path that leaves a route unregistered says so at startup. A
 	// disabled route is otherwise indistinguishable from a typo in the URL —
 	// both are a bare 404 — and the one thing a person debugging that 404
 	// cannot discover from the outside is that the service deliberately chose
 	// not to register it.
-	var projectConsumptionHandler *handler.ProjectConsumptionHandler
-	var licenseProvisioningEnabled bool
+	var consumptionRepo repository.ProjectConsumptionRepository
 	switch {
 	case db == nil:
-		// Not logged: with no database pool configured, these routes cannot
-		// be registered.
+		// Not logged: with no database pool configured, stored state cannot be
+		// registered. The licence route below does not depend on it.
 	case cfg.ConsumptionSecretKey == "":
-		slog.Info("project consumption routes not registered: CONSUMPTION_SECRET_KEY is unset",
+		slog.Info("project consumption state routes not registered: CONSUMPTION_SECRET_KEY is unset",
 			"routes", "GET,PATCH /projects/{id}/consumption",
 			"reason", "these routes store OAuth2 credentials and subscription secret keys, which are never stored unencrypted")
 	default:
@@ -105,48 +113,59 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		if err != nil {
 			// The error text never contains the key itself — see
 			// crypto.KeyFromBase64.
-			slog.Error("project consumption routes not registered: invalid CONSUMPTION_SECRET_KEY",
+			slog.Error("project consumption state routes not registered: invalid CONSUMPTION_SECRET_KEY",
 				"routes", "GET,PATCH /projects/{id}/consumption", "error", err)
 			break
 		}
 		codec, err := crypto.NewAESGCMCodec(key)
 		if err != nil {
-			slog.Error("project consumption routes not registered: could not construct the codec",
+			slog.Error("project consumption state routes not registered: could not construct the codec",
 				"routes", "GET,PATCH /projects/{id}/consumption", "error", err)
 			break
 		}
-		// The licence route is gated separately from the two read/write
-		// routes: provisioning reaches an upstream that mints Choreo
-		// applications for real customers, so an unconfigured or
-		// partially-configured operation must leave that route absent rather
-		// than register something that fails — or worse, succeeds — against
-		// the wrong environment.
-		var choreoClient choreosubscription.Client
-		if cfg.ConsumptionOperationBaseURL == "" {
-			slog.Info("deployment licence route not registered: PRODUCT_CONSUMPTION_OPERATION_URL is unset",
-				"routes", "POST /projects/{id}/deployments/{deploymentId}/license")
-		} else {
-			choreoClient, err = choreosubscription.NewClient(choreosubscription.Config{
-				BaseURL: cfg.ConsumptionOperationBaseURL,
-				Creds: choreosubscription.ClientCredentialsConfig{
-					TokenURL:     cfg.ConsumptionOperationTokenURL,
-					ClientID:     cfg.ConsumptionOperationClientID,
-					ClientSecret: cfg.ConsumptionOperationClientSecret,
-					Scopes:       cfg.ConsumptionOperationScopes,
-				},
-			})
-			if err != nil {
-				// The error names the missing field, never a credential value.
-				slog.Error("deployment licence route not registered: the product-consumption operation is not fully configured",
-					"routes", "POST /projects/{id}/deployments/{deploymentId}/license", "error", err)
-				choreoClient = nil
-			}
-		}
-		licenseProvisioningEnabled = choreoClient != nil
+		consumptionRepo = repository.NewProjectConsumptionRepository(db, codec)
+	}
 
+	// Provisioning reaches an upstream that mints Choreo applications for real
+	// customers, so an unconfigured or partially-configured operation leaves
+	// the route absent rather than registering something that fails — or worse,
+	// succeeds — against the wrong environment.
+	var choreoClient choreosubscription.Client
+	if cfg.ConsumptionOperationBaseURL == "" {
+		slog.Info("deployment licence route not registered: PRODUCT_CONSUMPTION_OPERATION_URL is unset",
+			"routes", "POST /projects/{id}/deployments/{deploymentId}/license")
+	} else {
+		client, err := choreosubscription.NewClient(choreosubscription.Config{
+			BaseURL: cfg.ConsumptionOperationBaseURL,
+			Creds: choreosubscription.ClientCredentialsConfig{
+				TokenURL:     cfg.ConsumptionOperationTokenURL,
+				ClientID:     cfg.ConsumptionOperationClientID,
+				ClientSecret: cfg.ConsumptionOperationClientSecret,
+				Scopes:       cfg.ConsumptionOperationScopes,
+			},
+		})
+		if err != nil {
+			// The error names the offending field, never a credential value.
+			slog.Error("deployment licence route not registered: the product-consumption operation is not configured correctly",
+				"routes", "POST /projects/{id}/deployments/{deploymentId}/license", "error", err)
+		} else {
+			choreoClient = client
+		}
+	}
+
+	consumptionStateEnabled := consumptionRepo != nil
+	licenseProvisioningEnabled := choreoClient != nil
+
+	var projectConsumptionHandler *handler.ProjectConsumptionHandler
+	if consumptionStateEnabled || licenseProvisioningEnabled {
+		if !consumptionStateEnabled {
+			slog.Info("deployment licence route registered without Postgres state",
+				"routes", "POST /projects/{id}/deployments/{deploymentId}/license",
+				"reason", "ServiceNow remains the source of truth for status; the Postgres mirror is skipped")
+		}
 		projectConsumptionHandler = handler.NewProjectConsumptionHandler(
 			service.NewProjectConsumptionService(
-				repository.NewProjectConsumptionRepository(db, codec),
+				consumptionRepo,
 				choreoClient,
 				cfg.ConsumptionDualWriteEnabled,
 			),
@@ -661,12 +680,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
-	if projectConsumptionHandler != nil {
+	// Registered independently: the stored-state routes read and write
+	// Postgres, the licence route does not need it at all.
+	if consumptionStateEnabled {
 		mux.HandleFunc("GET /projects/{id}/consumption", projectConsumptionHandler.GetProjectConsumption)
 		mux.HandleFunc("PATCH /projects/{id}/consumption", projectConsumptionHandler.UpdateProjectConsumption)
-		if licenseProvisioningEnabled {
-			mux.HandleFunc("POST /projects/{id}/deployments/{deploymentId}/license", projectConsumptionHandler.GetDeploymentLicense)
-		}
+	}
+	if licenseProvisioningEnabled {
+		mux.HandleFunc("POST /projects/{id}/deployments/{deploymentId}/license", projectConsumptionHandler.GetDeploymentLicense)
 	}
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)

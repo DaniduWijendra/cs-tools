@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -121,6 +122,7 @@ type SecretKeysResponse struct {
 
 type licenseResult struct {
 	Success bool           `json:"success"`
+	Message string         `json:"message,omitempty"`
 	License domain.License `json:"license"`
 }
 
@@ -188,6 +190,27 @@ type client struct {
 	tokenExpiry time.Time
 }
 
+// requireSecureOrLoopback rejects a plaintext HTTP URL unless it points at the
+// local machine.
+func requireSecureOrLoopback(label, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("choreosubscription: %s is not a valid URL: %w", label, err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" || net.ParseIP(host).IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("choreosubscription: %s must use https (got http://%s)", label, host)
+	default:
+		return fmt.Errorf("choreosubscription: %s must use https, got scheme %q", label, u.Scheme)
+	}
+}
+
 // NewClient constructs a Client that authenticates against the Choreo
 // subscription operation with the OAuth2 client-credentials grant.
 //
@@ -205,6 +228,16 @@ func NewClient(cfg Config) (Client, error) {
 		return nil, errors.New("choreosubscription: client ID is required")
 	case cfg.Creds.ClientSecret == "":
 		return nil, errors.New("choreosubscription: client secret is required")
+	}
+	// The client secret travels to the token URL and the bearer token to the
+	// base URL, so neither may be plaintext HTTP off-host. Loopback is allowed
+	// so tests and a locally-run operation still work — traffic that never
+	// leaves the machine has no network to be intercepted on.
+	if err := requireSecureOrLoopback("base URL", cfg.BaseURL); err != nil {
+		return nil, err
+	}
+	if err := requireSecureOrLoopback("token URL", cfg.Creds.TokenURL); err != nil {
+		return nil, err
 	}
 
 	httpClient := cfg.HTTPClient
@@ -332,6 +365,20 @@ func (c *client) GetDeploymentLicense(ctx context.Context, projectID, deployment
 	err := c.postJSON(ctx, path, req, &out)
 	if err != nil {
 		return domain.License{}, err
+	}
+	// A refusal arrives as a 200 carrying success:false — "Deployment not
+	// found" is the one seen in practice. Without this check the caller gets an
+	// empty licence and no error, and hands the customer a file with no
+	// subscription data and no signature.
+	if !out.Result.Success {
+		msg := out.Result.Message
+		if msg == "" {
+			msg = "no reason given"
+		}
+		return domain.License{}, fmt.Errorf("choreosubscription: the licensing service did not issue a licence: %s", msg)
+	}
+	if len(out.Result.License.SubscriptionData) == 0 {
+		return domain.License{}, errors.New("choreosubscription: the licensing service reported success but returned no subscription data")
 	}
 	return out.Result.License, nil
 }

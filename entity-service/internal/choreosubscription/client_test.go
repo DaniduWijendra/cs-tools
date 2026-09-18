@@ -113,6 +113,78 @@ func TestNewClient_RequiresCredentials(t *testing.T) {
 	}
 }
 
+// A refusal arrives as a 200 carrying success:false. Returning the empty
+// licence in that case would hand the customer a file with no subscription
+// data and no signature, and no error to say why.
+func TestClient_GetDeploymentLicense_RejectsUnsuccessfulResult(t *testing.T) {
+	server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"success":false,"message":"Deployment not found"}}`))
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server).GetDeploymentLicense(
+		context.Background(), "proj-1", "dep-1", domain.DeploymentLicenseRequest{Email: "user@example.com"})
+	if err == nil {
+		t.Fatal("expected an error when the licensing service reports success:false")
+	}
+	if !strings.Contains(err.Error(), "Deployment not found") {
+		t.Errorf("the upstream reason should reach the caller, got %v", err)
+	}
+}
+
+// success:true with nothing in it is equally unusable and must not pass.
+func TestClient_GetDeploymentLicense_RejectsEmptySubscriptionData(t *testing.T) {
+	server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"success":true,"license":{"signature":"sig"}}}`))
+	}))
+	defer server.Close()
+
+	if _, err := newTestClient(t, server).GetDeploymentLicense(
+		context.Background(), "proj-1", "dep-1", domain.DeploymentLicenseRequest{Email: "user@example.com"},
+	); err == nil {
+		t.Fatal("expected an error when subscriptionData is absent")
+	}
+}
+
+// The client secret travels to the token URL and the bearer token to the base
+// URL, so plaintext HTTP off-host must be refused at construction.
+func TestNewClient_RejectsPlaintextHTTPOffHost(t *testing.T) {
+	base := Config{
+		BaseURL: "https://example.invalid",
+		Creds: ClientCredentialsConfig{
+			TokenURL:     "https://example.invalid/token",
+			ClientID:     "id",
+			ClientSecret: "secret",
+		},
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"http base URL":  func(c *Config) { c.BaseURL = "http://example.invalid" },
+		"http token URL": func(c *Config) { c.Creds.TokenURL = "http://example.invalid/token" },
+		"non-http scheme": func(c *Config) {
+			c.BaseURL = "ftp://example.invalid"
+		},
+	} {
+		cfg := base
+		mutate(&cfg)
+		if _, err := NewClient(cfg); err == nil {
+			t.Errorf("%s: expected an error, got a usable client", name)
+		}
+	}
+
+	// Loopback stays allowed, or every test server and local run breaks.
+	for _, loopback := range []string{"http://localhost:9095", "http://127.0.0.1:9095", "http://[::1]:9095"} {
+		cfg := base
+		cfg.BaseURL = loopback
+		cfg.Creds.TokenURL = loopback + "/token"
+		if _, err := NewClient(cfg); err != nil {
+			t.Errorf("loopback %s must be allowed: %v", loopback, err)
+		}
+	}
+}
+
 func TestClient_GetConsumptionStatus(t *testing.T) {
 	projectUUID := "12345678-1234-1234-1234-123456789abc"
 	expectedSysID := "12345678123412341234123456789abc"
