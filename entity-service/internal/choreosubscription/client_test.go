@@ -133,18 +133,31 @@ func TestClient_GetDeploymentLicense_RejectsUnsuccessfulResult(t *testing.T) {
 	}
 }
 
-// success:true with nothing in it is equally unusable and must not pass.
-func TestClient_GetDeploymentLicense_RejectsEmptySubscriptionData(t *testing.T) {
-	server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"result":{"success":true,"license":{"signature":"sig"}}}`))
-	}))
-	defer server.Close()
+// success:true with nothing usable in it must not pass either.
+//
+// JSON null is the case a length check misses: json.RawMessage stores it as the
+// four bytes "null", which is non-empty but carries nothing to sign or verify,
+// and would reach the customer as a licence their product cannot parse.
+func TestClient_GetDeploymentLicense_RejectsUnusableSubscriptionData(t *testing.T) {
+	for name, body := range map[string]string{
+		"absent":      `{"result":{"success":true,"license":{"signature":"sig"}}}`,
+		"json null":   `{"result":{"success":true,"license":{"subscriptionData":null,"signature":"sig"}}}`,
+		"json string": `{"result":{"success":true,"license":{"subscriptionData":"","signature":"sig"}}}`,
+		"json array":  `{"result":{"success":true,"license":{"subscriptionData":[],"signature":"sig"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
 
-	if _, err := newTestClient(t, server).GetDeploymentLicense(
-		context.Background(), "proj-1", "dep-1", domain.DeploymentLicenseRequest{Email: "user@example.com"},
-	); err == nil {
-		t.Fatal("expected an error when subscriptionData is absent")
+			if _, err := newTestClient(t, server).GetDeploymentLicense(
+				context.Background(), "proj-1", "dep-1", domain.DeploymentLicenseRequest{Email: "user@example.com"},
+			); err == nil {
+				t.Fatalf("expected an error for subscriptionData %s", name)
+			}
+		})
 	}
 }
 

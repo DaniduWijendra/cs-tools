@@ -377,10 +377,22 @@ func (c *client) GetDeploymentLicense(ctx context.Context, projectID, deployment
 		}
 		return domain.License{}, fmt.Errorf("choreosubscription: the licensing service did not issue a licence: %s", msg)
 	}
-	if len(out.Result.License.SubscriptionData) == 0 {
+	if !isJSONObject(out.Result.License.SubscriptionData) {
 		return domain.License{}, errors.New("choreosubscription: the licensing service reported success but returned no subscription data")
 	}
 	return out.Result.License, nil
+}
+
+// isJSONObject reports whether raw holds a JSON object.
+//
+// A length check alone is not enough: json.RawMessage stores JSON null as the
+// four bytes "null", which is non-empty but carries nothing to sign or verify,
+// and both licence schemas declare subscriptionData an object. Anything that is
+// not an object would reach the customer as a licence their product cannot
+// parse.
+func isJSONObject(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func (c *client) postJSON(ctx context.Context, path string, body any, out any) error {
