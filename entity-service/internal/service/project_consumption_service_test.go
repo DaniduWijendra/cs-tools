@@ -19,10 +19,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -83,7 +85,7 @@ func TestGetProjectConsumption_NeverReturnsSecrets(t *testing.T) {
 			SecondarySecretKey:  strPtrLocal(secondary),
 		},
 	}
-	svc := NewProjectConsumptionService(repo)
+	svc := NewProjectConsumptionService(repo, nil, true)
 
 	view, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID)
 	if err != nil {
@@ -118,7 +120,7 @@ func TestGetProjectConsumption_UnprovisionedProjectIsPending(t *testing.T) {
 		key:   "ACME-PROD",
 		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusPending},
 	}
-	svc := NewProjectConsumptionService(repo)
+	svc := NewProjectConsumptionService(repo, nil, true)
 
 	view, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID)
 	if err != nil {
@@ -133,7 +135,7 @@ func TestGetProjectConsumption_UnprovisionedProjectIsPending(t *testing.T) {
 }
 
 func TestGetProjectConsumption_RejectsNonUUID(t *testing.T) {
-	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{})
+	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, nil, true)
 
 	_, err := svc.GetProjectConsumption(context.Background(), "6fa0b42d1bfa4a69a002c9d3604bcb77")
 	var validationErr *apierror.ValidationError
@@ -196,7 +198,7 @@ func TestUpdateProjectConsumption_RequiresStepArtefacts(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			repo := &fakeProjectConsumptionRepo{}
-			svc := NewProjectConsumptionService(repo)
+			svc := NewProjectConsumptionService(repo, nil, true)
 
 			_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID, tc.req)
 			var validationErr *apierror.ValidationError
@@ -221,7 +223,7 @@ func TestUpdateProjectConsumption_SubscribedNeedsNoArtefacts(t *testing.T) {
 		key:   "ACME",
 		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusSubscribed},
 	}
-	svc := NewProjectConsumptionService(repo)
+	svc := NewProjectConsumptionService(repo, nil, true)
 
 	_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{Status: int16(domain.ConsumptionStatusSubscribed)})
@@ -236,7 +238,7 @@ func TestUpdateProjectConsumption_SubscribedNeedsNoArtefacts(t *testing.T) {
 func TestUpdateProjectConsumption_RejectsOutOfRangeStatus(t *testing.T) {
 	for _, status := range []int16{0, 6, -1, 100} {
 		repo := &fakeProjectConsumptionRepo{}
-		svc := NewProjectConsumptionService(repo)
+		svc := NewProjectConsumptionService(repo, nil, true)
 
 		_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 			domain.UpdateProjectConsumptionRequest{Status: status})
@@ -265,7 +267,7 @@ func TestUpdateProjectConsumption_StaleStatusIsNoOp(t *testing.T) {
 			ConsumerSecret:      strPtrLocal("secret"),
 		},
 	}
-	svc := NewProjectConsumptionService(repo)
+	svc := NewProjectConsumptionService(repo, nil, true)
 
 	resp, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{
@@ -287,7 +289,7 @@ func TestUpdateProjectConsumption_StaleStatusIsNoOp(t *testing.T) {
 // write: recording step 4 must not clear step 2's application id.
 func TestUpdateProjectConsumption_ForwardsOnlySuppliedFields(t *testing.T) {
 	repo := &fakeProjectConsumptionRepo{name: "Acme", key: "ACME"}
-	svc := NewProjectConsumptionService(repo)
+	svc := NewProjectConsumptionService(repo, nil, true)
 
 	_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{
@@ -306,5 +308,287 @@ func TestUpdateProjectConsumption_ForwardsOnlySuppliedFields(t *testing.T) {
 	}
 	if repo.gotUpsert.ConsumerKey == nil || *repo.gotUpsert.ConsumerKey != "k" {
 		t.Fatalf("consumerKey was not forwarded: %+v", repo.gotUpsert.ConsumerKey)
+	}
+}
+
+type fakeChoreoSubscriptionClient struct {
+	statusRes         choreosubscription.ConsumptionResult
+	statusErr         error
+	createAppRes      choreosubscription.ApplicationCreateResponse
+	createAppErr      error
+	subscribeRes      choreosubscription.ApplicationSubscriptionResponse
+	subscribeErr      error
+	generateCredsRes  choreosubscription.ApplicationKeyGenerationResponse
+	generateCredsErr  error
+	generateSecretRes choreosubscription.SecretKeysResponse
+	generateSecretErr error
+	updateStatusRes   choreosubscription.ConsumptionResult
+	updateStatusErr   error
+	licenseRes        domain.License
+	licenseErr        error
+
+	statusCalls         int
+	createAppCalls      int
+	subscribeCalls      int
+	generateCredsCalls  int
+	generateSecretCalls int
+	updateStatusCalls   []choreosubscription.UpdateProjectStatusRequest
+	licenseCalls        int
+}
+
+func (f *fakeChoreoSubscriptionClient) GetConsumptionStatus(_ context.Context, _ string, _ choreosubscription.ConsumptionStatusRequest) (choreosubscription.ConsumptionResult, error) {
+	f.statusCalls++
+	return f.statusRes, f.statusErr
+}
+
+func (f *fakeChoreoSubscriptionClient) CreateApplication(_ context.Context, _ choreosubscription.ApplicationCreateRequest) (choreosubscription.ApplicationCreateResponse, error) {
+	f.createAppCalls++
+	return f.createAppRes, f.createAppErr
+}
+
+func (f *fakeChoreoSubscriptionClient) SubscribeApplication(_ context.Context, _ string) (choreosubscription.ApplicationSubscriptionResponse, error) {
+	f.subscribeCalls++
+	return f.subscribeRes, f.subscribeErr
+}
+
+func (f *fakeChoreoSubscriptionClient) GenerateCredentials(_ context.Context, _ string) (choreosubscription.ApplicationKeyGenerationResponse, error) {
+	f.generateCredsCalls++
+	return f.generateCredsRes, f.generateCredsErr
+}
+
+func (f *fakeChoreoSubscriptionClient) GenerateSecretKeys(_ context.Context) (choreosubscription.SecretKeysResponse, error) {
+	f.generateSecretCalls++
+	return f.generateSecretRes, f.generateSecretErr
+}
+
+func (f *fakeChoreoSubscriptionClient) UpdateProjectStatus(_ context.Context, _ string, req choreosubscription.UpdateProjectStatusRequest) (choreosubscription.ConsumptionResult, error) {
+	f.updateStatusCalls = append(f.updateStatusCalls, req)
+	return f.updateStatusRes, f.updateStatusErr
+}
+
+func (f *fakeChoreoSubscriptionClient) GetDeploymentLicense(_ context.Context, _, _ string, _ domain.DeploymentLicenseRequest) (domain.License, error) {
+	f.licenseCalls++
+	return f.licenseRes, f.licenseErr
+}
+
+func TestProcessLicenseDownload_FullFlow(t *testing.T) {
+	repo := &fakeProjectConsumptionRepo{
+		name:  "Acme",
+		key:   "ACME",
+		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusPending},
+	}
+	appID := "app-xyz"
+	appName := "ACME-APP"
+	appDesc := "Description for ACME"
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:      1,
+				Name:        &appName,
+				Description: &appDesc,
+			},
+		},
+		createAppRes: choreosubscription.ApplicationCreateResponse{
+			ApplicationID: appID,
+		},
+		generateCredsRes: choreosubscription.ApplicationKeyGenerationResponse{
+			ConsumerKey:    "ck-123",
+			ConsumerSecret: "cs-123",
+		},
+		generateSecretRes: choreosubscription.SecretKeysResponse{
+			PrimarySecretKey:   "pk-123",
+			SecondarySecretKey: "sk-123",
+		},
+		licenseRes: domain.License{
+			Signature: "test-sig",
+			SubscriptionData: domain.SubscriptionData{
+				DeploymentID: "11111111-1111-1111-1111-111111111111",
+			},
+		},
+	}
+	svc := NewProjectConsumptionService(repo, choreo, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lic.Signature != "test-sig" {
+		t.Fatalf("got signature %q, want test-sig", lic.Signature)
+	}
+	if choreo.createAppCalls != 1 {
+		t.Errorf("got %d createApp calls, want 1", choreo.createAppCalls)
+	}
+	if choreo.subscribeCalls != 1 {
+		t.Errorf("got %d subscribe calls, want 1", choreo.subscribeCalls)
+	}
+	if choreo.generateCredsCalls != 1 {
+		t.Errorf("got %d generateCreds calls, want 1", choreo.generateCredsCalls)
+	}
+	if choreo.generateSecretCalls != 1 {
+		t.Errorf("got %d generateSecret calls, want 1", choreo.generateSecretCalls)
+	}
+	if len(choreo.updateStatusCalls) != 4 {
+		t.Fatalf("got %d updateStatus calls, want 4", len(choreo.updateStatusCalls))
+	}
+	if repo.upsertCalls != 4 {
+		t.Fatalf("got %d repo upsert calls, want 4", repo.upsertCalls)
+	}
+}
+
+func TestProcessLicenseDownload_ResumeFromSubscribed(t *testing.T) {
+	repo := &fakeProjectConsumptionRepo{
+		name:  "Acme",
+		key:   "ACME",
+		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusSubscribed},
+	}
+	appID := "app-xyz"
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:        3,
+				ApplicationID: &appID,
+			},
+		},
+		generateCredsRes: choreosubscription.ApplicationKeyGenerationResponse{
+			ConsumerKey:    "ck-123",
+			ConsumerSecret: "cs-123",
+		},
+		generateSecretRes: choreosubscription.SecretKeysResponse{
+			PrimarySecretKey:   "pk-123",
+			SecondarySecretKey: "sk-123",
+		},
+		licenseRes: domain.License{Signature: "sig-resumed"},
+	}
+	svc := NewProjectConsumptionService(repo, choreo, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lic.Signature != "sig-resumed" {
+		t.Fatalf("got signature %q, want sig-resumed", lic.Signature)
+	}
+	if choreo.createAppCalls != 0 || choreo.subscribeCalls != 0 {
+		t.Errorf("createApp (%d) or subscribe (%d) called on resume from step 3", choreo.createAppCalls, choreo.subscribeCalls)
+	}
+	if choreo.generateCredsCalls != 1 || choreo.generateSecretCalls != 1 {
+		t.Errorf("creds (%d) or secret (%d) not called as expected", choreo.generateCredsCalls, choreo.generateSecretCalls)
+	}
+	if len(choreo.updateStatusCalls) != 2 {
+		t.Errorf("got %d updateStatus calls, want 2", len(choreo.updateStatusCalls))
+	}
+}
+
+func TestProcessLicenseDownload_CompletedDirectLicense(t *testing.T) {
+	appID := "app-xyz"
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:        5,
+				ApplicationID: &appID,
+			},
+		},
+		licenseRes: domain.License{Signature: "sig-direct"},
+	}
+	repo := &fakeProjectConsumptionRepo{}
+	svc := NewProjectConsumptionService(repo, choreo, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lic.Signature != "sig-direct" {
+		t.Fatalf("got signature %q, want sig-direct", lic.Signature)
+	}
+	if choreo.licenseCalls != 1 || len(choreo.updateStatusCalls) != 0 || repo.upsertCalls != 0 {
+		t.Fatalf("completed status mutated state: updateCalls=%d upsertCalls=%d", len(choreo.updateStatusCalls), repo.upsertCalls)
+	}
+}
+
+func TestProcessLicenseDownload_PostgresWriteErrorIsNonFatal(t *testing.T) {
+	appID := "app-xyz"
+	appName := "ACME-APP"
+	appDesc := "Description for ACME"
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:      1,
+				Name:        &appName,
+				Description: &appDesc,
+			},
+		},
+		createAppRes: choreosubscription.ApplicationCreateResponse{
+			ApplicationID: appID,
+		},
+		generateCredsRes: choreosubscription.ApplicationKeyGenerationResponse{
+			ConsumerKey:    "ck-123",
+			ConsumerSecret: "cs-123",
+		},
+		generateSecretRes: choreosubscription.SecretKeysResponse{
+			PrimarySecretKey:   "pk-123",
+			SecondarySecretKey: "sk-123",
+		},
+		licenseRes: domain.License{Signature: "sig-db-err"},
+	}
+	repo := &fakeProjectConsumptionRepo{upsertErr: errors.New("db write failed")}
+	svc := NewProjectConsumptionService(repo, choreo, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err != nil {
+		t.Fatalf("postgres upsert error must be non-fatal, got %v", err)
+	}
+	if lic.Signature != "sig-db-err" {
+		t.Fatalf("got signature %q, want sig-db-err", lic.Signature)
+	}
+}
+
+func TestProcessLicenseDownload_ServiceNowWriteErrorIsFatal(t *testing.T) {
+	appID := "app-xyz"
+	appName := "ACME-APP"
+	appDesc := "Description for ACME"
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:      1,
+				Name:        &appName,
+				Description: &appDesc,
+			},
+		},
+		createAppRes: choreosubscription.ApplicationCreateResponse{
+			ApplicationID: appID,
+		},
+		updateStatusErr: errors.New("servicenow update failed"),
+	}
+	repo := &fakeProjectConsumptionRepo{}
+	svc := NewProjectConsumptionService(repo, choreo, true)
+
+	_, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err == nil {
+		t.Fatal("expected error when servicenow update fails, got nil")
+	}
+	if choreo.subscribeCalls != 0 {
+		t.Errorf("subscribe called despite previous step failing")
+	}
+}
+
+func TestProcessLicenseDownload_ValidationErrors(t *testing.T) {
+	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, &fakeChoreoSubscriptionClient{}, true)
+
+	// Bad project ID
+	_, err := svc.ProcessLicenseDownload(context.Background(), "invalid-uuid", "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+	if err == nil {
+		t.Fatal("expected validation error for invalid project ID")
+	}
+
+	// Bad deployment ID
+	_, err = svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "invalid-uuid", "test@wso2.com")
+	if err == nil {
+		t.Fatal("expected validation error for invalid deployment ID")
+	}
+
+	// Empty email
+	_, err = svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "")
+	if err == nil {
+		t.Fatal("expected validation error for empty email")
 	}
 }

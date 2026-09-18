@@ -116,3 +116,25 @@ type UpdateProjectConsumptionResponse struct {
 	Message string                 `json:"message"`
 	Result  ProjectConsumptionView `json:"result"`
 }
+
+// SubscriptionData carries the deployment's license/subscription details.
+type SubscriptionData struct {
+	DeploymentID    string `json:"deploymentId"`
+	DeploymentName  string `json:"deploymentName"`
+	SubscriptionKey string `json:"subscriptionKey"`
+	ClientID        string `json:"clientId"`
+	ClientSecret    string `json:"clientSecret"`
+	Secrets         string `json:"secrets"`
+}
+
+// License is the deployment license payload issued by ServiceNow.
+type License struct {
+	SubscriptionData SubscriptionData `json:"subscriptionData"`
+	Signature        string           `json:"signature"`
+}
+
+// DeploymentLicenseRequest is the request body for
+// POST /projects/{id}/deployments/{deploymentId}/license.
+type DeploymentLicenseRequest struct {
+	Email string `json:"email"`
+}

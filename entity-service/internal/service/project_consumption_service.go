@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -39,13 +41,23 @@ import (
 const consumptionApplicationDescription = "Product consumption tracking application for project %s (%s)"
 
 type projectConsumptionService struct {
-	repo repository.ProjectConsumptionRepository
+	repo         repository.ProjectConsumptionRepository
+	choreoClient choreosubscription.Client
+	dualWrite    bool
 }
 
 // NewProjectConsumptionService constructs a ProjectConsumptionService backed by
-// the given repository.
-func NewProjectConsumptionService(repo repository.ProjectConsumptionRepository) ProjectConsumptionService {
-	return &projectConsumptionService{repo: repo}
+// the given repository, Choreo subscription client, and dual-write setting.
+func NewProjectConsumptionService(
+	repo repository.ProjectConsumptionRepository,
+	choreoClient choreosubscription.Client,
+	dualWrite bool,
+) ProjectConsumptionService {
+	return &projectConsumptionService{
+		repo:         repo,
+		choreoClient: choreoClient,
+		dualWrite:    dualWrite,
+	}
 }
 
 // GetProjectConsumption implements ProjectConsumptionService.
@@ -179,4 +191,183 @@ func toProjectConsumptionView(state domain.ProjectConsumption, name, key string)
 		HasSecretKeys:     state.PrimarySecretKey != nil && state.SecondarySecretKey != nil,
 		UpdatedOn:         state.UpdatedOn,
 	}
+}
+
+// ProcessLicenseDownload implements ProjectConsumptionService.
+//
+// Drives the upstream Choreo subscription operation's 5-step resumable
+// state machine to issue a signed deployment license. ServiceNow mutation
+// is fatal; Postgres dual-write is non-fatal (logged on failure) so
+// license issuance cannot fail due to secondary store transient errors,
+// while ServiceNow never falls behind.
+func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, projectID, deploymentID, email string) (domain.License, error) {
+	if err := validateUUIDs("projectId", []string{projectID}); err != nil {
+		return domain.License{}, err
+	}
+	if err := validateUUIDs("deploymentId", []string{deploymentID}); err != nil {
+		return domain.License{}, err
+	}
+	if email == "" {
+		return domain.License{}, &apierror.ValidationError{Msg: "email is required"}
+	}
+	if s.choreoClient == nil {
+		return domain.License{}, errors.New("choreo subscription client not configured")
+	}
+
+	statusRes, err := s.choreoClient.GetConsumptionStatus(ctx, projectID, choreosubscription.ConsumptionStatusRequest{
+		Email:        email,
+		DeploymentID: deploymentID,
+	})
+	if err != nil {
+		return domain.License{}, fmt.Errorf("choreosubscription: get consumption status: %w", err)
+	}
+
+	if s.repo != nil {
+		pgState, _, _, getErr := s.repo.Get(ctx, projectID)
+		if getErr == nil {
+			if int(pgState.Status) != int(statusRes.Result.Status) {
+				slog.WarnContext(ctx, "project consumption status diverged between stores",
+					"projectId", projectID,
+					"serviceNowStatus", int(statusRes.Result.Status),
+					"postgresStatus", int(pgState.Status),
+				)
+			}
+		}
+	}
+
+	status := int(statusRes.Result.Status)
+	applicationID := statusRes.Result.ApplicationID
+
+	if status == int(domain.ConsumptionStatusPending) {
+		if statusRes.Result.Name == nil || statusRes.Result.Description == nil {
+			return domain.License{}, fmt.Errorf("application is PENDING but the licensing service supplied no name/description for project %s", projectID)
+		}
+		app, err := s.choreoClient.CreateApplication(ctx, choreosubscription.ApplicationCreateRequest{
+			Name:        *statusRes.Result.Name,
+			Description: *statusRes.Result.Description,
+		})
+		if err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: create application: %w", err)
+		}
+		applicationID = &app.ApplicationID
+
+		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
+			Status:        int(domain.ConsumptionStatusCreated),
+			ApplicationID: applicationID,
+		}); err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: update project status to created: %w", err)
+		}
+
+		if s.dualWrite && s.repo != nil {
+			if _, err := s.repo.Upsert(ctx, projectID, domain.ProjectConsumption{
+				Status:              domain.ConsumptionStatusCreated,
+				ChoreoApplicationID: applicationID,
+			}); err != nil {
+				slog.ErrorContext(ctx, "failed to dual-write project consumption to postgres",
+					"projectId", projectID,
+					"status", domain.ConsumptionStatusCreated,
+					"err", err,
+				)
+			}
+		}
+		status = int(domain.ConsumptionStatusCreated)
+	}
+
+	if applicationID == nil {
+		return domain.License{}, fmt.Errorf("no application id for project %s after reaching status %d", projectID, status)
+	}
+
+	if status == int(domain.ConsumptionStatusCreated) {
+		if _, err := s.choreoClient.SubscribeApplication(ctx, *applicationID); err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: subscribe application: %w", err)
+		}
+		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
+			Status: int(domain.ConsumptionStatusSubscribed),
+		}); err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: update project status to subscribed: %w", err)
+		}
+
+		if s.dualWrite && s.repo != nil {
+			if _, err := s.repo.Upsert(ctx, projectID, domain.ProjectConsumption{
+				Status: domain.ConsumptionStatusSubscribed,
+			}); err != nil {
+				slog.ErrorContext(ctx, "failed to dual-write project consumption to postgres",
+					"projectId", projectID,
+					"status", domain.ConsumptionStatusSubscribed,
+					"err", err,
+				)
+			}
+		}
+		status = int(domain.ConsumptionStatusSubscribed)
+	}
+
+	if status == int(domain.ConsumptionStatusSubscribed) {
+		creds, err := s.choreoClient.GenerateCredentials(ctx, *applicationID)
+		if err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: generate credentials: %w", err)
+		}
+		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
+			Status:         int(domain.ConsumptionStatusGeneratedCredentials),
+			ConsumerKey:    &creds.ConsumerKey,
+			ConsumerSecret: &creds.ConsumerSecret,
+		}); err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: update project status to generated-credentials: %w", err)
+		}
+
+		if s.dualWrite && s.repo != nil {
+			if _, err := s.repo.Upsert(ctx, projectID, domain.ProjectConsumption{
+				Status:         domain.ConsumptionStatusGeneratedCredentials,
+				ConsumerKey:    &creds.ConsumerKey,
+				ConsumerSecret: &creds.ConsumerSecret,
+			}); err != nil {
+				slog.ErrorContext(ctx, "failed to dual-write project consumption to postgres",
+					"projectId", projectID,
+					"status", domain.ConsumptionStatusGeneratedCredentials,
+					"err", err,
+				)
+			}
+		}
+		status = int(domain.ConsumptionStatusGeneratedCredentials)
+	}
+
+	if status == int(domain.ConsumptionStatusGeneratedCredentials) {
+		keys, err := s.choreoClient.GenerateSecretKeys(ctx)
+		if err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: generate secret keys: %w", err)
+		}
+		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
+			Status:             int(domain.ConsumptionStatusGeneratedSecretKeys),
+			PrimarySecretKey:   &keys.PrimarySecretKey,
+			SecondarySecretKey: &keys.SecondarySecretKey,
+		}); err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: update project status to generated-secret-keys: %w", err)
+		}
+
+		if s.dualWrite && s.repo != nil {
+			if _, err := s.repo.Upsert(ctx, projectID, domain.ProjectConsumption{
+				Status:             domain.ConsumptionStatusGeneratedSecretKeys,
+				PrimarySecretKey:   &keys.PrimarySecretKey,
+				SecondarySecretKey: &keys.SecondarySecretKey,
+			}); err != nil {
+				slog.ErrorContext(ctx, "failed to dual-write project consumption to postgres",
+					"projectId", projectID,
+					"status", domain.ConsumptionStatusGeneratedSecretKeys,
+					"err", err,
+				)
+			}
+		}
+		status = int(domain.ConsumptionStatusGeneratedSecretKeys)
+	}
+
+	if status == int(domain.ConsumptionStatusGeneratedSecretKeys) {
+		license, err := s.choreoClient.GetDeploymentLicense(ctx, projectID, deploymentID, domain.DeploymentLicenseRequest{
+			Email: email,
+		})
+		if err != nil {
+			return domain.License{}, fmt.Errorf("choreosubscription: get deployment license: %w", err)
+		}
+		return license, nil
+	}
+
+	return domain.License{}, fmt.Errorf("application status %d is outside the set this flow handles", status)
 }

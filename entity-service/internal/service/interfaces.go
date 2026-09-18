@@ -284,6 +284,9 @@ type ProjectConsumptionService interface {
 	// The status may only move forward; a status that is not ahead of what is
 	// stored returns the stored state unchanged instead of failing.
 	UpdateProjectConsumption(ctx context.Context, projectID string, req domain.UpdateProjectConsumptionRequest) (domain.UpdateProjectConsumptionResponse, error)
+	// ProcessLicenseDownload executes the 5-step resumable provisioning sequence
+	// and issues the signed deployment license.
+	ProcessLicenseDownload(ctx context.Context, projectID, deploymentID, email string) (domain.License, error)
 }
 
 // ProjectContactService defines the operations available on project contacts.
