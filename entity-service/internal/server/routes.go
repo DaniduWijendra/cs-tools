@@ -1226,6 +1226,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		}
 	}
 
+	// PLG Customer Success Portal. Every repository, service, handler and route
+	// it needs is in plg_routes.go — this is the only line of entity-service's
+	// own wiring the merge touches.
+	registerPLGRoutes(mux, db)
+
 	return middleware.CorrelationID(
 		middleware.Recovery(
 			middleware.Logger(
