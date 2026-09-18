@@ -88,7 +88,11 @@ export default function AnnouncementSendProgress({
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <Megaphone size={18} />
           <Typography variant="subtitle1" fontWeight={700}>
-            {completed >= total ? "Announcement sent" : "Sending announcement…"}
+            {completed < total
+              ? "Sending announcement…"
+              : failed > 0
+                ? "Announcement sent with failures"
+                : "Announcement sent"}
           </Typography>
         </Box>
         <Typography variant="body2" color="text.secondary" fontWeight={600}>

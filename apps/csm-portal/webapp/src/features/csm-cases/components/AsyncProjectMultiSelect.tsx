@@ -165,8 +165,12 @@ export default function AsyncProjectMultiSelect({
           next.forEach((o) => m.set(o.id, o.name));
           return m;
         });
-        setPickedKeys((prev) => {
-          const m = new Map(prev);
+        // Rebuilt from `next` alone (the full current selection, each
+        // option's own key already resolved via keyById/selectedOptions
+        // above) rather than merged onto the previous map — a merge would
+        // let a deselected project's key linger in state indefinitely.
+        setPickedKeys(() => {
+          const m = new Map<string, string>();
           next.forEach((o) => {
             if (o.key) m.set(o.id, o.key);
           });
