@@ -34,6 +34,9 @@ import { DRY_RUN_TAG_LABEL, useAnnouncementDryRun } from "@features/csm-announce
 import { useAnnouncementExcludedProjectKeys } from "@features/csm-announcements/api/useAnnouncementExcludedProjectKeys";
 import { useResolveAnnouncementAudience } from "@features/csm-announcements/api/useResolveAnnouncementAudience";
 import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
+import AnnouncementSendProgress, {
+  type AnnouncementSendProgressState,
+} from "@features/csm-announcements/components/AnnouncementSendProgress";
 import AudienceScopeControls, {
   type AnnouncementAudienceScope,
 } from "@features/csm-announcements/components/AudienceScopeControls";
@@ -118,6 +121,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const [description, setDescription] = useState("");
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [sendProgress, setSendProgress] = useState<AnnouncementSendProgressState | null>(null);
 
   const postCase = usePostCsmCase();
   const addTag = useAddTagToCase();
@@ -178,6 +182,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const handleSubmit = async (): Promise<void> => {
     if (!canSubmit) return;
     setSubmitting(true);
+    setSendProgress({ total: targetProjectIds.length, completed: 0, succeeded: 0, failed: 0 });
 
     const trimmedSubject = subject.trim();
     // Tag failures are tracked separately from create failures: the case
@@ -206,6 +211,20 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           }
         }
         return created;
+      },
+      (result) => {
+        // Fires as each project's own create call actually settles (not in
+        // original-index order) — what drives the live "N/total" card below,
+        // independent of the final failure report assembled after every
+        // project has finished.
+        setSendProgress((prev) =>
+          prev && {
+            ...prev,
+            completed: prev.completed + 1,
+            succeeded: prev.succeeded + (result.status === "fulfilled" ? 1 : 0),
+            failed: prev.failed + (result.status === "rejected" ? 1 : 0),
+          },
+        );
       },
     );
     setSubmitting(false);
@@ -347,6 +366,8 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         canRunDryRun={canRunDryRun}
         onRunDryRun={() => void handleRunDryRun()}
       />
+
+      {sendProgress && <AnnouncementSendProgress progress={sendProgress} />}
 
       <Box
         sx={{

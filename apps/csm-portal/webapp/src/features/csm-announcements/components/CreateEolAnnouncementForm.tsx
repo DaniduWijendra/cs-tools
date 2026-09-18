@@ -34,6 +34,9 @@ import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAnnouncementDryRun, DRY_RUN_TAG_LABEL } from "@features/csm-announcements/api/useAnnouncementDryRun";
 import { useResolveProductVersionAudience } from "@features/csm-announcements/api/useResolveProductVersionAudience";
 import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
+import AnnouncementSendProgress, {
+  type AnnouncementSendProgressState,
+} from "@features/csm-announcements/components/AnnouncementSendProgress";
 import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
 import {
   ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
@@ -88,6 +91,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [sendProgress, setSendProgress] = useState<AnnouncementSendProgressState | null>(null);
 
   const postCase = usePostCsmCase();
 
@@ -146,6 +150,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
 
     const trimmedSubject = subject.trim();
     const targetProjectIds = resolvedAudience.projects.map((p) => p.id);
+    setSendProgress({ total: targetProjectIds.length, completed: 0, succeeded: 0, failed: 0 });
     const results = await settleWithConcurrencyLimit(
       targetProjectIds,
       ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
@@ -156,6 +161,16 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
           subject: trimmedSubject,
           description,
         }),
+      (result) => {
+        setSendProgress((prev) =>
+          prev && {
+            ...prev,
+            completed: prev.completed + 1,
+            succeeded: prev.succeeded + (result.status === "fulfilled" ? 1 : 0),
+            failed: prev.failed + (result.status === "rejected" ? 1 : 0),
+          },
+        );
+      },
     );
     setSubmitting(false);
 
@@ -310,6 +325,8 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
         canRunDryRun={canRunDryRun}
         onRunDryRun={() => void handleRunDryRun()}
       />
+
+      {sendProgress && <AnnouncementSendProgress progress={sendProgress} />}
 
       <Box
         sx={{

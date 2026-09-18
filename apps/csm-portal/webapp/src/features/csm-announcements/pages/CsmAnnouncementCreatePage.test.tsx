@@ -183,6 +183,59 @@ describe("CsmAnnouncementCreatePage", () => {
     });
   });
 
+  it("shows live send progress as each project's create call settles", async () => {
+    const resolvers: Array<(v: { id: string }) => void> = [];
+    postCaseMutateAsyncMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    expect(screen.getByText("0/2")).toBeInTheDocument();
+
+    resolvers[0]({ id: "ann-1" });
+    await waitFor(() => expect(screen.getByText("1/2")).toBeInTheDocument());
+    expect(screen.getByText(/1 succeeded/)).toBeInTheDocument();
+
+    resolvers[1]({ id: "ann-2" });
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+  });
+
+  it("shows a failed count in the progress card as soon as a project's create call rejects", async () => {
+    const resolvers: Array<() => void> = [];
+    const rejecters: Array<(e: Error) => void> = [];
+    postCaseMutateAsyncMock.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          resolvers.push(() => resolve({ id: "ann" }));
+          rejecters.push(reject);
+        }),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => expect(rejecters).toHaveLength(2));
+    rejecters[0](new Error("boom"));
+    await waitFor(() => expect(screen.getByText(/1 failed/)).toBeInTheDocument());
+
+    resolvers[1]();
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-1"));
+    });
+  });
+
   it("reports which project failed on a partial failure, keeps the succeeded one, and still navigates back", async () => {
     postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
       projectId === "proj-1"
@@ -575,6 +628,35 @@ describe("CsmAnnouncementCreatePage", () => {
         subject: "Scheduled maintenance",
         description: "<p>Maintenance window details.</p>",
       });
+      await waitFor(() => {
+        expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+      });
+    });
+
+    it("shows live send progress as each resolved project's create call settles", async () => {
+      mockEolBackend();
+      const resolvers: Array<(v: { id: string }) => void> = [];
+      postCaseMutateAsyncMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      renderPage();
+      switchToEolKind();
+      await selectProductAndVersion();
+      expect(await screen.findByText("Project A")).toBeInTheDocument();
+
+      fillSubjectAndDescription();
+      fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+      await waitFor(() => expect(resolvers).toHaveLength(2));
+      expect(screen.getByText("0/2")).toBeInTheDocument();
+
+      resolvers[0]({ id: "ann-eol-1" });
+      await waitFor(() => expect(screen.getByText("1/2")).toBeInTheDocument());
+
+      resolvers[1]({ id: "ann-eol-2" });
       await waitFor(() => {
         expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
       });
