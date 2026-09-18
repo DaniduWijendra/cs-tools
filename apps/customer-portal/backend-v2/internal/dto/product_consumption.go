@@ -16,7 +16,10 @@
 
 package dto
 
-import "github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/productconsumption"
+import (
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/productconsumption"
+)
 
 // LicenseSubscriptionData carries the deployment's license/subscription
 // credentials. Every field here is deliberately included, unlike most
@@ -38,8 +41,8 @@ type LicenseResponse struct {
 	Signature        string                  `json:"signature"`
 }
 
-// MapLicense builds the portal response from the product-consumption service's License.
-func MapLicense(l productconsumption.License) LicenseResponse {
+// MapLicense builds the portal response from entity-service's License.
+func MapLicense(l entity.License) LicenseResponse {
 	return LicenseResponse{
 		SubscriptionData: LicenseSubscriptionData{
 			DeploymentID:    l.SubscriptionData.DeploymentID,

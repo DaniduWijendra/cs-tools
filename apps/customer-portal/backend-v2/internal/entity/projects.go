@@ -129,3 +129,33 @@ func (c *Client) GetProjectChangeRequestStats(ctx context.Context, id string) (P
 	err := c.getJSON(ctx, fmt.Sprintf("/projects/%s/change-requests/stats", url.PathEscape(id)), &out)
 	return out, err
 }
+
+// DeploymentLicenseSubscriptionData carries the deployment's license credentials.
+type DeploymentLicenseSubscriptionData struct {
+	DeploymentID    string `json:"deploymentId"`
+	DeploymentName  string `json:"deploymentName"`
+	SubscriptionKey string `json:"subscriptionKey"`
+	ClientID        string `json:"clientId"`
+	ClientSecret    string `json:"clientSecret"`
+	Secrets         string `json:"secrets"`
+}
+
+// License represents the deployment license returned by entity-service.
+type License struct {
+	SubscriptionData DeploymentLicenseSubscriptionData `json:"subscriptionData"`
+	Signature        string                            `json:"signature"`
+}
+
+// DeploymentLicenseRequest is the body for
+// POST /projects/{id}/deployments/{deploymentId}/license.
+type DeploymentLicenseRequest struct {
+	Email string `json:"email"`
+}
+
+// GetDeploymentLicense calls POST /projects/{projectId}/deployments/{deploymentId}/license.
+func (c *Client) GetDeploymentLicense(ctx context.Context, projectID, deploymentID, email string) (License, error) {
+	var out License
+	path := fmt.Sprintf("/projects/%s/deployments/%s/license", url.PathEscape(projectID), url.PathEscape(deploymentID))
+	err := c.postJSON(ctx, path, DeploymentLicenseRequest{Email: email}, &out)
+	return out, err
+}
