@@ -24,19 +24,16 @@
 // `go test ./...` on a machine with no database stays green:
 //
 //	createdb entity_test
-//	psql -d entity_test -f migrations/000001_create_users.up.sql
-//	psql -d entity_test -f migrations/000002_create_accounts.up.sql
-//	psql -d entity_test -f migrations/000003_create_projects.up.sql
-//	psql -d entity_test -f migrations/000014_create_project_consumption.up.sql
-//	ENTITY_TEST_DATABASE_URL="postgres:///entity_test" go test ./internal/repository/
-//
-// Only those four migrations are needed. The chain does not currently apply in
-// full — see the note in 000014_create_project_consumption.up.sql.
+//	psql -d entity_test -f migrations/000001_users_table.up.sql
+//	psql -d entity_test -f migrations/000008_accounts_table.up.sql
+//	psql -d entity_test -f migrations/000009_projects_table.up.sql
+//	ENTITY_TEST_DATABASE_URL="postgres:///entity_test" go test -v -run TestIntegration ./internal/repository/
 
 package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"sync"
 	"testing"
@@ -77,7 +74,7 @@ func newIntegrationRepo(t *testing.T) (ProjectConsumptionRepository, *pgxpool.Po
 	// Rebuild the fixture rows from scratch so the tests are order-independent
 	// and rerunnable.
 	seed := []string{
-		`DELETE FROM project_consumption WHERE project_id = $1`,
+		`UPDATE project SET choreo_application_status = NULL, choreo_application_id = NULL, client_id = NULL, client_secret = NULL, primary_secret_key = NULL, secondary_secret_key = NULL, consumption_tracking_file_generated_on = NULL WHERE id = $1`,
 	}
 	for _, stmt := range seed {
 		if _, err := pool.Exec(ctx, stmt, testIntegrationProjectID); err != nil {
@@ -85,17 +82,17 @@ func newIntegrationRepo(t *testing.T) (ProjectConsumptionRepository, *pgxpool.Po
 		}
 	}
 	mustExec(t, pool, `
-		INSERT INTO users (id, user_name, first_name, last_name, email, user_type)
-		VALUES ($1, 'consumption.fixture', 'Consumption', 'Fixture', 'consumption.fixture@example.test', 'internal')
+		INSERT INTO "user" (id, created_on, updated_on, created_by, updated_by, user_name, first_name, last_name, email)
+		VALUES ($1, NOW(), NOW(), 'fixture', 'fixture', 'consumption.fixture', 'Consumption', 'Fixture', 'consumption.fixture@example.test')
 		ON CONFLICT (id) DO NOTHING`, testIntegrationUserID)
 	mustExec(t, pool, `
-		INSERT INTO accounts (id, sf_id, name, tier, activation_date, owner_id)
-		VALUES ($1, 'SF-CONSUMPTION-FIXTURE', 'Consumption Fixture Account', 'enterprise', NOW(), $2)
-		ON CONFLICT (id) DO NOTHING`, testIntegrationAccountID, testIntegrationUserID)
+		INSERT INTO account (id, created_on, updated_on, created_by, updated_by, name, number, sf_id, activation_date)
+		VALUES ($1, NOW(), NOW(), 'fixture', 'fixture', 'Consumption Fixture Account', 'ACC-CONSUMPTION-FIXTURE', 'SF-CONSUMPTION-FIXTURE', NOW())
+		ON CONFLICT (id) DO NOTHING`, testIntegrationAccountID)
 	mustExec(t, pool, `
-		INSERT INTO projects (id, account_id, sf_id, name, key, subscription_type, start_date, end_date)
-		VALUES ($1, $2, 'SF-PROJ-CONSUMPTION-FIXTURE', 'Consumption Fixture Project', 'CONSUMPTION-FIXTURE',
-		        'subscription', NOW() - INTERVAL '1 day', NOW() + INTERVAL '365 days')
+		INSERT INTO project (id, created_on, updated_on, created_by, updated_by, key, sf_id, name, account_id, start_date, end_date)
+		VALUES ($1, NOW(), NOW(), 'fixture', 'fixture', 'CONSUMPTION-FIXTURE', 'SF-PROJ-CONSUMPTION-FIXTURE', 'Consumption Fixture Project', $2,
+		        NOW() - INTERVAL '1 day', NOW() + INTERVAL '365 days')
 		ON CONFLICT (id) DO NOTHING`, testIntegrationProjectID, testIntegrationAccountID)
 
 	codec, err := crypto.NewAESGCMCodec(make([]byte, 32))
@@ -146,7 +143,11 @@ func TestIntegration_GetUnknownProjectIsNotFound(t *testing.T) {
 func TestIntegration_SecretsAreCiphertextInTheColumn(t *testing.T) {
 	repo, pool := newIntegrationRepo(t)
 	ctx := context.Background()
-	const secret = "consumer-secret-plaintext"
+	const (
+		secret       = "consumer-secret-plaintext"
+		primaryKey   = "primary-secret-key-plaintext"
+		secondaryKey = "secondary-secret-key-plaintext"
+	)
 
 	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
 	advance(t, repo, domain.ConsumptionStatusSubscribed, &domain.ProjectConsumption{})
@@ -154,27 +155,65 @@ func TestIntegration_SecretsAreCiphertextInTheColumn(t *testing.T) {
 		ConsumerKey:    ptr("consumer-key"),
 		ConsumerSecret: ptr(secret),
 	})
+	advance(t, repo, domain.ConsumptionStatusGeneratedSecretKeys, &domain.ProjectConsumption{
+		PrimarySecretKey:   ptr(primaryKey),
+		SecondarySecretKey: ptr(secondaryKey),
+	})
 
-	var raw []byte
+	// Each of the three secret-bearing columns, read as the database holds it.
+	var storedSecret, storedPrimary, storedSecondary string
 	if err := pool.QueryRow(ctx,
-		`SELECT consumer_secret FROM project_consumption WHERE project_id = $1`,
-		testIntegrationProjectID).Scan(&raw); err != nil {
+		`SELECT client_secret, primary_secret_key, secondary_secret_key FROM project WHERE id = $1`,
+		testIntegrationProjectID).Scan(&storedSecret, &storedPrimary, &storedSecondary); err != nil {
 		t.Fatalf("read column: %v", err)
 	}
-	if len(raw) == 0 {
-		t.Fatal("consumer_secret was not written")
-	}
-	if string(raw) == secret {
-		t.Fatal("consumer_secret is stored in the clear")
+	for _, f := range []struct{ column, stored, plaintext string }{
+		{"client_secret", storedSecret, secret},
+		{"primary_secret_key", storedPrimary, primaryKey},
+		{"secondary_secret_key", storedSecondary, secondaryKey},
+	} {
+		raw, err := base64.StdEncoding.DecodeString(f.stored)
+		if err != nil || len(raw) == 0 {
+			t.Fatalf("%s was not written as base64 ciphertext: %v", f.column, err)
+		}
+		if string(raw) == f.plaintext {
+			t.Fatalf("%s is stored in the clear", f.column)
+		}
 	}
 
-	// And it still round-trips back through the repository.
+	// And they still round-trip back through the repository.
 	state, _, _, err := repo.Get(ctx, testIntegrationProjectID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if state.ConsumerSecret == nil || *state.ConsumerSecret != secret {
-		t.Fatalf("round trip failed: %+v", state.ConsumerSecret)
+		t.Fatalf("consumerSecret round trip failed: %+v", state.ConsumerSecret)
+	}
+	if state.PrimarySecretKey == nil || *state.PrimarySecretKey != primaryKey {
+		t.Fatalf("primarySecretKey round trip failed: %+v", state.PrimarySecretKey)
+	}
+	if state.SecondarySecretKey == nil || *state.SecondarySecretKey != secondaryKey {
+		t.Fatalf("secondarySecretKey round trip failed: %+v", state.SecondarySecretKey)
+	}
+}
+
+// A secret column that is present but not decodable must surface, not silently
+// read back as "this project has no secret" — these columns are also written by
+// the ServiceNow sync, so an unexpected format is exactly the drift worth
+// knowing about.
+func TestIntegration_UndecodableSecretIsAnError(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+	ctx := context.Background()
+
+	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
+	if _, err := pool.Exec(ctx,
+		`UPDATE project SET client_secret = $2 WHERE id = $1`,
+		testIntegrationProjectID, "not base64 at all!!"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, _, _, err := repo.Get(ctx, testIntegrationProjectID); err == nil {
+		t.Fatal("expected an error for an undecodable stored secret, got none")
 	}
 }
 
@@ -334,7 +373,11 @@ func TestIntegration_FullProvisioningWalk(t *testing.T) {
 	if state.Status != domain.ConsumptionStatusGeneratedSecretKeys {
 		t.Fatalf("got status %d, want 5", state.Status)
 	}
-	// Every earlier step's output must have survived every later step.
+	// Every earlier step's output must have survived every later step — and
+	// every step's own output must have been stored at all. The secret keys
+	// are the ones with no home in the ServiceNow-mirrored project table until
+	// migration 000067 gave them one; without it the write silently succeeded
+	// and these came back nil.
 	for label, got := range map[string]*string{
 		"choreoApplicationId": state.ChoreoApplicationID,
 		"consumerKey":         state.ConsumerKey,
@@ -349,23 +392,11 @@ func TestIntegration_FullProvisioningWalk(t *testing.T) {
 	if *state.ChoreoApplicationID != "app-1" {
 		t.Fatalf("application id changed to %q", *state.ChoreoApplicationID)
 	}
+	if *state.ConsumerKey != "consumer-key" || *state.ConsumerSecret != "consumer-secret" {
+		t.Fatalf("credentials round-tripped incorrectly: %q / %q", *state.ConsumerKey, *state.ConsumerSecret)
+	}
 	if *state.PrimarySecretKey != "primary-key" || *state.SecondarySecretKey != "secondary-key" {
 		t.Fatalf("secret keys round-tripped incorrectly: %q / %q", *state.PrimarySecretKey, *state.SecondarySecretKey)
-	}
-}
-
-// TestIntegration_CheckConstraintRejectsIncompleteStep guards the database's
-// own backstop: advancing to a step without its artefacts must fail even if a
-// caller bypasses the service's validation.
-func TestIntegration_CheckConstraintRejectsIncompleteStep(t *testing.T) {
-	repo, _ := newIntegrationRepo(t)
-
-	_, err := repo.Upsert(context.Background(), testIntegrationProjectID, domain.ProjectConsumption{
-		Status: domain.ConsumptionStatusCreated, // no application id
-	})
-	var validationErr *apierror.ValidationError
-	if !asValidation(err, &validationErr) {
-		t.Fatalf("got %v, want a ValidationError from the CHECK constraint", err)
 	}
 }
 
