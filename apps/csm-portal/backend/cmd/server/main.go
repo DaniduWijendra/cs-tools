@@ -98,6 +98,7 @@ func main() {
 	metadataHandler := handler.NewMetadataHandler()
 	accountHandler := handler.NewAccountHandler(customerEntityClient)
 	projectHandler := handler.NewProjectHandler(customerEntityClient)
+	announcementHandler := handler.NewAnnouncementHandler(customerEntityClient, loadAnnouncementExcludedProjectKeys())
 	productHandler := handler.NewProductHandler(customerEntityClient)
 	deploymentHandler := handler.NewDeploymentHandler(customerEntityClient)
 	changeRequestHandler := handler.NewChangeRequestHandler(customerEntityClient)
@@ -250,6 +251,8 @@ func main() {
 	route("GET /projects/{id}", handler.PermView, projectHandler.GetProject)
 	route("GET /projects/{id}/metadata", handler.PermView, projectHandler.GetProjectMetadata)
 	route("POST /projects/search", handler.PermView, projectHandler.SearchProjects)
+	route("POST /announcements/audience/search", handler.PermView, announcementHandler.SearchCustomerAnnouncementAudience)
+	route("GET /announcements/audience/excluded-project-keys", handler.PermView, announcementHandler.GetExcludedProjectKeys)
 	route("POST /projects/{id}/contacts/search", handler.PermView, projectHandler.SearchProjectContacts)
 	route("GET /projects/{id}/contacts/{contactId}", handler.PermView, projectHandler.GetProjectContact)
 	route("PATCH /projects/{id}", handler.PermWrite, projectHandler.UpdateProject)
@@ -580,6 +583,36 @@ func loadAccessConfig() handler.AccessConfig {
 		slog.Warn("access-control role variables are unset, so no token role grants them", "variables", unset)
 	}
 	return cfg
+}
+
+// loadAnnouncementExcludedProjectKeys resolves the "All customer projects"
+// announcement audience's mandatory excluded-project-key denylist from its
+// configuration form:
+//
+//	CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS  A comma-separated list of project
+//	                                         keys, whitespace around each
+//	                                         entry trimmed. AnnouncementHandler
+//	                                         injects this list into every
+//	                                         POST /announcements/audience/search
+//	                                         call unconditionally — the
+//	                                         caller cannot opt out — mirroring
+//	                                         the real ServiceNow flow this
+//	                                         replaces, whose own "Create
+//	                                         announcement for customers" flow
+//	                                         hardcodes an equivalent Project
+//	                                         Key exclusion with no way for
+//	                                         whoever triggers it to opt out.
+//
+// Unlike directory.DefaultRoles, this deliberately has no committed default:
+// project keys are organisation-specific data, not generic platform
+// vocabulary, so there is nothing safe to commit — the same reasoning
+// CSM_TEAM_REGISTRY's own lack of a default follows. An unset or empty value
+// yields no exclusions, so a deployment that has not configured this yet
+// still starts and simply excludes nothing extra.
+func loadAnnouncementExcludedProjectKeys() []string {
+	keys := splitComma(os.Getenv("CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS"))
+	slog.Info("resolved announcement excluded-project-key list", "count", len(keys))
+	return keys
 }
 
 // loadSftpgoConfig resolves the SFTPGo-backed attachment-storage feature
