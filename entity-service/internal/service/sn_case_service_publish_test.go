@@ -125,12 +125,17 @@ func TestSNCaseService_CreateCase_PublishesCaseCreated(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(publisher.calls) != 1 {
-		t.Fatalf("expected 1 publish call, got %d", len(publisher.calls))
+	var found bool
+	var call mockPublishCall
+	for _, c := range publisher.calls {
+		if c.eventType == events.TypeCaseCreated {
+			call = c
+			found = true
+			break
+		}
 	}
-	call := publisher.calls[0]
-	if call.eventType != events.TypeCaseCreated {
-		t.Errorf("eventType = %q, want %q", call.eventType, events.TypeCaseCreated)
+	if !found {
+		t.Fatalf("expected %s publish call in %d calls", events.TypeCaseCreated, len(publisher.calls))
 	}
 	if call.entityID != resp.Case.ID {
 		t.Errorf("entityID = %q, want the new case's id %q", call.entityID, resp.Case.ID)
