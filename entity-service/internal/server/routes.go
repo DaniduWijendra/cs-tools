@@ -72,12 +72,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		eventPublishFailureHandler = handler.NewEventPublishFailureHandler(eventPublishFailureSvc)
 	}
 
-	// Project consumption is the mirror image of the ServiceNow-only routes
-	// below: it exists only on the Postgres path. On the ServiceNow path this
-	// state lives on the customer_project record and is reached through the
-	// product-consumption scripted REST API, which the Choreo subscription
-	// operation calls directly — neither this service nor the ServiceNow
-	// integration service is in that path.
+	// Project consumption is gated on having a database, NOT on the data
+	// source. It used to be Postgres-only, on the reasoning that ServiceNow
+	// deployments keep this state on the customer_project record; it now
+	// dual-writes both stores, and staging and production run
+	// DATA_SOURCE=servicenow, so gating on the data source would have disabled
+	// the feature exactly where it is needed. ServiceNow remains the source of
+	// truth for status, reached through the Choreo subscription operation.
 	//
 	// It needs both a pool and an encryption key, since it stores OAuth2
 	// credentials and subscription secret keys. A missing or malformed key
