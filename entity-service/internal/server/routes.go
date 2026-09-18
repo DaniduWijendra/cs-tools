@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/crypto"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/eventbus"
@@ -89,10 +90,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// cannot discover from the outside is that the service deliberately chose
 	// not to register it.
 	var projectConsumptionHandler *handler.ProjectConsumptionHandler
+	var licenseProvisioningEnabled bool
 	switch {
-	case cfg.DataSource != config.DataSourcePostgres || db == nil:
-		// Not logged: on the ServiceNow path these routes are absent by
-		// design, exactly as the ServiceNow-only routes are absent here.
+	case db == nil:
+		// Not logged: with no database pool configured, these routes cannot
+		// be registered.
 	case cfg.ConsumptionSecretKey == "":
 		slog.Info("project consumption routes not registered: CONSUMPTION_SECRET_KEY is unset",
 			"routes", "GET,PATCH /projects/{id}/consumption",
@@ -112,8 +114,41 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				"routes", "GET,PATCH /projects/{id}/consumption", "error", err)
 			break
 		}
+		// The licence route is gated separately from the two read/write
+		// routes: provisioning reaches an upstream that mints Choreo
+		// applications for real customers, so an unconfigured or
+		// partially-configured operation must leave that route absent rather
+		// than register something that fails — or worse, succeeds — against
+		// the wrong environment.
+		var choreoClient choreosubscription.Client
+		if cfg.ConsumptionOperationBaseURL == "" {
+			slog.Info("deployment licence route not registered: PRODUCT_CONSUMPTION_OPERATION_URL is unset",
+				"routes", "POST /projects/{id}/deployments/{deploymentId}/license")
+		} else {
+			choreoClient, err = choreosubscription.NewClient(choreosubscription.Config{
+				BaseURL: cfg.ConsumptionOperationBaseURL,
+				Creds: choreosubscription.ClientCredentialsConfig{
+					TokenURL:     cfg.ConsumptionOperationTokenURL,
+					ClientID:     cfg.ConsumptionOperationClientID,
+					ClientSecret: cfg.ConsumptionOperationClientSecret,
+					Scopes:       cfg.ConsumptionOperationScopes,
+				},
+			})
+			if err != nil {
+				// The error names the missing field, never a credential value.
+				slog.Error("deployment licence route not registered: the product-consumption operation is not fully configured",
+					"routes", "POST /projects/{id}/deployments/{deploymentId}/license", "error", err)
+				choreoClient = nil
+			}
+		}
+		licenseProvisioningEnabled = choreoClient != nil
+
 		projectConsumptionHandler = handler.NewProjectConsumptionHandler(
-			service.NewProjectConsumptionService(repository.NewProjectConsumptionRepository(db, codec)),
+			service.NewProjectConsumptionService(
+				repository.NewProjectConsumptionRepository(db, codec),
+				choreoClient,
+				cfg.ConsumptionDualWriteEnabled,
+			),
 		)
 	}
 
@@ -628,6 +663,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	if projectConsumptionHandler != nil {
 		mux.HandleFunc("GET /projects/{id}/consumption", projectConsumptionHandler.GetProjectConsumption)
 		mux.HandleFunc("PATCH /projects/{id}/consumption", projectConsumptionHandler.UpdateProjectConsumption)
+		if licenseProvisioningEnabled {
+			mux.HandleFunc("POST /projects/{id}/deployments/{deploymentId}/license", projectConsumptionHandler.GetDeploymentLicense)
+		}
 	}
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)

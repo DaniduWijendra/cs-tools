@@ -1249,6 +1249,59 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /projects/{id}/deployments/{deploymentId}/license:
+    post:
+      summary: Provision product consumption tracking and download a deployment license.
+      description: >
+        Executes the 5-step resumable provisioning sequence (application creation,
+        subscription, credential generation, secret key generation) and issues a
+        signed deployment license.
+      operationId: getDeploymentLicense
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: deploymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentLicenseRequest'
+      responses:
+        "200":
+          description: The signed deployment license.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentLicense'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Project or deployment not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /projects/{id}/contacts/{contactId}:
     get:
       summary: Get one contact's attributes for a single project.
@@ -7379,6 +7432,50 @@ components:
       required:
         - message
         - result
+
+    DeploymentLicenseRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+        - email
+
+    DeploymentLicense:
+      type: object
+      properties:
+        subscriptionData:
+          $ref: '#/components/schemas/DeploymentLicenseSubscriptionData'
+        signature:
+          type: string
+      required:
+        - subscriptionData
+        - signature
+
+    DeploymentLicenseSubscriptionData:
+      type: object
+      properties:
+        deploymentId:
+          type: string
+        deploymentName:
+          type: string
+        subscriptionKey:
+          type: string
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        secrets:
+          type: string
+      required:
+        - deploymentId
+        - deploymentName
+        - subscriptionKey
+        - clientId
+        - clientSecret
+        - secrets
 
     ProjectUpdateRequest:
       type: object

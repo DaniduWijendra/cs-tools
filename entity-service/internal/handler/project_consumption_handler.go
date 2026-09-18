@@ -19,10 +19,16 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/service"
 )
+
+// licenseProvisioningWriteDeadline extends the response write deadline for
+// GetDeploymentLicense beyond the server's global WriteTimeout —
+// ProcessLicenseDownload can make up to 5 sequential upstream requests.
+const licenseProvisioningWriteDeadline = 2 * time.Minute
 
 // ProjectConsumptionHandler handles HTTP requests for a project's
 // product-consumption provisioning state.
@@ -54,6 +60,27 @@ func (h *ProjectConsumptionHandler) UpdateProjectConsumption(w http.ResponseWrit
 		return
 	}
 	resp, err := h.svc.UpdateProjectConsumption(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// GetDeploymentLicense handles POST /projects/{id}/deployments/{deploymentId}/license.
+func (h *ProjectConsumptionHandler) GetDeploymentLicense(w http.ResponseWriter, r *http.Request) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(licenseProvisioningWriteDeadline))
+
+	var req domain.DeploymentLicenseRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+
+	projectID := r.PathValue("id")
+	deploymentID := r.PathValue("deploymentId")
+
+	resp, err := h.svc.ProcessLicenseDownload(r.Context(), projectID, deploymentID, req.Email)
 	if err != nil {
 		writeServiceError(w, r, err)
 		return
