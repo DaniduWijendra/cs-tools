@@ -607,6 +607,29 @@ type SearchProjectsRequest struct {
 	// SubRegion filters to projects whose linked account is in this sub-region
 	// (ServiceNow data source only).
 	SubRegion string `json:"subRegion"`
+	// ExcludeClosureStates filters out projects whose closure state (see
+	// ProjectClosureFields.ClosureState — "Open"/"Suspended"/"Restricted") is
+	// any of the given values, e.g. ["Restricted", "Suspended"]. Unlike
+	// ClosureStatus above, there is no upstream ServiceNow filter parameter for
+	// excluding a set of states, so the ServiceNow data source applies this by
+	// paging through every match and filtering in Go, not by passing it through
+	// as a request filter (ServiceNow data source only; the Postgres data
+	// source rejects a non-empty value).
+	ExcludeClosureStates []string `json:"excludeClosureStates,omitempty"`
+	// ExcludeSubscriptionTypes filters out projects whose subscription type is
+	// any of the given values, e.g. ["cloud_support", "cloud_evaluation_support"].
+	// Same "no upstream filter, applied in Go" caveat as ExcludeClosureStates
+	// (ServiceNow data source only; the Postgres data source rejects a
+	// non-empty value).
+	ExcludeSubscriptionTypes []SubscriptionType `json:"excludeSubscriptionTypes,omitempty"`
+	// ExcludeProjectKeys filters out projects whose Key (see ProjectView.Key)
+	// is any of the given values, e.g. ["APEXIA", "VERIDIAN"] — a caller-
+	// supplied denylist by project key, unrelated to closure state or
+	// subscription type. Same "no upstream filter, applied in Go" caveat as
+	// ExcludeClosureStates (ServiceNow data source only; the Postgres data
+	// source rejects a non-empty value). Matching is exact and case-sensitive
+	// (project keys are opaque identifiers, not display text).
+	ExcludeProjectKeys []string `json:"excludeProjectKeys,omitempty"`
 }
 
 // ProjectSearchAccountRef is the account reference embedded in a project

@@ -20,6 +20,7 @@ package service
 import (
 	"context"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -42,6 +43,11 @@ func (s *projectService) SearchProjects(ctx context.Context, req domain.SearchPr
 	}
 	if err := validateSearchQuery(req.SearchQuery); err != nil {
 		return domain.SearchProjectsResponse{}, err
+	}
+	if len(req.ExcludeClosureStates) > 0 || len(req.ExcludeSubscriptionTypes) > 0 || len(req.ExcludeProjectKeys) > 0 {
+		return domain.SearchProjectsResponse{}, &apierror.ValidationError{
+			Msg: "excludeClosureStates, excludeSubscriptionTypes, and excludeProjectKeys are only supported for the ServiceNow data source",
+		}
 	}
 
 	scope, err := s.access.ResolveScope(ctx)
