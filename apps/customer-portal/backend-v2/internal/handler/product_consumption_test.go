@@ -114,16 +114,19 @@ func TestGetDeploymentLicense_Success(t *testing.T) {
 
 	mockEntity := &mockEntityLicenseClient{
 		projectResp: entity.ProjectDetailsView{ID: projectID, Name: "Test Project"},
+		// usageDataPublishingUrl is signed by ServiceNow but was absent from the
+		// struct this response used to be modelled with. It stands in here for
+		// every field the portal does not name.
 		licenseResp: entity.License{
 			Signature: "signed-license-token",
-			SubscriptionData: entity.DeploymentLicenseSubscriptionData{
-				DeploymentID:    deploymentID,
-				DeploymentName:  "Production",
-				SubscriptionKey: "sub-key",
-				ClientID:        "client-id",
-				ClientSecret:    "client-secret",
-				Secrets:         "secrets",
-			},
+			SubscriptionData: json.RawMessage(`{` +
+				`"deploymentId":"` + deploymentID + `",` +
+				`"deploymentName":"Production",` +
+				`"subscriptionKey":"sub-key",` +
+				`"clientId":"client-id",` +
+				`"clientSecret":"client-secret",` +
+				`"secrets":"secrets",` +
+				`"usageDataPublishingUrl":"https://example.invalid/usage"}`),
 		},
 	}
 	h := NewProductConsumptionHandler(&mockProductConsumptionClient{}, mockEntity)
@@ -151,8 +154,22 @@ func TestGetDeploymentLicense_Success(t *testing.T) {
 	if resp.Signature != "signed-license-token" {
 		t.Errorf("got signature %q, want signed-license-token", resp.Signature)
 	}
-	if resp.SubscriptionData.DeploymentID != deploymentID {
-		t.Errorf("got deploymentId %q, want %q", resp.SubscriptionData.DeploymentID, deploymentID)
+	// The portal must hand the customer exactly what ServiceNow signed. A field
+	// dropped here breaks signature verification in the customer's product, and
+	// usageDataPublishingUrl is also where that product publishes its usage.
+	var sub map[string]any
+	if err := json.Unmarshal(resp.SubscriptionData, &sub); err != nil {
+		t.Fatalf("subscriptionData is not valid JSON: %v", err)
+	}
+	for k, want := range map[string]string{
+		"deploymentId":           deploymentID,
+		"clientSecret":           "client-secret",
+		"secrets":                "secrets",
+		"usageDataPublishingUrl": "https://example.invalid/usage",
+	} {
+		if sub[k] != want {
+			t.Errorf("subscriptionData[%q] = %v, want %q", k, sub[k], want)
+		}
 	}
 }
 
@@ -208,15 +225,16 @@ func TestGetDeploymentLicense_E2E_EntityClientHttp(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			receivedEmail = body.Email
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(entity.License{
-				Signature: "e2e-token-from-entity-service",
-				SubscriptionData: entity.DeploymentLicenseSubscriptionData{
-					DeploymentID:    deploymentID,
-					DeploymentName:  "Production-E2E",
-					SubscriptionKey: "sub-key-123",
-					ClientID:        "client-123",
-					ClientSecret:    "secret-123",
-					Secrets:         "sec-123",
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"signature": "e2e-token-from-entity-service",
+				"subscriptionData": map[string]any{
+					"deploymentId":           deploymentID,
+					"deploymentName":         "Production-E2E",
+					"subscriptionKey":        "sub-key-123",
+					"clientId":               "client-123",
+					"clientSecret":           "secret-123",
+					"secrets":                "sec-123",
+					"usageDataPublishingUrl": "https://example.invalid/usage",
 				},
 			})
 			return
@@ -259,7 +277,19 @@ func TestGetDeploymentLicense_E2E_EntityClientHttp(t *testing.T) {
 	if resp.Signature != "e2e-token-from-entity-service" {
 		t.Errorf("got signature %q, want e2e-token-from-entity-service", resp.Signature)
 	}
-	if resp.SubscriptionData.DeploymentName != "Production-E2E" {
-		t.Errorf("got deploymentName %q, want Production-E2E", resp.SubscriptionData.DeploymentName)
+	// End to end, entity-service → portal → customer: the signed payload must
+	// arrive byte-complete, unmodelled fields included.
+	var sub map[string]any
+	if err := json.Unmarshal(resp.SubscriptionData, &sub); err != nil {
+		t.Fatalf("subscriptionData is not valid JSON: %v", err)
+	}
+	for k, want := range map[string]string{
+		"deploymentName":         "Production-E2E",
+		"secrets":                "sec-123",
+		"usageDataPublishingUrl": "https://example.invalid/usage",
+	} {
+		if sub[k] != want {
+			t.Errorf("subscriptionData[%q] = %v, want %q", k, sub[k], want)
+		}
 	}
 }

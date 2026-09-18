@@ -18,6 +18,7 @@ package entity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 )
@@ -130,20 +131,19 @@ func (c *Client) GetProjectChangeRequestStats(ctx context.Context, id string) (P
 	return out, err
 }
 
-// DeploymentLicenseSubscriptionData carries the deployment's license credentials.
-type DeploymentLicenseSubscriptionData struct {
-	DeploymentID    string `json:"deploymentId"`
-	DeploymentName  string `json:"deploymentName"`
-	SubscriptionKey string `json:"subscriptionKey"`
-	ClientID        string `json:"clientId"`
-	ClientSecret    string `json:"clientSecret"`
-	Secrets         string `json:"secrets"`
-}
-
 // License represents the deployment license returned by entity-service.
+//
+// SubscriptionData is carried verbatim rather than modelled as a struct.
+// ServiceNow signs an HMAC over the canonicalised subscription data, and the
+// customer's product recomputes that canonical string from the licence it
+// receives — so a field dropped anywhere along the way breaks verification.
+// One of the signed fields, usageDataPublishingUrl, is also the address the
+// product publishes its usage to. See domain.License in entity-service for the
+// full reasoning; the Ballerina implementation achieves the same with an open
+// record.
 type License struct {
-	SubscriptionData DeploymentLicenseSubscriptionData `json:"subscriptionData"`
-	Signature        string                            `json:"signature"`
+	SubscriptionData json.RawMessage `json:"subscriptionData"`
+	Signature        string          `json:"signature"`
 }
 
 // DeploymentLicenseRequest is the body for
