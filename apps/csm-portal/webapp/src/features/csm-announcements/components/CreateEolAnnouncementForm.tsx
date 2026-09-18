@@ -125,6 +125,35 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     [projectKeyById],
   );
 
+  // The full resolved audience for the current product/version.
+  const targetProjectIds = useMemo(
+    () => resolvedAudience.projects.map((p) => p.id),
+    [resolvedAudience.projects],
+  );
+
+  // When set, a prior submit left these (and only these) projects without
+  // an announcement — the next submit targets just this narrower list
+  // instead of the full audience again, so a retry after a partial failure
+  // can't create a second, duplicate case for a project that already
+  // succeeded (there's no idempotency key on the create call). Reset back
+  // to "submit the full audience" the moment the resolved audience itself
+  // changes (a different product/version) — same reasoning as the
+  // customer-announcement form's own retryProjectIds.
+  const [retryProjectIds, setRetryProjectIds] = useState<string[] | null>(null);
+  // Adjusting state during render (React's own recommended pattern for
+  // "reset state when a derived value changes") rather than an effect — see
+  // the customer-announcement form's own retryBaselineKey for why this
+  // compares by content (JSON.stringify) rather than array reference:
+  // resolvedAudience.projects falls back to a fresh `[]` on every render
+  // while unresolved, so targetProjectIds is never referentially stable.
+  const targetProjectIdsKey = JSON.stringify(targetProjectIds);
+  const [retryBaselineKey, setRetryBaselineKey] = useState(targetProjectIdsKey);
+  if (targetProjectIdsKey !== retryBaselineKey) {
+    setRetryBaselineKey(targetProjectIdsKey);
+    setRetryProjectIds(null);
+  }
+  const submitProjectIds = retryProjectIds ?? targetProjectIds;
+
   const { runningDryRun, dryRunResult, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
     subject,
     description,
@@ -143,7 +172,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
       // yesterday's count" — see the customer-announcement form's own
       // canSubmit for the identical reasoning.
       !resolvedAudience.isError &&
-      resolvedAudience.total > 0 &&
+      submitProjectIds.length > 0 &&
       subject.trim().length > 0 &&
       !isEmptyHtml(description) &&
       !submitting,
@@ -152,7 +181,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
       productVersionId,
       resolvedAudience.isLoading,
       resolvedAudience.isError,
-      resolvedAudience.total,
+      submitProjectIds,
       subject,
       description,
       submitting,
@@ -164,16 +193,15 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     setSubmitting(true);
 
     const trimmedSubject = subject.trim();
-    const targetProjectIds = resolvedAudience.projects.map((p) => p.id);
     setSendProgress({
-      total: targetProjectIds.length,
+      total: submitProjectIds.length,
       completed: 0,
       succeeded: 0,
       failed: 0,
       failedProjectIds: [],
     });
     const results = await settleWithConcurrencyLimit(
-      targetProjectIds,
+      submitProjectIds,
       ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
       (projectId) =>
         postCase.mutateAsync({
@@ -199,23 +227,28 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     );
     setSubmitting(false);
 
-    const failedProjectIds = targetProjectIds.filter((_, i) => results[i].status === "rejected");
+    const failedProjectIds = submitProjectIds.filter((_, i) => results[i].status === "rejected");
 
     if (failedProjectIds.length === 0) {
+      setRetryProjectIds(null);
       navigate(BACK_TARGET);
       return;
     }
 
-    const succeededCount = targetProjectIds.length - failedProjectIds.length;
+    // The next submit must target only these projects, not the full
+    // audience again — see retryProjectIds' own doc comment above.
+    setRetryProjectIds(failedProjectIds);
+
+    const succeededCount = submitProjectIds.length - failedProjectIds.length;
     showError(
       succeededCount > 0
-        ? `The announcement was created for ${succeededCount} of ${targetProjectIds.length} project${
-            targetProjectIds.length === 1 ? "" : "s"
+        ? `The announcement was created for ${succeededCount} of ${submitProjectIds.length} project${
+            submitProjectIds.length === 1 ? "" : "s"
           }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds
             .map(projectLabel)
-            .join(", ")} — create it again for the failed project${
+            .join(", ")} — click "Retry" to resend to just the failed project${
             failedProjectIds.length === 1 ? "" : "s"
-          } only.`
+          }.`
         : "Could not create the announcement. Please try again.",
     );
     // Stay on this page instead of navigating away — at least one customer
@@ -370,7 +403,11 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
           Cancel
         </Button>
         <Button variant="contained" onClick={() => void handleSubmit()} disabled={!canSubmit}>
-          {submitting ? "Creating…" : "Create announcement"}
+          {submitting
+            ? "Creating…"
+            : retryProjectIds
+              ? `Retry ${retryProjectIds.length} failed project${retryProjectIds.length === 1 ? "" : "s"}`
+              : "Create announcement"}
         </Button>
       </Box>
     </Card>

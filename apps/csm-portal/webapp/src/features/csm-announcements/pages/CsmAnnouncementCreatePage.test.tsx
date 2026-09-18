@@ -265,6 +265,46 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(screen.getByText(/didn.t receive the announcement/i)).toBeInTheDocument();
   });
 
+  it("retries only the failed project on the next submit — never resends to one that already succeeded", async () => {
+    let proj2Attempts = 0;
+    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) => {
+      if (projectId === "proj-2") {
+        proj2Attempts += 1;
+        return proj2Attempts === 1
+          ? Promise.reject(new Error("network down"))
+          : Promise.resolve({ id: "ann-2-retry" });
+      }
+      return Promise.resolve({ id: "ann-1" });
+    });
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-2"));
+    });
+    expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
+
+    // The button itself now says so — this isn't a generic re-submit.
+    const retryButton = await screen.findByRole("button", { name: /retry 1 failed project/i });
+    fireEvent.click(retryButton);
+
+    await waitFor(() => {
+      expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(3);
+    });
+    // Only proj-2 (the one that actually failed) was resubmitted — proj-1,
+    // which already succeeded, must never be called a second time, or it
+    // would end up with two duplicate announcement cases.
+    expect(postCaseMutateAsyncMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ projectId: "proj-2" }),
+    );
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+  });
+
   it("surfaces a single error and does not navigate when every project fails", async () => {
     postCaseMutateAsyncMock.mockRejectedValue(new Error("network down"));
     renderPage();
@@ -730,6 +770,45 @@ describe("CsmAnnouncementCreatePage", () => {
       // navigating away, so its id stays visible on the progress card.
       expect(navigateMock).not.toHaveBeenCalled();
       expect(screen.getByText("proj-b")).toBeInTheDocument();
+    });
+
+    it("retries only the failed project on the next submit — never resends to one that already succeeded", async () => {
+      mockEolBackend();
+      let projBAttempts = 0;
+      postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) => {
+        if (projectId === "proj-b") {
+          projBAttempts += 1;
+          return projBAttempts === 1
+            ? Promise.reject(new Error("network down"))
+            : Promise.resolve({ id: "ann-eol-b-retry" });
+        }
+        return Promise.resolve({ id: "ann-eol-a" });
+      });
+      renderPage();
+      switchToEolKind();
+      await selectProductAndVersion();
+      expect(await screen.findByText("Project A")).toBeInTheDocument();
+
+      fillSubjectAndDescription();
+      fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+      await waitFor(() => {
+        expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-b"));
+      });
+      expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
+
+      const retryButton = await screen.findByRole("button", { name: /retry 1 failed project/i });
+      fireEvent.click(retryButton);
+
+      await waitFor(() => {
+        expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(3);
+      });
+      expect(postCaseMutateAsyncMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ projectId: "proj-b" }),
+      );
+      await waitFor(() => {
+        expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+      });
     });
 
     it("the dry run creates one case in the configured test project, tagged Dry Run only", async () => {

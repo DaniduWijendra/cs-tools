@@ -177,9 +177,34 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     [projectKeyById],
   );
 
+  // When set, a prior submit left these (and only these) projects without
+  // an announcement — the next submit targets just this narrower list
+  // instead of the full audience again, so a retry after a partial failure
+  // can't create a second, duplicate case for a project that already
+  // succeeded. Reset back to "submit the full audience" the moment the
+  // audience itself changes (a different scope, a different pick, a
+  // re-resolved "all" list) — a stale retry target from a previous audience
+  // would silently narrow a genuinely new send to the wrong projects.
+  const [retryProjectIds, setRetryProjectIds] = useState<string[] | null>(null);
+  // Adjusting state during render (React's own recommended pattern for
+  // "reset state when a derived value changes") rather than an effect — the
+  // audience changing is itself the render this needs to react to, not a
+  // side effect to synchronize afterward. Compared by content (JSON.stringify),
+  // not by reference: resolvedAudience.projects falls back to a fresh `[]`
+  // on every render while unresolved/disabled, so targetProjectIds is never
+  // referentially stable — comparing by reference here would reset on every
+  // single render and loop.
+  const targetProjectIdsKey = JSON.stringify(targetProjectIds);
+  const [retryBaselineKey, setRetryBaselineKey] = useState(targetProjectIdsKey);
+  if (targetProjectIdsKey !== retryBaselineKey) {
+    setRetryBaselineKey(targetProjectIdsKey);
+    setRetryProjectIds(null);
+  }
+  const submitProjectIds = retryProjectIds ?? targetProjectIds;
+
   const canSubmit = useMemo(
     () =>
-      targetProjectIds.length > 0 &&
+      submitProjectIds.length > 0 &&
       !(scope === "all" && resolvedAudience.isLoading) &&
       // TanStack Query can retain a previous successful fetch's `data` after
       // a later refetch fails (isLoading goes back to false, but the stale
@@ -191,7 +216,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
       !isEmptyHtml(description) &&
       !submitting,
     [
-      targetProjectIds,
+      submitProjectIds,
       scope,
       resolvedAudience.isLoading,
       resolvedAudience.isError,
@@ -205,7 +230,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     if (!canSubmit) return;
     setSubmitting(true);
     setSendProgress({
-      total: targetProjectIds.length,
+      total: submitProjectIds.length,
       completed: 0,
       succeeded: 0,
       failed: 0,
@@ -219,7 +244,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     // problem to fix on an otherwise-successful case.
     const failedTagProjectIds: string[] = [];
     const results = await settleWithConcurrencyLimit(
-      targetProjectIds,
+      submitProjectIds,
       ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
       async (projectId) => {
         const created = await postCase.mutateAsync({
@@ -264,16 +289,26 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     // Neither audience source exposes picked project names for a failure
     // report beyond what's already resolved, so a failure is reported by id
     // — still enough for the engineer to identify which project(s) to retry.
-    const failedProjectIds = targetProjectIds.filter(
+    const failedProjectIds = submitProjectIds.filter(
       (_, i) => results[i].status === "rejected",
     );
 
     if (failedProjectIds.length === 0 && failedTagProjectIds.length === 0) {
+      setRetryProjectIds(null);
       navigate(BACK_TARGET);
       return;
     }
 
-    const succeededCount = targetProjectIds.length - failedProjectIds.length;
+    // A create failure means the next submit must target only these
+    // projects, not the full audience again — otherwise clicking "Create
+    // announcement" a second time would resend to every project that
+    // already succeeded too, creating a duplicate case for each one (there
+    // is no idempotency key on the create call).
+    if (failedProjectIds.length > 0) {
+      setRetryProjectIds(failedProjectIds);
+    }
+
+    const succeededCount = submitProjectIds.length - failedProjectIds.length;
     if (succeededCount === 0) {
       // Every create call failed — nothing to report per-project beyond
       // what the progress card's own failed-id chips already show.
@@ -284,16 +319,16 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     const messages: string[] = [];
     if (failedProjectIds.length > 0) {
       messages.push(
-        `created for ${succeededCount} of ${targetProjectIds.length} project${
-          targetProjectIds.length === 1 ? "" : "s"
+        `created for ${succeededCount} of ${submitProjectIds.length} project${
+          submitProjectIds.length === 1 ? "" : "s"
         }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds
           .map(projectLabel)
-          .join(", ")} — create it again for the failed project${
+          .join(", ")} — click "Retry" to resend to just the failed project${
           failedProjectIds.length === 1 ? "" : "s"
-        } only`,
+        }`,
       );
     } else {
-      messages.push(`created for all ${targetProjectIds.length} project${targetProjectIds.length === 1 ? "" : "s"}`);
+      messages.push(`created for all ${submitProjectIds.length} project${submitProjectIds.length === 1 ? "" : "s"}`);
     }
     if (failedTagProjectIds.length > 0) {
       messages.push(
@@ -435,7 +470,11 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           onClick={() => void handleSubmit()}
           disabled={!canSubmit}
         >
-          {submitting ? "Creating…" : "Create announcement"}
+          {submitting
+            ? "Creating…"
+            : retryProjectIds
+              ? `Retry ${retryProjectIds.length} failed project${retryProjectIds.length === 1 ? "" : "s"}`
+              : "Create announcement"}
         </Button>
       </Box>
     </Card>
