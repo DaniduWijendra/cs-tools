@@ -143,10 +143,12 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
   // Adjusting state during render (React's own recommended pattern for
   // "reset state when a derived value changes") rather than an effect — see
   // the customer-announcement form's own retryBaselineKey for why this
-  // compares by content (JSON.stringify) rather than array reference:
-  // resolvedAudience.projects falls back to a fresh `[]` on every render
-  // while unresolved, so targetProjectIds is never referentially stable.
-  const targetProjectIdsKey = JSON.stringify(targetProjectIds);
+  // compares by content (JSON.stringify of a *sorted* copy) rather than
+  // array reference: resolvedAudience.projects falls back to a fresh `[]`
+  // on every render while unresolved, so targetProjectIds is never
+  // referentially stable, and a refetch of the same audience isn't
+  // guaranteed to return the same project order either.
+  const targetProjectIdsKey = JSON.stringify([...targetProjectIds].sort());
   const [retryBaselineKey, setRetryBaselineKey] = useState(targetProjectIdsKey);
   if (targetProjectIdsKey !== retryBaselineKey) {
     setRetryBaselineKey(targetProjectIdsKey);
@@ -348,9 +350,18 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
             value={subject}
             onChange={(e) => setSubject(e.target.value.slice(0, 200))}
             helperText={subject.length >= 160 ? `${subject.length}/200` : undefined}
-            disabled={submitting}
+            disabled={submitting || !!retryProjectIds}
           />
         </Grid>
+        {retryProjectIds && (
+          <Grid size={{ xs: 12 }}>
+            <Typography variant="caption" color="text.secondary">
+              Subject and description are locked while retrying failed projects — this resend
+              must match what the succeeded projects already got. Change the product/version
+              above to start a new send instead.
+            </Typography>
+          </Grid>
+        )}
         <Grid size={{ xs: 12 }}>
           <Typography
             id="eol-announcement-description-label"
@@ -371,7 +382,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
               minHeight={180}
               maxHeight={420}
               toolbarVariant="full"
-              disabled={submitting}
+              disabled={submitting || !!retryProjectIds}
             />
           </Box>
         </Grid>

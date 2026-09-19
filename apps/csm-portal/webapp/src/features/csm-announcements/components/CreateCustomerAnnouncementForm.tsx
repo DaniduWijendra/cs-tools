@@ -189,12 +189,16 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   // Adjusting state during render (React's own recommended pattern for
   // "reset state when a derived value changes") rather than an effect — the
   // audience changing is itself the render this needs to react to, not a
-  // side effect to synchronize afterward. Compared by content (JSON.stringify),
-  // not by reference: resolvedAudience.projects falls back to a fresh `[]`
-  // on every render while unresolved/disabled, so targetProjectIds is never
-  // referentially stable — comparing by reference here would reset on every
-  // single render and loop.
-  const targetProjectIdsKey = JSON.stringify(targetProjectIds);
+  // side effect to synchronize afterward. Compared by content (JSON.stringify
+  // of a *sorted* copy — order-independent), not by reference:
+  // resolvedAudience.projects falls back to a fresh `[]` on every render
+  // while unresolved/disabled, so targetProjectIds is never referentially
+  // stable — comparing by reference here would reset on every single render
+  // and loop. Sorting matters too: a refetch of the same audience isn't
+  // guaranteed to return the same project order, and an unsorted key would
+  // treat that reordering as "the audience changed," silently discarding an
+  // in-progress retry target for no real reason.
+  const targetProjectIdsKey = JSON.stringify([...targetProjectIds].sort());
   const [retryBaselineKey, setRetryBaselineKey] = useState(targetProjectIdsKey);
   if (targetProjectIdsKey !== retryBaselineKey) {
     setRetryBaselineKey(targetProjectIdsKey);
@@ -392,18 +396,28 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
             required
             value={subject}
             onChange={(e) => setSubject(e.target.value.slice(0, 200))}
+            disabled={submitting || !!retryProjectIds}
             helperText={
               subject.length >= 160 ? `${subject.length}/200` : undefined
             }
           />
         </Grid>
+        {retryProjectIds && (
+          <Grid size={{ xs: 12 }}>
+            <Typography variant="caption" color="text.secondary">
+              Subject, description, and the security label are locked while retrying failed
+              projects — this resend must match what the succeeded projects already got.
+              Change the audience above to start a new send instead.
+            </Typography>
+          </Grid>
+        )}
         <Grid size={{ xs: 12 }}>
           <FormControlLabel
             control={
               <Checkbox
                 size="small"
                 checked={isSecurityAnnouncement}
-                disabled={submitting}
+                disabled={submitting || !!retryProjectIds}
                 onChange={(e) => setIsSecurityAnnouncement(e.target.checked)}
               />
             }
@@ -434,7 +448,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
               minHeight={180}
               maxHeight={420}
               toolbarVariant="full"
-              disabled={submitting}
+              disabled={submitting || !!retryProjectIds}
             />
           </Box>
         </Grid>

@@ -49,8 +49,21 @@ vi.mock("@features/csm-cases/api/usePostCsmCase", () => ({
   usePostCsmCase: () => ({ mutateAsync: postCaseMutateAsyncMock }),
 }));
 vi.mock("@components/rich-text-editor/Editor", () => ({
-  default: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
-    <textarea aria-label="editor" value={value} onChange={(e) => onChange(e.target.value)} />
+  default: ({
+    value,
+    onChange,
+    disabled,
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    disabled?: boolean;
+  }) => (
+    <textarea
+      aria-label="editor"
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+    />
   ),
 }));
 // The real multi-select searches the backend as the user types; stub it with
@@ -303,6 +316,30 @@ describe("CsmAnnouncementCreatePage", () => {
     await waitFor(() => {
       expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
     });
+  });
+
+  it("locks subject, description, and the security checkbox while a retry is pending — the resend must match what already went out", async () => {
+    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+      projectId === "proj-1"
+        ? Promise.resolve({ id: "ann-1" })
+        : Promise.reject(new Error("network down")),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-2"));
+    });
+
+    expect(screen.getByLabelText(/subject/i)).toBeDisabled();
+    expect(screen.getByLabelText("editor")).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", { name: /this is a security announcement/i }),
+    ).toBeDisabled();
+    expect(screen.getByText(/locked while retrying failed projects/i)).toBeInTheDocument();
   });
 
   it("surfaces a single error and does not navigate when every project fails", async () => {
@@ -809,6 +846,30 @@ describe("CsmAnnouncementCreatePage", () => {
       await waitFor(() => {
         expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
       });
+    });
+
+    it("locks subject and description while a retry is pending — the resend must match what already went out", async () => {
+      mockEolBackend();
+      postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+        projectId === "proj-a"
+          ? Promise.resolve({ id: "ann-eol-1" })
+          : Promise.reject(new Error("network down")),
+      );
+      renderPage();
+      switchToEolKind();
+      await selectProductAndVersion();
+      expect(await screen.findByText("Project A")).toBeInTheDocument();
+
+      fillSubjectAndDescription();
+      fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+      await waitFor(() => {
+        expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-b"));
+      });
+
+      expect(screen.getByLabelText(/subject/i)).toBeDisabled();
+      expect(screen.getByLabelText("editor")).toBeDisabled();
+      expect(screen.getByText(/locked while retrying failed projects/i)).toBeInTheDocument();
     });
 
     it("the dry run creates one case in the configured test project, tagged Dry Run only", async () => {
