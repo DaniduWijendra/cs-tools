@@ -153,6 +153,10 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
   if (targetProjectIdsKey !== retryBaselineKey) {
     setRetryBaselineKey(targetProjectIdsKey);
     setRetryProjectIds(null);
+    // The previous batch's own outcome no longer describes this audience —
+    // leaving it up would show stale failed-project chips/counts as if they
+    // applied to the newly selected product/version.
+    setSendProgress(null);
   }
   const submitProjectIds = retryProjectIds ?? targetProjectIds;
 

@@ -363,6 +363,32 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(screen.getByText(/locked while retrying failed projects/i)).toBeInTheDocument();
   });
 
+  it("clears the stale progress card when the audience changes after a partial failure", async () => {
+    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
+      projectId === "proj-1"
+        ? Promise.resolve({ id: "ann-1" })
+        : Promise.reject(new Error("network down")),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1", "proj-2");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("proj-2"));
+    });
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    // Changing the selection is the sender's own signal that they want a
+    // different send, not a retry — the old batch's outcome (proj-2 failed)
+    // no longer describes this new selection and must not linger on screen.
+    selectProjects("proj-1");
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/subject/i)).toBeEnabled();
+  });
+
   it("surfaces a single error and does not navigate when every project fails", async () => {
     postCaseMutateAsyncMock.mockRejectedValue(new Error("network down"));
     renderPage();
