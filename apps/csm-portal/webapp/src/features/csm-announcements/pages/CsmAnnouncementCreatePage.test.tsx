@@ -74,14 +74,17 @@ vi.mock("@features/csm-cases/components/AsyncProjectMultiSelect", () => ({
   default: ({
     values,
     onChange,
+    disabled,
   }: {
     values: string[];
     onChange: (next: string[]) => void;
+    disabled?: boolean;
   }) => (
     <select
       aria-label="Projects"
       multiple
       value={values}
+      disabled={disabled}
       onChange={(e) =>
         onChange(Array.from(e.target.selectedOptions).map((o) => o.value))
       }
@@ -209,6 +212,27 @@ describe("CsmAnnouncementCreatePage", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /cancel/i })).toBeDisabled();
+    });
+
+    resolveCall({ id: "ann-1" });
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+  });
+
+  it("disables the project picker while a batch is in flight — changing the selection mid-send must not disrupt it", async () => {
+    let resolveCall: (v: { id: string }) => void = () => {};
+    postCaseMutateAsyncMock.mockImplementation(
+      () => new Promise((resolve) => { resolveCall = resolve; }),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Projects")).toBeDisabled();
     });
 
     resolveCall({ id: "ann-1" });

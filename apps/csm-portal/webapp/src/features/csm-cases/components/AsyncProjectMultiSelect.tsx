@@ -52,6 +52,7 @@ interface AsyncProjectMultiSelectProps {
    * short key elsewhere in the UI instead of its raw id.
    */
   onSelectedProjectsChange?: (selected: ProjectOption[]) => void;
+  disabled?: boolean;
 }
 
 /**
@@ -67,6 +68,7 @@ export default function AsyncProjectMultiSelect({
   onChange,
   nameSeed,
   onSelectedProjectsChange,
+  disabled,
 }: AsyncProjectMultiSelectProps): JSX.Element {
   const [input, setInput] = useState("");
   const [open, setOpen] = useState(false);
@@ -145,6 +147,7 @@ export default function AsyncProjectMultiSelect({
       id={id}
       options={options}
       value={selectedOptions}
+      disabled={disabled}
       open={open}
       onOpen={() => setOpen(true)}
       onClose={() => setOpen(false)}

@@ -118,6 +118,7 @@ export default function AudienceScopeControls({
           label="Projects"
           values={projectIds}
           onChange={onProjectIdsChange}
+          disabled={disabled}
           onSelectedProjectsChange={
             onProjectKeysChange
               ? (selected) => {
