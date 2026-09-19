@@ -661,7 +661,7 @@ describe("CsmAnnouncementCreatePage", () => {
     });
   });
 
-  it("shows the backend-configured excluded project keys as read-only chips under 'All customer projects'", async () => {
+  it("shows the backend-configured excluded project keys as a checked, disabled checkbox with read-only chips under 'All customer projects'", async () => {
     excludedProjectKeysGetMock.mockResolvedValue({
       excludedProjectKeys: ["Apexia", "Veridian", "Veloxis"],
     });
@@ -679,6 +679,31 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(await screen.findByText("Apexia")).toBeInTheDocument();
     expect(screen.getByText("Veridian")).toBeInTheDocument();
     expect(screen.getByText("Veloxis")).toBeInTheDocument();
+
+    const mandatoryExclusionCheckbox = screen.getByRole("checkbox", {
+      name: /exclude these configured projects/i,
+    });
+    expect(mandatoryExclusionCheckbox).toBeChecked();
+    expect(mandatoryExclusionCheckbox).toBeDisabled();
+  });
+
+  it("shows no mandatory-exclusion checkbox when nothing is configured", async () => {
+    excludedProjectKeysGetMock.mockResolvedValue({ excludedProjectKeys: [] });
+    projectSearchPostMock.mockResolvedValue({
+      projects: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+    });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
+
+    await waitFor(() => expect(excludedProjectKeysGetMock).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("checkbox", { name: /exclude these configured projects/i }),
+    ).not.toBeInTheDocument();
   });
 
   describe("EOL / product-version flow", () => {
