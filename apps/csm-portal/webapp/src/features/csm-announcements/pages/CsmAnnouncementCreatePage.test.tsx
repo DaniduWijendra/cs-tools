@@ -196,6 +196,27 @@ describe("CsmAnnouncementCreatePage", () => {
     });
   });
 
+  it("disables Cancel while a batch is in flight — navigating away must not let the in-flight sends silently keep creating cases unseen", async () => {
+    let resolveCall: (v: { id: string }) => void = () => {};
+    postCaseMutateAsyncMock.mockImplementation(
+      () => new Promise((resolve) => { resolveCall = resolve; }),
+    );
+    renderPage();
+
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /cancel/i })).toBeDisabled();
+    });
+
+    resolveCall({ id: "ann-1" });
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    });
+  });
+
   it("shows live send progress as each project's create call settles", async () => {
     const resolvers: Array<(v: { id: string }) => void> = [];
     postCaseMutateAsyncMock.mockImplementation(

@@ -410,7 +410,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
           borderColor: "divider",
         }}
       >
-        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
+        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)} disabled={submitting}>
           Cancel
         </Button>
         <Button variant="contained" onClick={() => void handleSubmit()} disabled={!canSubmit}>

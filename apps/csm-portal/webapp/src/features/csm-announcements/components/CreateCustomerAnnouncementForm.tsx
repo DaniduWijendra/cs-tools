@@ -476,7 +476,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           borderColor: "divider",
         }}
       >
-        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
+        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)} disabled={submitting}>
           Cancel
         </Button>
         <Button
