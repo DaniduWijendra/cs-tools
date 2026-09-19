@@ -179,8 +179,9 @@ type AnnouncementRequestService interface {
 	// (plain edit, edit-and-revert-to-draft, or edit-in-place) depends
 	// entirely on the request's current state; see the service's own
 	// implementation doc comment for the full breakdown. A ConflictError is
-	// returned if the request is published, or if an audience change is
-	// attempted while approved.
+	// returned if the request is published; a ValidationError if an
+	// audience change is attempted while approved (the approved snapshot
+	// is frozen — this is a rejected request shape, not a state conflict).
 	Update(ctx context.Context, id string, req domain.UpdateAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
 	// RecordDryRun records that a dry run (created by the caller's own
 	// mechanism, not this service) has completed for this request. A

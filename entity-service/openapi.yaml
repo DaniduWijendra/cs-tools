@@ -385,7 +385,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnnouncementRequest'
         "400":
-          description: Bad request.
+          description: Bad request, or an audience change was attempted on an approved request (the approved snapshot is frozen).
           content:
             application/json:
               schema:
@@ -397,7 +397,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "409":
-          description: The request is published, or an audience change was attempted on an approved request.
+          description: The request is published.
           content:
             application/json:
               schema:
