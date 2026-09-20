@@ -24,7 +24,7 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { useEffect, useMemo, useState, type JSX } from "react";
+import { useMemo, useState, type JSX } from "react";
 import type { BeSubscriptionType } from "@api/backend/types";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
@@ -35,7 +35,6 @@ import { useCreateAnnouncementRequest } from "@features/csm-announcements/api/us
 import { useUpdateAnnouncementRequest } from "@features/csm-announcements/api/useUpdateAnnouncementRequest";
 import { useRecordAnnouncementRequestDryRun } from "@features/csm-announcements/api/useRecordAnnouncementRequestDryRun";
 import { useSubmitAnnouncementRequest } from "@features/csm-announcements/api/useSubmitAnnouncementRequest";
-import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
 import AudienceScopeControls, {
   type AnnouncementAudienceScope,
 } from "@features/csm-announcements/components/AudienceScopeControls";
@@ -91,12 +90,15 @@ const PENDING_TARGET = "/announcements?tab=pending";
  * (with the mandatory excluded-project-key denylist applied), not from
  * whatever this list happened to show a moment earlier.
  *
- * "Dry run" is the shared useAnnouncementDryRun/AnnouncementDryRunCard pair
- * (also used by the EOL/product-version flow) — creates exactly one real
- * case in a single fixed test project. Running it for the first time lazily
- * creates the draft (see the effects below); recording it on the draft is
- * what unblocks "Submit for approval" — mirrors the mandatory dry-run gate
- * `AnnouncementRequestService.Submit` enforces server-side.
+ * "Submit for approval" runs the dry run (the shared useAnnouncementDryRun
+ * mechanism, also used by the EOL flow — creates one real case in a fixed
+ * test project), then creates/updates the draft, records the dry run onto
+ * it, and submits — all in one click, not a separate "run a dry run first"
+ * step. The real announcement process this replaces shares that exact
+ * dry-run case's link with the approver for review, so there's nothing to
+ * gain from a distinct preview step before submitting; if the sender wants
+ * to change anything afterward, editing a `pending_approval` request (via
+ * the dialog) already reverts it to draft for a fresh attempt.
  */
 export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const navigate = useNavTransition();
@@ -110,24 +112,24 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const [description, setDescription] = useState("");
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
-
+  const [submittingForApproval, setSubmittingForApproval] = useState(false);
   const [draftId, setDraftId] = useState<string | null>(null);
-  const [dryRunRecordedForCaseId, setDryRunRecordedForCaseId] = useState<string | null>(null);
 
   const createDraft = useCreateAnnouncementRequest();
-  const updateDraft = useUpdateAnnouncementRequest(draftId ?? undefined);
-  const recordDryRun = useRecordAnnouncementRequestDryRun(draftId ?? undefined);
-  const submitRequest = useSubmitAnnouncementRequest(draftId ?? undefined);
+  const updateDraft = useUpdateAnnouncementRequest();
+  const recordDryRun = useRecordAnnouncementRequestDryRun();
+  const submitRequest = useSubmitAnnouncementRequest();
 
   const dryRunTagLabels = useMemo(
     () => [DRY_RUN_TAG_LABEL, ...(isSecurityAnnouncement ? [SECURITY_ANNOUNCEMENT_TAG_LABEL] : [])],
     [isSecurityAnnouncement],
   );
-  const { runningDryRun, dryRunResult, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
+  const busy = savingDraft || submittingForApproval;
+  const { runningDryRun, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
     subject,
     description,
     tagLabels: dryRunTagLabels,
-    extraCanRun: !savingDraft,
+    extraCanRun: !busy,
   });
 
   const audienceFilters = useMemo(
@@ -161,97 +163,19 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     [scope, projectIds, excludeClosedStates, excludeCloudTypes],
   );
 
-  // A dry run is the trigger that actually creates the draft — running one
-  // is the mandatory first step either way, so there's no reason to make the
-  // sender explicitly "Save as draft" first just to give the dry run
-  // somewhere to attach to.
-  useEffect(() => {
-    if (dryRunResult && !draftId && !createDraft.isPending) {
-      createDraft.mutate(
-        {
-          kind: "customer",
-          subject: subject.trim(),
-          description,
-          isSecurityAnnouncement,
-          audienceDefinition,
-        },
-        { onSuccess: (created) => setDraftId(created.id) },
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dryRunResult, draftId]);
+  const canSaveDraft = subject.trim().length > 0 && !isEmptyHtml(description) && !busy;
 
-  // Persists the dry run onto the draft once both exist, then re-syncs the
-  // draft's content to whatever was actually just dry-run-verified — the
-  // draft may have been created earlier (or with different content, if the
-  // sender edited subject/description between an earlier dry run and this
-  // one) and drifted since.
-  useEffect(() => {
-    if (dryRunResult && draftId && dryRunRecordedForCaseId !== dryRunResult.caseId) {
-      setDryRunRecordedForCaseId(dryRunResult.caseId);
-      recordDryRun.mutate(
-        { caseId: dryRunResult.caseId },
-        {
-          onSuccess: () =>
-            updateDraft.mutate({
-              subject: subject.trim(),
-              description,
-              isSecurityAnnouncement,
-              audienceDefinition,
-            }),
-        },
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dryRunResult, draftId, dryRunRecordedForCaseId]);
-
-  // The dry run itself never touches audience (it always targets the fixed
-  // test project), so an audience-only edit after a dry run has already been
-  // recorded wouldn't otherwise re-sync — keep the draft's audience current
-  // independently of dry-run state.
-  useEffect(() => {
-    if (!draftId) return;
-    updateDraft.mutate({ audienceDefinition });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftId, audienceDefinition]);
-
-  useEffect(() => {
-    if (createDraft.isError) {
-      showError("Could not save this draft. Please try again.");
-    }
-  }, [createDraft.isError, showError]);
-
-  // True only once a dry run has been both run AND confirmed persisted onto
-  // the current draft — mirrors AnnouncementRequestService.Submit's own
-  // server-side gate, so this button's disabled state never promises
-  // something the actual submit call would then reject.
-  const dryRunConfirmed = !!dryRunResult && dryRunRecordedForCaseId === dryRunResult.caseId;
-
-  const canSaveDraft = subject.trim().length > 0 && !isEmptyHtml(description) && !savingDraft;
-
-  const canSubmit = useMemo(
-    () =>
-      dryRunConfirmed &&
-      !!draftId &&
-      targetProjectIds.length > 0 &&
-      !(scope === "all" && resolvedAudience.isLoading) &&
-      // TanStack Query can retain a previous successful fetch's `data` after
-      // a later refetch fails (isLoading goes back to false, but the stale
-      // list is still sitting there) — without this check, targetProjectIds
-      // would still look populated and a resolution failure could let the
-      // sender submit against an audience that's actually out of date.
-      !(scope === "all" && resolvedAudience.isError) &&
-      !submitRequest.isPending,
-    [
-      dryRunConfirmed,
-      draftId,
-      targetProjectIds,
-      scope,
-      resolvedAudience.isLoading,
-      resolvedAudience.isError,
-      submitRequest.isPending,
-    ],
-  );
+  const canSubmitForApproval =
+    canRunDryRun &&
+    targetProjectIds.length > 0 &&
+    !(scope === "all" && resolvedAudience.isLoading) &&
+    // TanStack Query can retain a previous successful fetch's `data` after a
+    // later refetch fails (isLoading goes back to false, but the stale list
+    // is still sitting there) — without this check, targetProjectIds would
+    // still look populated and a resolution failure could let the sender
+    // submit against an audience that's actually out of date.
+    !(scope === "all" && resolvedAudience.isError) &&
+    !busy;
 
   const handleSaveDraft = async (): Promise<void> => {
     if (!canSaveDraft) return;
@@ -259,19 +183,21 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     try {
       if (draftId) {
         await updateDraft.mutateAsync({
+          id: draftId,
           subject: subject.trim(),
           description,
           isSecurityAnnouncement,
           audienceDefinition,
         });
       } else {
-        await createDraft.mutateAsync({
+        const created = await createDraft.mutateAsync({
           kind: "customer",
           subject: subject.trim(),
           description,
           isSecurityAnnouncement,
           audienceDefinition,
         });
+        setDraftId(created.id);
       }
       navigate(PENDING_TARGET);
     } catch {
@@ -282,9 +208,35 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   };
 
   const handleSubmitForApproval = async (): Promise<void> => {
-    if (!canSubmit) return;
+    if (!canSubmitForApproval) return;
+    setSubmittingForApproval(true);
     try {
-      await submitRequest.mutateAsync();
+      const result = await handleRunDryRun();
+      if (!result) return; // useAnnouncementDryRun already surfaced the error
+
+      let id = draftId;
+      if (id) {
+        await updateDraft.mutateAsync({
+          id,
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement,
+          audienceDefinition,
+        });
+      } else {
+        const created = await createDraft.mutateAsync({
+          kind: "customer",
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement,
+          audienceDefinition,
+        });
+        id = created.id;
+        setDraftId(id);
+      }
+
+      await recordDryRun.mutateAsync({ id, caseId: result.caseId });
+      await submitRequest.mutateAsync({ id });
       navigate(PENDING_TARGET);
     } catch (error) {
       showError(
@@ -292,6 +244,8 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           ? error.message
           : "Could not submit this request for approval. Please try again.",
       );
+    } finally {
+      setSubmittingForApproval(false);
     }
   };
 
@@ -309,7 +263,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
             excludeClosedStates={excludeClosedStates}
             onExcludeClosedStatesChange={setExcludeClosedStates}
             excludedProjectKeys={excludedProjectKeysQuery.data ?? []}
-            disabled={savingDraft}
+            disabled={busy}
           />
         </Grid>
 
@@ -343,7 +297,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
               <Checkbox
                 size="small"
                 checked={isSecurityAnnouncement}
-                disabled={savingDraft}
+                disabled={busy}
                 onChange={(e) => setIsSecurityAnnouncement(e.target.checked)}
               />
             }
@@ -374,18 +328,11 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
               minHeight={180}
               maxHeight={420}
               toolbarVariant="full"
-              disabled={savingDraft}
+              disabled={busy}
             />
           </Box>
         </Grid>
       </Grid>
-
-      <AnnouncementDryRunCard
-        runningDryRun={runningDryRun}
-        dryRunResult={dryRunResult}
-        canRunDryRun={canRunDryRun}
-        onRunDryRun={() => void handleRunDryRun()}
-      />
 
       <Box
         sx={{
@@ -405,15 +352,17 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
         <Button variant="outlined" onClick={() => void handleSaveDraft()} disabled={!canSaveDraft}>
           {savingDraft ? "Saving…" : "Save as draft"}
         </Button>
-        <Button variant="contained" onClick={() => void handleSubmitForApproval()} disabled={!canSubmit}>
-          {submitRequest.isPending ? "Submitting…" : "Submit for approval"}
+        <Button
+          variant="contained"
+          onClick={() => void handleSubmitForApproval()}
+          disabled={!canSubmitForApproval}
+        >
+          {runningDryRun ? "Running dry run…" : submittingForApproval ? "Submitting…" : "Submit for approval"}
         </Button>
       </Box>
-      {!dryRunConfirmed && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "right", mt: 0.5 }}>
-          Run a dry run above before submitting for approval.
-        </Typography>
-      )}
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "right", mt: 0.5 }}>
+        Submitting creates a real case in the DCPSUB test project to share with your approver.
+      </Typography>
     </Card>
   );
 }

@@ -28,7 +28,7 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { useEffect, useMemo, useState, type JSX } from "react";
+import { useMemo, useState, type JSX } from "react";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAnnouncementDryRun, DRY_RUN_TAG_LABEL } from "@features/csm-announcements/api/useAnnouncementDryRun";
@@ -37,7 +37,6 @@ import { useCreateAnnouncementRequest } from "@features/csm-announcements/api/us
 import { useUpdateAnnouncementRequest } from "@features/csm-announcements/api/useUpdateAnnouncementRequest";
 import { useRecordAnnouncementRequestDryRun } from "@features/csm-announcements/api/useRecordAnnouncementRequestDryRun";
 import { useSubmitAnnouncementRequest } from "@features/csm-announcements/api/useSubmitAnnouncementRequest";
-import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
 import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
 import type { EolAudienceDefinition } from "@features/csm-announcements/types/announcementRequests";
 import { useSearchProducts } from "@features/csm-projects/api/useSearchProducts";
@@ -77,14 +76,13 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [savingDraft, setSavingDraft] = useState(false);
-
+  const [submittingForApproval, setSubmittingForApproval] = useState(false);
   const [draftId, setDraftId] = useState<string | null>(null);
-  const [dryRunRecordedForCaseId, setDryRunRecordedForCaseId] = useState<string | null>(null);
 
   const createDraft = useCreateAnnouncementRequest();
-  const updateDraft = useUpdateAnnouncementRequest(draftId ?? undefined);
-  const recordDryRun = useRecordAnnouncementRequestDryRun(draftId ?? undefined);
-  const submitRequest = useSubmitAnnouncementRequest(draftId ?? undefined);
+  const updateDraft = useUpdateAnnouncementRequest();
+  const recordDryRun = useRecordAnnouncementRequestDryRun();
+  const submitRequest = useSubmitAnnouncementRequest();
 
   const { data: products, isLoading: productsLoading } = useSearchProducts();
   const { data: versions, isLoading: versionsLoading } = useSearchProductVersions(
@@ -101,11 +99,12 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     productVersionId || undefined,
   );
 
-  const { runningDryRun, dryRunResult, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
+  const busy = savingDraft || submittingForApproval;
+  const { runningDryRun, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
     subject,
     description,
     tagLabels: DRY_RUN_TAG_LABELS,
-    extraCanRun: !savingDraft,
+    extraCanRun: !busy,
   });
 
   const audienceDefinition: EolAudienceDefinition = useMemo(
@@ -113,87 +112,36 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     [productId, productVersionId],
   );
 
-  // See CreateCustomerAnnouncementForm's identical trio of effects for the
-  // full reasoning — running a dry run is what actually creates the draft;
-  // recording it re-syncs whatever content was just verified; audience
-  // (here, product/version) is kept in sync independently since the dry run
-  // never touches it.
-  useEffect(() => {
-    if (dryRunResult && !draftId && !createDraft.isPending) {
-      createDraft.mutate(
-        { kind: "eol", subject: subject.trim(), description, isSecurityAnnouncement: false, audienceDefinition },
-        { onSuccess: (created) => setDraftId(created.id) },
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dryRunResult, draftId]);
-
-  useEffect(() => {
-    if (dryRunResult && draftId && dryRunRecordedForCaseId !== dryRunResult.caseId) {
-      setDryRunRecordedForCaseId(dryRunResult.caseId);
-      recordDryRun.mutate(
-        { caseId: dryRunResult.caseId },
-        {
-          onSuccess: () =>
-            updateDraft.mutate({ subject: subject.trim(), description, audienceDefinition }),
-        },
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dryRunResult, draftId, dryRunRecordedForCaseId]);
-
-  useEffect(() => {
-    if (!draftId) return;
-    updateDraft.mutate({ audienceDefinition });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftId, audienceDefinition]);
-
-  useEffect(() => {
-    if (createDraft.isError) {
-      showError("Could not save this draft. Please try again.");
-    }
-  }, [createDraft.isError, showError]);
-
-  const dryRunConfirmed = !!dryRunResult && dryRunRecordedForCaseId === dryRunResult.caseId;
-
   const canSaveDraft =
-    !!productId && !!productVersionId && subject.trim().length > 0 && !isEmptyHtml(description) && !savingDraft;
+    !!productId && !!productVersionId && subject.trim().length > 0 && !isEmptyHtml(description) && !busy;
 
-  const canSubmit = useMemo(
-    () =>
-      dryRunConfirmed &&
-      !!draftId &&
-      !resolvedAudience.isLoading &&
-      // See CreateCustomerAnnouncementForm's identical check: a stale
-      // successful fetch can leave `total` looking populated after a later
-      // refetch fails.
-      !resolvedAudience.isError &&
-      resolvedAudience.total > 0 &&
-      !submitRequest.isPending,
-    [
-      dryRunConfirmed,
-      draftId,
-      resolvedAudience.isLoading,
-      resolvedAudience.isError,
-      resolvedAudience.total,
-      submitRequest.isPending,
-    ],
-  );
+  const canSubmitForApproval =
+    canRunDryRun &&
+    !!productId &&
+    !!productVersionId &&
+    !resolvedAudience.isLoading &&
+    // See CreateCustomerAnnouncementForm's identical check: a stale
+    // successful fetch can leave `total` looking populated after a later
+    // refetch fails.
+    !resolvedAudience.isError &&
+    resolvedAudience.total > 0 &&
+    !busy;
 
   const handleSaveDraft = async (): Promise<void> => {
     if (!canSaveDraft) return;
     setSavingDraft(true);
     try {
       if (draftId) {
-        await updateDraft.mutateAsync({ subject: subject.trim(), description, audienceDefinition });
+        await updateDraft.mutateAsync({ id: draftId, subject: subject.trim(), description, audienceDefinition });
       } else {
-        await createDraft.mutateAsync({
+        const created = await createDraft.mutateAsync({
           kind: "eol",
           subject: subject.trim(),
           description,
           isSecurityAnnouncement: false,
           audienceDefinition,
         });
+        setDraftId(created.id);
       }
       navigate(PENDING_TARGET);
     } catch {
@@ -203,10 +151,35 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
     }
   };
 
+  // "Submit for approval" runs the dry run, then creates/updates the draft,
+  // records the dry run onto it, and submits — one action. See
+  // CreateCustomerAnnouncementForm's identical handler for the full
+  // reasoning (the dry-run case is what actually gets shared for approval,
+  // so there's no separate preview step to gain from).
   const handleSubmitForApproval = async (): Promise<void> => {
-    if (!canSubmit) return;
+    if (!canSubmitForApproval) return;
+    setSubmittingForApproval(true);
     try {
-      await submitRequest.mutateAsync();
+      const result = await handleRunDryRun();
+      if (!result) return; // useAnnouncementDryRun already surfaced the error
+
+      let id = draftId;
+      if (id) {
+        await updateDraft.mutateAsync({ id, subject: subject.trim(), description, audienceDefinition });
+      } else {
+        const created = await createDraft.mutateAsync({
+          kind: "eol",
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement: false,
+          audienceDefinition,
+        });
+        id = created.id;
+        setDraftId(id);
+      }
+
+      await recordDryRun.mutateAsync({ id, caseId: result.caseId });
+      await submitRequest.mutateAsync({ id });
       navigate(PENDING_TARGET);
     } catch (error) {
       showError(
@@ -214,6 +187,8 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
           ? error.message
           : "Could not submit this request for approval. Please try again.",
       );
+    } finally {
+      setSubmittingForApproval(false);
     }
   };
 
@@ -233,7 +208,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
             Affected product version
           </Typography>
           <Box sx={{ display: "flex", gap: 1.5 }}>
-            <FormControl size="small" fullWidth required disabled={savingDraft}>
+            <FormControl size="small" fullWidth required disabled={busy}>
               <InputLabel id="eol-product-label" shrink={productId !== ""} sx={{ top: "0px !important" }}>
                 Product
               </InputLabel>
@@ -255,7 +230,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
               </Select>
             </FormControl>
 
-            <FormControl size="small" fullWidth required disabled={!productId || savingDraft}>
+            <FormControl size="small" fullWidth required disabled={!productId || busy}>
               <InputLabel id="eol-version-label" shrink={productVersionId !== ""} sx={{ top: "0px !important" }}>
                 Version
               </InputLabel>
@@ -308,7 +283,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
             value={subject}
             onChange={(e) => setSubject(e.target.value.slice(0, 200))}
             helperText={subject.length >= 160 ? `${subject.length}/200` : undefined}
-            disabled={savingDraft}
+            disabled={busy}
           />
         </Grid>
         <Grid size={{ xs: 12 }}>
@@ -331,18 +306,11 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
               minHeight={180}
               maxHeight={420}
               toolbarVariant="full"
-              disabled={savingDraft}
+              disabled={busy}
             />
           </Box>
         </Grid>
       </Grid>
-
-      <AnnouncementDryRunCard
-        runningDryRun={runningDryRun}
-        dryRunResult={dryRunResult}
-        canRunDryRun={canRunDryRun}
-        onRunDryRun={() => void handleRunDryRun()}
-      />
 
       <Box
         sx={{
@@ -362,15 +330,17 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
         <Button variant="outlined" onClick={() => void handleSaveDraft()} disabled={!canSaveDraft}>
           {savingDraft ? "Saving…" : "Save as draft"}
         </Button>
-        <Button variant="contained" onClick={() => void handleSubmitForApproval()} disabled={!canSubmit}>
-          {submitRequest.isPending ? "Submitting…" : "Submit for approval"}
+        <Button
+          variant="contained"
+          onClick={() => void handleSubmitForApproval()}
+          disabled={!canSubmitForApproval}
+        >
+          {runningDryRun ? "Running dry run…" : submittingForApproval ? "Submitting…" : "Submit for approval"}
         </Button>
       </Box>
-      {!dryRunConfirmed && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "right", mt: 0.5 }}>
-          Run a dry run above before submitting for approval.
-        </Typography>
-      )}
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "right", mt: 0.5 }}>
+        Submitting creates a real case in the DCPSUB test project to share with your approver.
+      </Typography>
     </Card>
   );
 }
