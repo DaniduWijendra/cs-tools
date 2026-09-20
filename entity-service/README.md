@@ -239,12 +239,9 @@ sequence through the Choreo subscription operation and returns the licence Servi
 signed payload is passed through byte for byte, never reshaped, because the customer's product
 verifies an HMAC computed over it and a dropped field breaks that verification.
 
-`internal/license` implements the secret obfuscation and signature that ServiceNow's script
-includes produce, verified against a real record — but it is **not wired to the licence path**.
-Switching issuance over is gated on a compatibility decision: the specification flattens `secrets`
-from an object into a single string, which changes the canonical string and therefore invalidates
-every licence a deployed customer product already holds. That needs a transition plan — a verifier
-accepting both forms, or a versioned licence file — before the switch, not after.
+Moving issuance out of ServiceNow is not in scope here. It is gated on a licence-format transition
+plan, since changing the payload changes the signature and invalidates every licence a deployed
+customer product already holds.
 
 ### SLA clocks
 
