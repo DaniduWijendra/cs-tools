@@ -527,6 +527,27 @@ func TestSubmitAnnouncementRequest(t *testing.T) {
 		assertStatus(t, w, http.StatusBadRequest)
 	})
 
+	t.Run("rejects an unknown customer scope instead of silently resolving to 'all'", func(t *testing.T) {
+		client := &mockEntityAnnouncementRequestClient{
+			getFn: func(context.Context, string) ([]byte, error) {
+				return []byte(`{"kind":"customer","audienceDefinition":{"scope":"bogus"}}`), nil
+			},
+		}
+		h := NewAnnouncementRequestHandler(client, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/announcement-requests/"+testAnnouncementRequestID+"/submit", nil))
+		r.SetPathValue("id", testAnnouncementRequestID)
+		w := httptest.NewRecorder()
+		h.SubmitAnnouncementRequest(w, r)
+
+		assertStatus(t, w, http.StatusBadRequest)
+		// An unrecognized scope must never fall through to resolving every
+		// customer project — that would turn a data bug into an
+		// announcement sent to the wrong audience entirely.
+		if client.searchProjectsCalls != 0 {
+			t.Fatalf("expected no project search for an unrecognized scope, got %d calls", client.searchProjectsCalls)
+		}
+	})
+
 	t.Run("fails loudly instead of looping forever when hasMore never turns false", func(t *testing.T) {
 		client := &mockEntityAnnouncementRequestClient{
 			getFn: func(context.Context, string) ([]byte, error) {

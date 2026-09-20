@@ -448,8 +448,19 @@ func (h *AnnouncementRequestHandler) resolveCustomerAudience(ctx context.Context
 		return nil, fmt.Errorf("decode customer audienceDefinition: %w", err)
 	}
 
-	if def.Scope == "specific" {
+	switch def.Scope {
+	case "specific":
 		return def.ProjectIDs, nil
+	case "all":
+		// falls through to the resolution below
+	default:
+		// Any other value — including empty, a typo, or malformed stored
+		// data — must fail loudly. Silently falling through to "all" here
+		// would mean a broken/unexpected scope value resolves to every
+		// customer project instead of the hand-picked list it was
+		// probably meant to be, turning a data bug into an announcement
+		// sent to the wrong audience entirely.
+		return nil, fmt.Errorf("unknown customer audienceDefinition scope: %q", def.Scope)
 	}
 
 	return resolveAllProjectIDs(func(offset, limit int) ([]byte, error) {
