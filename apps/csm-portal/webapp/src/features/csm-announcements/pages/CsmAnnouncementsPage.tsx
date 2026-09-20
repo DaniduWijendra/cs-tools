@@ -21,6 +21,7 @@ import {
   InputAdornment,
   LinearProgress,
   Skeleton,
+  Tab,
   Table,
   TableBody,
   TableCell,
@@ -28,6 +29,7 @@ import {
   TableHead,
   TablePagination,
   TableRow,
+  Tabs,
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
@@ -50,11 +52,14 @@ import {
 } from "@hooks/useColumnPreferences";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
 import { useSearchAnnouncements } from "@features/csm-announcements/api/useSearchAnnouncements";
+import { useSearchAnnouncementRequests } from "@features/csm-announcements/api/useSearchAnnouncementRequests";
+import AnnouncementRequestDialog from "@features/csm-announcements/components/AnnouncementRequestDialog";
 import {
   DEFAULT_ANNOUNCEMENT_FILTERS,
   type AnnouncementFilters,
   type CsmAnnouncementRow,
 } from "@features/csm-announcements/types/csmAnnouncements";
+import type { AnnouncementRequestState } from "@features/csm-announcements/types/announcementRequests";
 import { announcementStateRole } from "@features/csm-announcements/utils/announcementState";
 import { STATE_LABEL } from "@features/csm-dashboard/utils/abtDashboard";
 import type { CaseState } from "@features/csm-dashboard/types/abtDashboard";
@@ -117,6 +122,26 @@ const STATE_OPTIONS: { value: CaseState; label: string }[] = (
   ] as CaseState[]
 ).map((s) => ({ value: s, label: STATE_LABEL[s] }));
 
+type RegistryTabId = "announcements" | "pending";
+
+/**
+ * The "Pending" tab's own state sub-filter. `published` is deliberately
+ * excluded — a published request already shows as a real case in the
+ * "Announcements" tab, so listing it here too would just be a duplicate.
+ * The backend's search only accepts one `state` at a time (no `in` list —
+ * see `SearchAnnouncementRequestsPayload`), so this is a single-select
+ * rather than the multi-select the Announcements tab's own state filter
+ * uses; there's no single call that can show all three pending states
+ * merged into one paginated list.
+ */
+const PENDING_STATE_OPTIONS: { value: AnnouncementRequestState; label: string }[] = [
+  { value: "draft", label: "Draft" },
+  { value: "pending_approval", label: "Pending approval" },
+  { value: "approved", label: "Approved" },
+];
+
+const PENDING_ROWS_PER_PAGE = 10;
+
 function formatDate(value?: string | null): string {
   return (
     formatBackendTimestampForDisplay(value, {
@@ -178,6 +203,7 @@ function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow)
  */
 export default function CsmAnnouncementsPage(): JSX.Element {
   const navigate = useNavTransition();
+  const [tab, setTab] = useState<RegistryTabId>("announcements");
   const [filters, setFilters] = useState<AnnouncementFilters>(DEFAULT_ANNOUNCEMENT_FILTERS);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_ROWS_PER_PAGE);
@@ -188,6 +214,13 @@ export default function CsmAnnouncementsPage(): JSX.Element {
 
   const announcements = data?.announcements ?? [];
   const total = data?.total ?? 0;
+
+  const [pendingState, setPendingState] = useState<AnnouncementRequestState>("pending_approval");
+  const [pendingPage, setPendingPage] = useState(0);
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  const pendingSearch = useSearchAnnouncementRequests(pendingState, pendingPage, PENDING_ROWS_PER_PAGE);
+  const pendingRequests = pendingSearch.data?.requests ?? [];
+  const pendingTotal = pendingSearch.data?.total ?? 0;
 
   const columnOptions = useMemo<ColumnOption[]>(
     () => ANNOUNCEMENT_COLUMNS.map(({ id, label }) => ({ id, label })),
@@ -253,6 +286,17 @@ export default function CsmAnnouncementsPage(): JSX.Element {
         </Box>
       </Box>
 
+      <Tabs
+        value={tab}
+        onChange={(_, v) => setTab(v as RegistryTabId)}
+        sx={{ borderBottom: 1, borderColor: "divider" }}
+      >
+        <Tab value="announcements" label="Announcements" />
+        <Tab value="pending" label="Pending" />
+      </Tabs>
+
+      {tab === "announcements" && (
+        <>
       {/* Filters — search + state + project, all "show all" by default */}
       <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
         <Box sx={{ flex: "1 1 260px", minWidth: 220 }}>
@@ -411,6 +455,133 @@ export default function CsmAnnouncementsPage(): JSX.Element {
           rowsPerPageOptions={ROWS_PER_PAGE_OPTIONS}
         />
       </Box>
+        </>
+      )}
+
+      {tab === "pending" && (
+        <>
+          <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
+            <Box sx={{ flex: "1 1 220px", minWidth: 200 }}>
+              <MultiSelectField
+                id="pending-announcement-requests-filter-state"
+                label="State"
+                values={[pendingState]}
+                options={PENDING_STATE_OPTIONS}
+                // Single-select in practice — see PENDING_STATE_OPTIONS' own
+                // doc comment on why the backend can't merge multiple states
+                // into one paginated list. Picking a second value swaps to
+                // it rather than adding to a selection.
+                onChange={(next) => {
+                  const last = next[next.length - 1];
+                  if (last) {
+                    setPendingState(last);
+                    setPendingPage(0);
+                  }
+                }}
+              />
+            </Box>
+          </Box>
+
+          <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
+            <Box sx={{ height: 2 }}>
+              {pendingSearch.isFetching && !pendingSearch.isLoading && (
+                <LinearProgress sx={{ height: 2 }} />
+              )}
+            </Box>
+            <TableContainer>
+              <Table size="small" sx={{ "& .MuiTableCell-root": { borderColor: "divider" } }}>
+                <TableHead>
+                  <TableRow sx={{ bgcolor: "action.hover" }}>
+                    <TableCell sx={{ width: "36%" }}>Subject</TableCell>
+                    <TableCell>Kind</TableCell>
+                    <TableCell>Created by</TableCell>
+                    <TableCell>Created</TableCell>
+                    <TableCell>Updated</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {pendingSearch.isLoading ? (
+                    Array.from({ length: PENDING_ROWS_PER_PAGE }).map((_, i) => (
+                      <TableRow key={i}>
+                        {Array.from({ length: 5 }).map((_v, j) => (
+                          <TableCell key={j}>
+                            <Skeleton variant="rounded" width="80%" height={18} />
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))
+                  ) : pendingSearch.isError ? (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center">
+                        <QueryErrorState
+                          message={
+                            pendingSearch.error instanceof Error && pendingSearch.error.message.trim()
+                              ? pendingSearch.error.message
+                              : "Failed to load pending announcement requests."
+                          }
+                          error={pendingSearch.error}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ) : pendingRequests.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center" sx={{ py: 4 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          No {PENDING_STATE_OPTIONS.find((o) => o.value === pendingState)?.label.toLowerCase()}{" "}
+                          requests.
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    pendingRequests.map((r) => (
+                      <TableRow
+                        key={r.id}
+                        hover
+                        onClick={() => setSelectedRequestId(r.id)}
+                        sx={{ cursor: "pointer" }}
+                      >
+                        <TableCell sx={{ maxWidth: 360 }}>
+                          <Typography
+                            variant="body2"
+                            title={r.subject}
+                            sx={{
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                            }}
+                          >
+                            {r.subject || "(no subject)"}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>{r.kind === "eol" ? "EOL" : "Customer"}</TableCell>
+                        <TableCell>{r.createdBy || "—"}</TableCell>
+                        <TableCell sx={{ whiteSpace: "nowrap" }}>{formatDate(r.createdAt)}</TableCell>
+                        <TableCell sx={{ whiteSpace: "nowrap" }}>{formatDate(r.updatedAt)}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+            <TablePagination
+              component="div"
+              count={pendingTotal}
+              page={pendingPage}
+              onPageChange={(_, newPage) => setPendingPage(newPage)}
+              rowsPerPage={PENDING_ROWS_PER_PAGE}
+              rowsPerPageOptions={[PENDING_ROWS_PER_PAGE]}
+            />
+          </Box>
+        </>
+      )}
+
+      {selectedRequestId && (
+        <AnnouncementRequestDialog
+          requestId={selectedRequestId}
+          onClose={() => setSelectedRequestId(null)}
+        />
+      )}
     </Box>
   );
 }

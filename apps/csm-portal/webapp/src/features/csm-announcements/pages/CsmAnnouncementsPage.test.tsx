@@ -26,7 +26,9 @@ import { MemoryRouter } from "react-router";
 import "@testing-library/jest-dom/vitest";
 import CsmAnnouncementsPage from "@features/csm-announcements/pages/CsmAnnouncementsPage";
 import { useSearchAnnouncements } from "@features/csm-announcements/api/useSearchAnnouncements";
+import { useSearchAnnouncementRequests } from "@features/csm-announcements/api/useSearchAnnouncementRequests";
 import type { CsmAnnouncementRow } from "@features/csm-announcements/types/csmAnnouncements";
+import type { AnnouncementRequest } from "@features/csm-announcements/types/announcementRequests";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
 
 // The backend client reads runtime config (`CSM_PORTAL_BACKEND_BASE_URL`) at
@@ -40,6 +42,22 @@ vi.mock("@api/backend/client", () => ({
 
 vi.mock("@features/csm-announcements/api/useSearchAnnouncements", () => ({
   useSearchAnnouncements: vi.fn(),
+}));
+
+vi.mock("@features/csm-announcements/api/useSearchAnnouncementRequests", () => ({
+  useSearchAnnouncementRequests: vi.fn(),
+}));
+
+// The dialog pulls in its own web of hooks (get/update/submit/approve/publish)
+// that aren't this page's concern — stubbed so the page test only asserts it
+// opens with the right id, not what's inside it (see AnnouncementRequestDialog.test.tsx).
+vi.mock("@features/csm-announcements/components/AnnouncementRequestDialog", () => ({
+  default: ({ requestId, onClose }: { requestId: string; onClose: () => void }) => (
+    <div data-testid="request-dialog">
+      <span>request dialog: {requestId}</span>
+      <button onClick={onClose}>close dialog</button>
+    </div>
+  ),
 }));
 
 // The real project picker fetches from the backend; stub it so the page test
@@ -59,6 +77,7 @@ vi.mock("@hooks/useIdTokenClaims", () => ({
 }));
 
 const mockedUseSearch = vi.mocked(useSearchAnnouncements);
+const mockedUseSearchRequests = vi.mocked(useSearchAnnouncementRequests);
 // Number, Reference, Subject, Project, State, Created by, Created, Updated.
 const ANNOUNCEMENT_COLUMN_COUNT = 8;
 
@@ -92,8 +111,29 @@ function mockResult(
   } as unknown as ReturnType<typeof useSearchAnnouncements>);
 }
 
+const PENDING_REQUEST: AnnouncementRequest = {
+  id: "req-1",
+  kind: "customer",
+  state: "pending_approval",
+  subject: "Upcoming maintenance",
+  description: "<p>Details</p>",
+  isSecurityAnnouncement: false,
+  audienceDefinition: { scope: "specific", projectIds: ["p-1"] },
+  createdBy: "jane@example.com",
+  createdAt: "2026-07-01T10:00:00Z",
+  updatedAt: "2026-07-01T10:00:00Z",
+};
+
 beforeEach(() => {
   mockedUseSearch.mockReset();
+  mockedUseSearchRequests.mockReset();
+  mockedUseSearchRequests.mockReturnValue({
+    data: { requests: [], total: 0, limit: 10, offset: 0, hasMore: false },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+    error: null,
+  } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
   window.localStorage.clear();
 });
 
@@ -233,6 +273,64 @@ describe("CsmAnnouncementsPage — customise columns", () => {
     // At least one column (the last remaining) is still rendered underneath
     // the (still open) popover.
     expect(screen.getAllByRole("columnheader", { hidden: true }).length).toBeGreaterThan(0);
+  });
+});
+
+describe("CsmAnnouncementsPage — Pending tab", () => {
+  it("stays on the Announcements tab (and its table) by default", () => {
+    mockResult({
+      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+    });
+    render(<CsmAnnouncementsPage />);
+    expect(screen.getByText("Scheduled maintenance on Choreo")).toBeInTheDocument();
+    expect(screen.queryByTestId("request-dialog")).not.toBeInTheDocument();
+  });
+
+  it("switches to the pending table and defaults to the Pending approval state filter", () => {
+    mockResult({
+      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+    });
+    mockedUseSearchRequests.mockReturnValue({
+      data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
+    render(<CsmAnnouncementsPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+
+    expect(screen.getByText("Upcoming maintenance")).toBeInTheDocument();
+    // state is the 1st arg of useSearchAnnouncementRequests(state, page, pageSize).
+    const lastCall = mockedUseSearchRequests.mock.calls.at(-1)!;
+    expect(lastCall[0]).toBe("pending_approval");
+  });
+
+  it("opens the request dialog with the clicked row's id", () => {
+    mockResult({ data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false } });
+    mockedUseSearchRequests.mockReturnValue({
+      data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
+    render(<CsmAnnouncementsPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByText("Upcoming maintenance"));
+
+    expect(screen.getByText(`request dialog: ${PENDING_REQUEST.id}`)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("close dialog"));
+    expect(screen.queryByTestId("request-dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state text for the selected pending state", () => {
+    mockResult({ data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false } });
+    render(<CsmAnnouncementsPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    expect(screen.getByText(/no pending approval requests/i)).toBeInTheDocument();
   });
 });
 

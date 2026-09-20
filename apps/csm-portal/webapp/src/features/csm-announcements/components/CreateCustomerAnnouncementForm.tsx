@@ -63,7 +63,7 @@ const CLOSED_STATES: string[] = ["Restricted", "Suspended"];
  * is what makes it findable/filterable later despite tags having no closed
  * vocabulary on the backend.
  */
-const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
+export const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
 
 /** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
 function isEmptyHtml(html: string): boolean {
