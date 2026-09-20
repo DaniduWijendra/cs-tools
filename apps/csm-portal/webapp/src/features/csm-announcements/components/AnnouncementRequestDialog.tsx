@@ -35,7 +35,6 @@ import { RefreshCw, X } from "@wso2/oxygen-ui-icons-react";
 import { Link } from "react-router";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { formatAbsoluteForUser } from "@utils/dateTime";
-import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
 import {
   DRY_RUN_TAG_LABEL,
   useAnnouncementDryRun,
@@ -78,6 +77,11 @@ function whoWhen(who?: string | null, when?: string | null): string {
   return who ?? whenText ?? "—";
 }
 
+/** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
+function isEmptyHtml(html: string): boolean {
+  return html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length === 0;
+}
+
 /**
  * Detail + action dialog for a not-yet-published announcement request,
  * opened from the registry page's "Pending" tab. One dialog covers every
@@ -85,8 +89,12 @@ function whoWhen(who?: string | null, when?: string | null): string {
  * state-appropriate actions (Submit / Mark as approved / Publish) belong
  * right next to the content they act on. See the Phase 2 plan's own
  * per-state edit-behavior breakdown, mirrored exactly below:
- *  - draft: content is freely editable; Submit is disabled until a dry run
- *    has been recorded (client-side mirror of the server's own 409 gate).
+ *  - draft: content is freely editable; "Submit for approval" itself runs
+ *    the dry run (creating the one real case in the fixed test project),
+ *    records it, and submits — one action, not a separate "run a dry run
+ *    first" step, since the dry-run case *is* what gets shared with the
+ *    approver (there's nothing to gain from reviewing it before submitting;
+ *    editing afterward while `pending_approval` reverts to draft anyway).
  *  - pending_approval: read-only until "Edit" is explicitly confirmed —
  *    editing reverts the request to draft and clears its dry run, since the
  *    content is out for real review over email and a silent change under
@@ -102,10 +110,10 @@ export default function AnnouncementRequestDialog({
   onClose,
 }: AnnouncementRequestDialogProps): JSX.Element {
   const { data: request, isLoading, isError, refetch } = useGetAnnouncementRequest(requestId);
-  const update = useUpdateAnnouncementRequest(requestId);
-  const recordDryRun = useRecordAnnouncementRequestDryRun(requestId);
-  const submit = useSubmitAnnouncementRequest(requestId);
-  const approve = useApproveAnnouncementRequest(requestId);
+  const update = useUpdateAnnouncementRequest();
+  const recordDryRun = useRecordAnnouncementRequestDryRun();
+  const submit = useSubmitAnnouncementRequest();
+  const approve = useApproveAnnouncementRequest();
   const publish = usePublishAnnouncementRequest(request);
 
   const [subject, setSubject] = useState("");
@@ -146,19 +154,8 @@ export default function AnnouncementRequestDialog({
     subject,
     description,
     tagLabels: dryRunTagLabels,
-    extraCanRun: request?.state === "draft",
+    extraCanRun: request?.state === "draft" && !submit.isPending && !recordDryRun.isPending,
   });
-
-  // Persist a freshly-run dry run onto the draft so the submit gate reflects
-  // it — this is the one piece of glue `useAnnouncementDryRun` doesn't do on
-  // its own, since it has no idea this dialog exists.
-  useEffect(() => {
-    if (dryRun.dryRunResult && request?.state === "draft") {
-      recordDryRun.mutate({ caseId: dryRun.dryRunResult.caseId });
-    }
-    // Only when a *new* dry run actually completes — not on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dryRun.dryRunResult]);
 
   const isEditable =
     request?.state === "draft" ||
@@ -168,10 +165,30 @@ export default function AnnouncementRequestDialog({
   const handleSaveContent = (): void => {
     if (!request) return;
     update.mutate({
+      id: request.id,
       subject: subject.trim(),
       description,
       isSecurityAnnouncement,
     });
+  };
+
+  const submittingForApproval = dryRun.runningDryRun || recordDryRun.isPending || submit.isPending;
+
+  // "Submit for approval" runs the dry run, records it, and submits in one
+  // action — see this component's own doc comment for why there's no
+  // separate "run a dry run first" step here. Each mutation's own `isError`
+  // already renders inline below, so a failure partway through just leaves
+  // the button re-clickable rather than needing its own error handling here.
+  const handleSubmitForApproval = async (): Promise<void> => {
+    if (!request || submittingForApproval) return;
+    const result = await dryRun.handleRunDryRun();
+    if (!result) return;
+    try {
+      await recordDryRun.mutateAsync({ id: request.id, caseId: result.caseId });
+      await submit.mutateAsync({ id: request.id });
+    } catch {
+      /* surfaced inline via recordDryRun.isError / submit.isError below */
+    }
   };
 
   const dryRunLink = request?.dryRunCaseId ? (
@@ -342,21 +359,12 @@ export default function AnnouncementRequestDialog({
               </Box>
             )}
 
-            {request.state === "draft" && (
-              <AnnouncementDryRunCard
-                runningDryRun={dryRun.runningDryRun}
-                dryRunResult={dryRun.dryRunResult}
-                canRunDryRun={dryRun.canRunDryRun}
-                onRunDryRun={() => void dryRun.handleRunDryRun()}
-              />
-            )}
-
             {request.state === "pending_approval" && !pendingApprovalEditUnlocked && (
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Button
                   variant="contained"
                   size="small"
-                  onClick={() => approve.mutate()}
+                  onClick={() => approve.mutate({ id: request.id })}
                   disabled={approve.isPending}
                 >
                   {approve.isPending ? "Approving…" : "Mark as approved"}
@@ -378,19 +386,29 @@ export default function AnnouncementRequestDialog({
                   variant="contained"
                   color="primary"
                   size="small"
-                  onClick={() => submit.mutate()}
-                  disabled={submit.isPending || !request.dryRunCaseId}
+                  onClick={() => void handleSubmitForApproval()}
+                  disabled={
+                    submittingForApproval ||
+                    subject.trim().length === 0 ||
+                    isEmptyHtml(description)
+                  }
                 >
-                  {submit.isPending ? "Submitting…" : "Submit for approval"}
+                  {dryRun.runningDryRun
+                    ? "Running dry run…"
+                    : submittingForApproval
+                      ? "Submitting…"
+                      : "Submit for approval"}
                 </Button>
-                {!request.dryRunCaseId && (
-                  <Typography variant="caption" color="text.secondary">
-                    Run a dry run first.
-                  </Typography>
-                )}
-                {submit.isError && (
+                <Typography variant="caption" color="text.secondary">
+                  Creates a real case in the DCPSUB test project to share with your approver.
+                </Typography>
+                {(recordDryRun.isError || submit.isError) && (
                   <Typography variant="caption" color="error">
-                    {submit.error instanceof Error ? submit.error.message : "Could not submit."}
+                    {submit.error instanceof Error
+                      ? submit.error.message
+                      : recordDryRun.error instanceof Error
+                        ? recordDryRun.error.message
+                        : "Could not submit for approval."}
                   </Typography>
                 )}
               </Box>

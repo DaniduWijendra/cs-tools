@@ -26,37 +26,47 @@ import type {
   UpdateAnnouncementRequestPayload,
 } from "@features/csm-announcements/types/announcementRequests";
 
+export interface UpdateAnnouncementRequestVariables extends UpdateAnnouncementRequestPayload {
+  id: string;
+}
+
 /**
- * `PATCH /announcement-requests/{id}`. Behaves differently depending on the
- * request's *current* state (enforced server-side, not here — see
- * entity-service's `AnnouncementRequestService.Update` doc comment):
- * editing a `draft` just updates fields; editing a `pending_approval` request
- * also reverts it to `draft` and clears the dry-run/submit snapshot; editing
- * an `approved` request updates subject/description in place with no state
- * change (and rejects an audience change with 400 — the approved snapshot is
- * frozen); a `published` request rejects any edit outright (409). The
- * response always reflects the request's state *after* the edit, so callers
- * don't need to guess which branch fired.
+ * `PATCH /announcement-requests/{id}`. Takes `id` as part of the mutation's
+ * own variables rather than as a hook argument bound at render time — a
+ * caller that creates the request and immediately wants to update it (e.g.
+ * the create forms, which lazily create a draft then re-sync its content)
+ * would otherwise capture a stale `id` from the render before the id existed,
+ * since a `useMutation` bound to a hook argument closes over that render's
+ * value. Passing `id` per call sidesteps that entirely.
+ *
+ * Behaves differently depending on the request's *current* state (enforced
+ * server-side, not here — see entity-service's `AnnouncementRequestService.Update`
+ * doc comment): editing a `draft` just updates fields; editing a
+ * `pending_approval` request also reverts it to `draft` and clears the
+ * dry-run/submit snapshot; editing an `approved` request updates
+ * subject/description in place with no state change (and rejects an
+ * audience change with 400 — the approved snapshot is frozen); a
+ * `published` request rejects any edit outright (409). The response always
+ * reflects the request's state *after* the edit, so callers don't need to
+ * guess which branch fired.
  */
-export function useUpdateAnnouncementRequest(
-  id: string | undefined,
-): UseMutationResult<AnnouncementRequest, Error, UpdateAnnouncementRequestPayload> {
+export function useUpdateAnnouncementRequest(): UseMutationResult<
+  AnnouncementRequest,
+  Error,
+  UpdateAnnouncementRequestVariables
+> {
   const api = useBackendApi();
   const queryClient = useQueryClient();
 
-  return useMutation<AnnouncementRequest, Error, UpdateAnnouncementRequestPayload>({
-    mutationFn: (input): Promise<AnnouncementRequest> => {
-      if (!id) {
-        throw new Error("Cannot update an announcement request without an id.");
-      }
-      return api.patch<UpdateAnnouncementRequestPayload, AnnouncementRequest>(
+  return useMutation<AnnouncementRequest, Error, UpdateAnnouncementRequestVariables>({
+    mutationFn: ({ id, ...input }): Promise<AnnouncementRequest> =>
+      api.patch<UpdateAnnouncementRequestPayload, AnnouncementRequest>(
         `/announcement-requests/${encodeURIComponent(id)}`,
         input,
-      );
-    },
-    onSuccess: () => {
+      ),
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, id ?? ""],
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, variables.id],
       });
       queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
     },

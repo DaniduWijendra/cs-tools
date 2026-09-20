@@ -29,25 +29,23 @@ import type { AnnouncementRequest } from "@features/csm-announcements/types/anno
  * approval decision happens over email, outside the platform, so this call
  * only records that whoever's working the request says it's been approved.
  * Rejected (409) unless the request is `pending_approval`.
+ *
+ * Takes `id` per call, not as a hook argument — matches the other
+ * announcement-request mutation hooks (see `useUpdateAnnouncementRequest`'s
+ * doc comment) for a consistent calling convention across all of them, even
+ * though this particular one is only ever called against an already-known,
+ * stable id (the dialog opens for an existing row).
  */
-export function useApproveAnnouncementRequest(
-  id: string | undefined,
-): UseMutationResult<AnnouncementRequest, Error, void> {
+export function useApproveAnnouncementRequest(): UseMutationResult<AnnouncementRequest, Error, { id: string }> {
   const api = useBackendApi();
   const queryClient = useQueryClient();
 
-  return useMutation<AnnouncementRequest, Error, void>({
-    mutationFn: (): Promise<AnnouncementRequest> => {
-      if (!id) {
-        throw new Error("Cannot approve an announcement request without an id.");
-      }
-      return api.postEmpty<AnnouncementRequest>(
-        `/announcement-requests/${encodeURIComponent(id)}/approve`,
-      );
-    },
-    onSuccess: () => {
+  return useMutation<AnnouncementRequest, Error, { id: string }>({
+    mutationFn: ({ id }): Promise<AnnouncementRequest> =>
+      api.postEmpty<AnnouncementRequest>(`/announcement-requests/${encodeURIComponent(id)}/approve`),
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, id ?? ""],
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, variables.id],
       });
       queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
     },

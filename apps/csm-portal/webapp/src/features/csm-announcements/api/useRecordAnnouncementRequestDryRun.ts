@@ -26,31 +26,38 @@ import type {
   RecordAnnouncementRequestDryRunPayload,
 } from "@features/csm-announcements/types/announcementRequests";
 
+export interface RecordAnnouncementRequestDryRunVariables extends RecordAnnouncementRequestDryRunPayload {
+  id: string;
+}
+
 /**
  * `POST /announcement-requests/{id}/dry-run` — persists the case id from an
  * already-run `useAnnouncementDryRun` onto the draft, which is what actually
  * unblocks `useSubmitAnnouncementRequest` (rejected 409 without this). Only
  * valid while the request is a `draft`; rejected (409) otherwise.
+ *
+ * Takes `id` per call, not as a hook argument — see
+ * `useUpdateAnnouncementRequest`'s doc comment for why: a caller that just
+ * created the draft this same mutation needs to attach to would otherwise
+ * close over a stale, pre-creation `id`.
  */
-export function useRecordAnnouncementRequestDryRun(
-  id: string | undefined,
-): UseMutationResult<AnnouncementRequest, Error, RecordAnnouncementRequestDryRunPayload> {
+export function useRecordAnnouncementRequestDryRun(): UseMutationResult<
+  AnnouncementRequest,
+  Error,
+  RecordAnnouncementRequestDryRunVariables
+> {
   const api = useBackendApi();
   const queryClient = useQueryClient();
 
-  return useMutation<AnnouncementRequest, Error, RecordAnnouncementRequestDryRunPayload>({
-    mutationFn: (input): Promise<AnnouncementRequest> => {
-      if (!id) {
-        throw new Error("Cannot record a dry run without an announcement request id.");
-      }
-      return api.post<RecordAnnouncementRequestDryRunPayload, AnnouncementRequest>(
+  return useMutation<AnnouncementRequest, Error, RecordAnnouncementRequestDryRunVariables>({
+    mutationFn: ({ id, ...input }): Promise<AnnouncementRequest> =>
+      api.post<RecordAnnouncementRequestDryRunPayload, AnnouncementRequest>(
         `/announcement-requests/${encodeURIComponent(id)}/dry-run`,
         input,
-      );
-    },
-    onSuccess: () => {
+      ),
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, id ?? ""],
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, variables.id],
       });
       queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
     },

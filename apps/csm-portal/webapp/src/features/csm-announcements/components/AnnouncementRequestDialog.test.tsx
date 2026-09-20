@@ -154,21 +154,35 @@ describe("AnnouncementRequestDialog — loading/error", () => {
 });
 
 describe("AnnouncementRequestDialog — draft", () => {
-  it("shows editable fields and a disabled Submit button until a dry run is recorded", () => {
-    mockGet({ state: "draft", dryRunCaseId: null });
+  it("shows editable fields and a Submit button disabled until subject and description are filled", () => {
+    mockGet({ state: "draft", subject: "", description: "" });
     render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
 
-    expect(screen.getByDisplayValue("Scheduled maintenance")).toBeInTheDocument();
     const submitBtn = screen.getByRole("button", { name: /submit for approval/i });
     expect(submitBtn).toBeDisabled();
-    expect(screen.getByText(/run a dry run first/i)).toBeInTheDocument();
   });
 
-  it("enables Submit once a dry run has been recorded, and submitting calls the mutation", () => {
-    mockGet({ state: "draft", dryRunCaseId: "case-123" });
-    const submitMutate = vi.fn();
+  it("clicking Submit for approval runs the dry run, records it, then submits — one action", async () => {
+    mockGet({ state: "draft" });
+    const handleRunDryRun = vi.fn().mockResolvedValue({ caseId: "case-123", displayId: "WSO2-1" });
+    mockedDryRun.mockReturnValue({
+      runningDryRun: false,
+      dryRunResult: null,
+      canRunDryRun: true,
+      handleRunDryRun,
+    });
+    const recordDryRunMutateAsync = vi.fn().mockResolvedValue({});
+    mockedRecordDryRun.mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: recordDryRunMutateAsync,
+      isPending: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useRecordAnnouncementRequestDryRun>);
+    const submitMutateAsync = vi.fn().mockResolvedValue({});
     mockedSubmit.mockReturnValue({
-      mutate: submitMutate,
+      mutate: vi.fn(),
+      mutateAsync: submitMutateAsync,
       isPending: false,
       isError: false,
       error: null,
@@ -178,10 +192,38 @@ describe("AnnouncementRequestDialog — draft", () => {
     const submitBtn = screen.getByRole("button", { name: /submit for approval/i });
     expect(submitBtn).not.toBeDisabled();
     fireEvent.click(submitBtn);
-    expect(submitMutate).toHaveBeenCalled();
+
+    expect(handleRunDryRun).toHaveBeenCalled();
+    await vi.waitFor(() => expect(recordDryRunMutateAsync).toHaveBeenCalledWith({ id: "req-1", caseId: "case-123" }));
+    await vi.waitFor(() => expect(submitMutateAsync).toHaveBeenCalledWith({ id: "req-1" }));
   });
 
-  it("saves edited content via the update mutation", () => {
+  it("does not record or submit anything when the dry run itself fails", async () => {
+    mockGet({ state: "draft" });
+    const handleRunDryRun = vi.fn().mockResolvedValue(null);
+    mockedDryRun.mockReturnValue({
+      runningDryRun: false,
+      dryRunResult: null,
+      canRunDryRun: true,
+      handleRunDryRun,
+    });
+    const recordDryRunMutateAsync = vi.fn();
+    mockedRecordDryRun.mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: recordDryRunMutateAsync,
+      isPending: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useRecordAnnouncementRequestDryRun>);
+
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /submit for approval/i }));
+
+    await vi.waitFor(() => expect(handleRunDryRun).toHaveBeenCalled());
+    expect(recordDryRunMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("saves edited content via the update mutation, addressed by id", () => {
     mockGet({ state: "draft" });
     const updateMutate = vi.fn();
     mockedUpdate.mockReturnValue({
@@ -198,7 +240,7 @@ describe("AnnouncementRequestDialog — draft", () => {
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     expect(updateMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ subject: "Updated subject" }),
+      expect.objectContaining({ id: "req-1", subject: "Updated subject" }),
     );
   });
 });

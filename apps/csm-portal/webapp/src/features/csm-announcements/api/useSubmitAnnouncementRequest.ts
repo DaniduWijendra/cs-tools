@@ -28,25 +28,22 @@ import type { AnnouncementRequest } from "@features/csm-announcements/types/anno
  * resolves the real audience server-side (exclusion denylist applied) and
  * freezes it as `resolvedProjectIds`; the caller only needs the id. Rejected
  * (409) unless the request is a `draft` with a dry run already recorded.
+ *
+ * Takes `id` per call, not as a hook argument — see
+ * `useUpdateAnnouncementRequest`'s doc comment for why: a caller that just
+ * created the draft/recorded its dry run in the same flow would otherwise
+ * close over a stale, pre-creation `id`.
  */
-export function useSubmitAnnouncementRequest(
-  id: string | undefined,
-): UseMutationResult<AnnouncementRequest, Error, void> {
+export function useSubmitAnnouncementRequest(): UseMutationResult<AnnouncementRequest, Error, { id: string }> {
   const api = useBackendApi();
   const queryClient = useQueryClient();
 
-  return useMutation<AnnouncementRequest, Error, void>({
-    mutationFn: (): Promise<AnnouncementRequest> => {
-      if (!id) {
-        throw new Error("Cannot submit an announcement request without an id.");
-      }
-      return api.postEmpty<AnnouncementRequest>(
-        `/announcement-requests/${encodeURIComponent(id)}/submit`,
-      );
-    },
-    onSuccess: () => {
+  return useMutation<AnnouncementRequest, Error, { id: string }>({
+    mutationFn: ({ id }): Promise<AnnouncementRequest> =>
+      api.postEmpty<AnnouncementRequest>(`/announcement-requests/${encodeURIComponent(id)}/submit`),
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, id ?? ""],
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, variables.id],
       });
       queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
     },
