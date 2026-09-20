@@ -187,4 +187,29 @@ describe("usePublishAnnouncementRequest — partial failure and retry", () => {
     expect(result.current.succeededProjectIds.sort()).toEqual(["p-1", "p-2"]);
     expect(postEmptyMock).toHaveBeenCalledTimes(1);
   });
+
+  it("retries the publish call (without resending any case) when every project already succeeded but marking published failed last time", async () => {
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-1", internalId: "X-1", number: "N-1" });
+    postEmptyMock.mockRejectedValueOnce(new Error("db down"));
+
+    const { result } = renderHook(() => usePublishAnnouncementRequest(APPROVED_REQUEST), { wrapper });
+    await act(async () => {
+      await result.current.handlePublish();
+    });
+    // Every project succeeded, but the bookkeeping publish call itself failed.
+    expect(result.current.succeededProjectIds.sort()).toEqual(["p-1", "p-2"]);
+    expect(result.current.failedProjectIds).toEqual([]);
+    expect(result.current.published).toBeNull();
+    postCaseMutateAsyncMock.mockClear();
+
+    postEmptyMock.mockResolvedValueOnce({ ...APPROVED_REQUEST, state: "published" });
+    await act(async () => {
+      await result.current.handlePublish();
+    });
+
+    // No case is ever recreated — only the publish call itself is retried.
+    expect(postCaseMutateAsyncMock).not.toHaveBeenCalled();
+    expect(postEmptyMock).toHaveBeenCalledTimes(2);
+    expect(result.current.published?.state).toBe("published");
+  });
 });

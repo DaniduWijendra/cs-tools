@@ -34,7 +34,7 @@ import {
   Typography,
 } from "@wso2/oxygen-ui";
 import { Plus, Search, X } from "@wso2/oxygen-ui-icons-react";
-import { useMemo, useState, type ChangeEvent, type JSX, type ReactNode } from "react";
+import { useMemo, useState, type ChangeEvent, type JSX, type KeyboardEvent, type ReactNode } from "react";
 import { Link as RouterLink } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
 import ColumnCustomizerButton from "@components/column-customizer/ColumnCustomizerButton";
@@ -538,7 +538,22 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                         key={r.id}
                         hover
                         onClick={() => setSelectedRequestId(r.id)}
-                        sx={{ cursor: "pointer" }}
+                        onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelectedRequestId(r.id);
+                          }
+                        }}
+                        tabIndex={0}
+                        aria-label={`View announcement request: ${r.subject || "(no subject)"}`}
+                        sx={{
+                          cursor: "pointer",
+                          "&:focus-visible": {
+                            outline: "2px solid",
+                            outlineColor: "primary.main",
+                            outlineOffset: -2,
+                          },
+                        }}
                       >
                         <TableCell sx={{ maxWidth: 360 }}>
                           <Typography

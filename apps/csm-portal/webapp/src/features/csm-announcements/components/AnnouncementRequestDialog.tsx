@@ -35,6 +35,7 @@ import { RefreshCw, X } from "@wso2/oxygen-ui-icons-react";
 import { Link } from "react-router";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { formatAbsoluteForUser } from "@utils/dateTime";
+import { sanitizeRichTextHtml } from "@utils/sanitizeHtml";
 import {
   DRY_RUN_TAG_LABEL,
   useAnnouncementDryRun,
@@ -291,7 +292,7 @@ export default function AnnouncementRequestDialog({
                 </Typography>
                 <Box
                   sx={{ fontSize: "0.875rem", lineHeight: 1.5, wordBreak: "break-word" }}
-                  dangerouslySetInnerHTML={{ __html: request.description }}
+                  dangerouslySetInnerHTML={{ __html: sanitizeRichTextHtml(request.description) }}
                 />
               </>
             )}

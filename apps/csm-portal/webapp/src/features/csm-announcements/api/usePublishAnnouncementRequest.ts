@@ -97,52 +97,61 @@ export function usePublishAnnouncementRequest(
       return;
     }
     const pendingProjectIds = allProjectIds.filter((id) => !succeededProjectIds.includes(id));
-    if (pendingProjectIds.length === 0) return;
 
     setPublishing(true);
-    setProgress({ completed: 0, total: pendingProjectIds.length });
-    const newlyFailedTagIds: string[] = [];
 
-    const results = await settleWithConcurrencyLimit(
-      pendingProjectIds,
-      ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
-      async (projectId) => {
-        const created = await postCase.mutateAsync({
-          type: "announcement",
-          projectId,
-          subject: request.subject,
-          description: request.description,
-        });
-        if (request.isSecurityAnnouncement) {
-          try {
-            await addTag.mutateAsync({ caseId: created.id, label: SECURITY_ANNOUNCEMENT_TAG_LABEL });
-          } catch {
-            newlyFailedTagIds.push(projectId);
+    // Skip the fan-out entirely when every project already has a case from an
+    // earlier attempt — but still fall through to the publish-marking call
+    // below, since a retry here is exactly for the case where the fan-out
+    // fully succeeded last time but *that* call failed. Returning early
+    // instead (as this used to) left that state permanently stuck: nothing
+    // was ever outstanding to retry, yet the request was never marked
+    // published either.
+    if (pendingProjectIds.length > 0) {
+      setProgress({ completed: 0, total: pendingProjectIds.length });
+      const newlyFailedTagIds: string[] = [];
+
+      const results = await settleWithConcurrencyLimit(
+        pendingProjectIds,
+        ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
+        async (projectId) => {
+          const created = await postCase.mutateAsync({
+            type: "announcement",
+            projectId,
+            subject: request.subject,
+            description: request.description,
+          });
+          if (request.isSecurityAnnouncement) {
+            try {
+              await addTag.mutateAsync({ caseId: created.id, label: SECURITY_ANNOUNCEMENT_TAG_LABEL });
+            } catch {
+              newlyFailedTagIds.push(projectId);
+            }
           }
-        }
-        return created;
-      },
-      (completed, total) => setProgress({ completed, total }),
-    );
-
-    const newlySucceeded = pendingProjectIds.filter((_, i) => results[i].status === "fulfilled");
-    const stillFailing = pendingProjectIds.filter((_, i) => results[i].status === "rejected");
-
-    setSucceededProjectIds((prev) => [...prev, ...newlySucceeded]);
-    setFailedProjectIds(stillFailing);
-    setFailedTagProjectIds((prev) => [...prev, ...newlyFailedTagIds]);
-    setPublishing(false);
-    setProgress(null);
-
-    if (stillFailing.length > 0) {
-      showError(
-        `Sent to ${newlySucceeded.length} of ${pendingProjectIds.length} remaining project${
-          pendingProjectIds.length === 1 ? "" : "s"
-        } — failed for project${stillFailing.length === 1 ? "" : "s"} ${stillFailing.join(
-          ", ",
-        )}. Retry to resend just those.`,
+          return created;
+        },
+        (completed, total) => setProgress({ completed, total }),
       );
-      return;
+
+      const newlySucceeded = pendingProjectIds.filter((_, i) => results[i].status === "fulfilled");
+      const stillFailing = pendingProjectIds.filter((_, i) => results[i].status === "rejected");
+
+      setSucceededProjectIds((prev) => [...prev, ...newlySucceeded]);
+      setFailedProjectIds(stillFailing);
+      setFailedTagProjectIds((prev) => [...prev, ...newlyFailedTagIds]);
+      setProgress(null);
+
+      if (stillFailing.length > 0) {
+        setPublishing(false);
+        showError(
+          `Sent to ${newlySucceeded.length} of ${pendingProjectIds.length} remaining project${
+            pendingProjectIds.length === 1 ? "" : "s"
+          } — failed for project${stillFailing.length === 1 ? "" : "s"} ${stillFailing.join(
+            ", ",
+          )}. Retry to resend just those.`,
+        );
+        return;
+      }
     }
 
     try {
@@ -162,6 +171,8 @@ export function usePublishAnnouncementRequest(
       showError(
         "Every project received the announcement, but marking the request published failed. Try again — it won't resend the cases.",
       );
+    } finally {
+      setPublishing(false);
     }
   };
 
