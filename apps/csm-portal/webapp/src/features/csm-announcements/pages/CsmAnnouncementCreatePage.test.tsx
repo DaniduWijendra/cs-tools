@@ -19,6 +19,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
+import type { AnnouncementRequest } from "@features/csm-announcements/types/announcementRequests";
 
 const navigateMock = vi.fn();
 const postCaseMutateAsyncMock = vi.fn();
@@ -55,7 +56,7 @@ vi.mock("@components/rich-text-editor/Editor", () => ({
 }));
 // The real multi-select searches the backend as the user types; stub it with
 // a plain multi-value control so this file stays focused on the create form's
-// own required-field and fan-out-submit behavior (the picker itself has its
+// own required-field and draft/submit behavior (the picker itself has its
 // own tests via CsmAnnouncementsPage.test.tsx's filter-bar coverage).
 vi.mock("@features/csm-cases/components/AsyncProjectMultiSelect", () => ({
   default: ({
@@ -101,6 +102,59 @@ vi.mock("@api/backend/client", () => ({
   },
 }));
 
+// ---- announcement_requests hooks (Phase 2 draft/approval workflow) ----
+// Each mock's `mutate` actually resolves/rejects via `mutateAsync` and fires
+// the caller's onSuccess/onError, mirroring real React Query closely enough
+// for these components' onSuccess-chained effects to behave as they would
+// for real — a plain `vi.fn()` wouldn't invoke the components' own
+// `{ onSuccess: ... }` callbacks at all.
+function makeMutationMock<TVars, TResult>(defaultResult: TResult) {
+  const mutateAsync = vi.fn().mockResolvedValue(defaultResult);
+  const mutate = vi.fn(
+    (
+      variables: TVars,
+      options?: { onSuccess?: (result: TResult, variables: TVars) => void; onError?: (error: unknown) => void },
+    ) => {
+      void mutateAsync(variables).then(
+        (result: TResult) => options?.onSuccess?.(result, variables),
+        (error: unknown) => options?.onError?.(error),
+      );
+    },
+  );
+  return { mutate, mutateAsync, isPending: false, isError: false, error: null as unknown };
+}
+
+const DRAFT: AnnouncementRequest = {
+  id: "draft-1",
+  kind: "customer",
+  state: "draft",
+  subject: "",
+  description: "",
+  isSecurityAnnouncement: false,
+  audienceDefinition: {},
+  createdBy: "you@wso2.com",
+  createdAt: "2026-07-01T10:00:00Z",
+  updatedAt: "2026-07-01T10:00:00Z",
+};
+
+let createDraftMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+let updateDraftMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+let recordDryRunMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+let submitMock = makeMutationMock<void, AnnouncementRequest>({ ...DRAFT, state: "pending_approval" });
+
+vi.mock("@features/csm-announcements/api/useCreateAnnouncementRequest", () => ({
+  useCreateAnnouncementRequest: () => createDraftMock,
+}));
+vi.mock("@features/csm-announcements/api/useUpdateAnnouncementRequest", () => ({
+  useUpdateAnnouncementRequest: () => updateDraftMock,
+}));
+vi.mock("@features/csm-announcements/api/useRecordAnnouncementRequestDryRun", () => ({
+  useRecordAnnouncementRequestDryRun: () => recordDryRunMock,
+}));
+vi.mock("@features/csm-announcements/api/useSubmitAnnouncementRequest", () => ({
+  useSubmitAnnouncementRequest: () => submitMock,
+}));
+
 // Imported after the mocks above so the module picks them up.
 import CsmAnnouncementCreatePage from "@features/csm-announcements/pages/CsmAnnouncementCreatePage";
 
@@ -130,6 +184,28 @@ function fillSubjectAndDescription(): void {
   });
 }
 
+/** Mocks the dry-run test-project lookup + case creation so `Run dry run` succeeds. */
+function mockSuccessfulDryRun(): void {
+  projectSearchPostMock.mockImplementation((url: string) => {
+    if (url === "/projects/search") {
+      return Promise.resolve({
+        projects: [{ id: "dcpsub-id", name: "DCPSUB Test Project", key: "DCPSUB" }],
+        total: 1,
+        limit: 10,
+        offset: 0,
+        hasMore: false,
+      });
+    }
+    return Promise.resolve({ id: "tag-1", label: "Dry Run", color: null });
+  });
+  postCaseMutateAsyncMock.mockResolvedValue({ id: "case-test-1", internalId: "WSO2-9001" });
+}
+
+async function runDryRun(): Promise<void> {
+  fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
+  await waitFor(() => expect(postCaseMutateAsyncMock).toHaveBeenCalled());
+}
+
 describe("CsmAnnouncementCreatePage", () => {
   beforeEach(() => {
     navigateMock.mockReset();
@@ -137,241 +213,212 @@ describe("CsmAnnouncementCreatePage", () => {
     showErrorMock.mockReset();
     projectSearchPostMock.mockReset();
     excludedProjectKeysGetMock.mockReset().mockResolvedValue({ excludedProjectKeys: [] });
+    createDraftMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+    updateDraftMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+    recordDryRunMock = makeMutationMock<unknown, AnnouncementRequest>(DRAFT);
+    submitMock = makeMutationMock<void, AnnouncementRequest>({ ...DRAFT, state: "pending_approval" });
   });
 
-  it("keeps Create disabled until title, description, and at least one project are filled", () => {
+  it("keeps Save as draft disabled until subject and description are filled — no project selection required", () => {
     renderPage();
-    const submit = screen.getByRole("button", { name: /create announcement/i });
-    expect(submit).toBeDisabled();
+    const saveDraft = screen.getByRole("button", { name: /save as draft/i });
+    expect(saveDraft).toBeDisabled();
 
     fillSubjectAndDescription();
-    // Subject + description are filled, but no project is selected yet.
-    expect(submit).toBeDisabled();
+    // No project picked at all — a draft can still be saved.
+    expect(saveDraft).toBeEnabled();
+  });
 
+  it("keeps Submit for approval disabled until a dry run has been recorded", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
     selectProjects("proj-1");
-    expect(submit).toBeEnabled();
-  });
 
-  it("fans out one POST /cases call per selected project, with the same subject/description", async () => {
-    postCaseMutateAsyncMock.mockResolvedValue({ id: "ann-1" });
-    renderPage();
+    const submit = screen.getByRole("button", { name: /submit for approval/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText(/run a dry run/i)).toBeInTheDocument();
 
-    fillSubjectAndDescription();
-    selectProjects("proj-1", "proj-2");
-
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
-    await screen.findByRole("button", { name: /creating/i });
-
-    await waitFor(() => {
-      expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
-    });
-    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith({
-      type: "announcement",
-      projectId: "proj-1",
-      subject: "Scheduled maintenance",
-      description: "<p>Maintenance window details.</p>",
-    });
-    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith({
-      type: "announcement",
-      projectId: "proj-2",
-      subject: "Scheduled maintenance",
-      description: "<p>Maintenance window details.</p>",
-    });
-
-    await waitFor(() => {
-      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
-    });
-  });
-
-  it("reports which project failed on a partial failure, keeps the succeeded one, and still navigates back", async () => {
-    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
-      projectId === "proj-1"
-        ? Promise.resolve({ id: "ann-1" })
-        : Promise.reject(new Error("network down")),
+    await runDryRun();
+    await waitFor(() =>
+      expect(recordDryRunMock.mutate).toHaveBeenCalledWith(
+        { caseId: "case-test-1" },
+        expect.objectContaining({ onSuccess: expect.any(Function) }),
+      ),
     );
-    renderPage();
-
-    fillSubjectAndDescription();
-    selectProjects("proj-1", "proj-2");
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
-
-    await waitFor(() => {
-      expect(showErrorMock).toHaveBeenCalledWith(
-        expect.stringContaining("proj-2"),
-      );
-    });
-    expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
+    await waitFor(() => expect(submit).toBeEnabled());
   });
 
-  it("surfaces a single error and does not navigate when every project fails", async () => {
-    postCaseMutateAsyncMock.mockRejectedValue(new Error("network down"));
+  it("running a dry run for the first time lazily creates the draft with the current fields", async () => {
+    mockSuccessfulDryRun();
     renderPage();
-
     fillSubjectAndDescription();
     selectProjects("proj-1");
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+
+    await runDryRun();
 
     await waitFor(() => {
-      expect(showErrorMock).toHaveBeenCalledWith(
-        "Could not create the announcement. Please try again.",
+      expect(createDraftMock.mutate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "customer",
+          subject: "Scheduled maintenance",
+          description: "<p>Maintenance window details.</p>",
+          isSecurityAnnouncement: false,
+          audienceDefinition: { scope: "specific", projectIds: ["proj-1"] },
+        }),
+        expect.anything(),
       );
     });
-    expect(navigateMock).not.toHaveBeenCalled();
   });
 
-  it("resolves 'All customer projects' via the entity service and fans create-case calls out across the resolved ids, with the default exclusions applied", async () => {
-    projectSearchPostMock.mockResolvedValue({
-      projects: [
-        { id: "resolved-1", name: "Resolved One", key: "R1", account: { id: "a1", name: "Acme" } },
-        { id: "resolved-2", name: "Resolved Two", key: "R2", account: { id: "a2", name: "Globex" } },
-      ],
-      total: 2,
-      limit: 50,
-      offset: 0,
-      hasMore: false,
-    });
-    postCaseMutateAsyncMock.mockResolvedValue({ id: "ann-1" });
+  it("does not create a second draft when a dry run is re-run after one already exists", async () => {
+    mockSuccessfulDryRun();
     renderPage();
-
     fillSubjectAndDescription();
-    fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
+    selectProjects("proj-1");
 
-    // Both default exclusion checkboxes are on and reach the request body,
-    // sent to the dedicated audience-resolution endpoint (not the general
-    // /projects/search also used by type-ahead pickers) so the backend's
-    // mandatory excluded-project-key denylist gets applied too.
-    await waitFor(() => {
-      expect(projectSearchPostMock).toHaveBeenCalledWith(
-        "/announcements/audience/search",
-        expect.objectContaining({
-          excludeSubscriptionTypes: ["cloud_support", "cloud_evaluation_support"],
-          excludeClosureStates: ["Restricted", "Suspended"],
-        }),
-      );
-    });
+    await runDryRun();
+    await waitFor(() => expect(createDraftMock.mutate).toHaveBeenCalledTimes(1));
 
-    const submit = await screen.findByRole("button", { name: /create announcement/i });
+    // Edit content (clears the local dry-run confirmation) and run again.
+    fireEvent.change(screen.getByLabelText(/subject/i), { target: { value: "Updated subject" } });
+    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-test-2", internalId: "WSO2-9002" });
+    fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
+
+    await waitFor(() => expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2));
+    // Still only ever created once — the second dry run reuses the existing draft.
+    expect(createDraftMock.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-syncs the draft's content when the dry run is recorded, in case it drifted since the draft was first created", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    await runDryRun();
+
+    await waitFor(() =>
+      expect(updateDraftMock.mutate).toHaveBeenCalledWith(
+        expect.objectContaining({ subject: "Scheduled maintenance" }),
+      ),
+    );
+  });
+
+  it("keeps the draft's audience in sync when it changes after a dry run has already been recorded", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    await runDryRun();
+    await waitFor(() => expect(createDraftMock.mutate).toHaveBeenCalledTimes(1));
+    updateDraftMock.mutate.mockClear();
+
+    selectProjects("proj-1", "proj-2");
+
+    await waitFor(() =>
+      expect(updateDraftMock.mutate).toHaveBeenCalledWith({
+        audienceDefinition: { scope: "specific", projectIds: ["proj-1", "proj-2"] },
+      }),
+    );
+  });
+
+  it("clicking Submit for approval calls the submit mutation and navigates to the Pending tab", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    await runDryRun();
+
+    const submit = await screen.findByRole("button", { name: /submit for approval/i });
     await waitFor(() => expect(submit).toBeEnabled());
     fireEvent.click(submit);
 
-    await waitFor(() => {
-      expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
-    });
-    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: "resolved-1" }),
-    );
-    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: "resolved-2" }),
-    );
+    await waitFor(() => expect(submitMock.mutateAsync).toHaveBeenCalled());
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/announcements?tab=pending", undefined));
   });
 
-  it("attaches a fixed security label to every created case when 'This is a security announcement' is checked", async () => {
-    postCaseMutateAsyncMock.mockImplementation(({ projectId }: { projectId: string }) =>
-      Promise.resolve({ id: `case-for-${projectId}` }),
+  it("surfaces the server's own error message when submit is rejected", async () => {
+    mockSuccessfulDryRun();
+    submitMock.mutateAsync.mockRejectedValue(
+      new Error("a dry run must be recorded before submitting for approval"),
     );
-    projectSearchPostMock.mockResolvedValue({ id: "tag-1", label: "Security Announcement", color: null });
     renderPage();
-
-    fillSubjectAndDescription();
-    selectProjects("proj-1", "proj-2");
-    fireEvent.click(screen.getByRole("checkbox", { name: /this is a security announcement/i }));
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
-
-    await waitFor(() => {
-      expect(projectSearchPostMock).toHaveBeenCalledTimes(2);
-    });
-    expect(projectSearchPostMock).toHaveBeenCalledWith("/cases/case-for-proj-1/tags", {
-      label: "Security Announcement",
-    });
-    expect(projectSearchPostMock).toHaveBeenCalledWith("/cases/case-for-proj-2/tags", {
-      label: "Security Announcement",
-    });
-    await waitFor(() => {
-      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
-    });
-    // No tag failures, so submitting must not surface an error banner.
-    expect(showErrorMock).not.toHaveBeenCalled();
-  });
-
-  it("does not attach a tag when the security checkbox is left unchecked", async () => {
-    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-1" });
-    renderPage();
-
     fillSubjectAndDescription();
     selectProjects("proj-1");
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
+    await runDryRun();
 
-    await waitFor(() => {
-      expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
-    });
-    expect(projectSearchPostMock).not.toHaveBeenCalled();
-  });
+    const submit = await screen.findByRole("button", { name: /submit for approval/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
 
-  it("reports a tag-attach failure separately from a create failure — the case still stands", async () => {
-    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-1" });
-    projectSearchPostMock.mockRejectedValue(new Error("tag service down"));
-    renderPage();
-
-    fillSubjectAndDescription();
-    selectProjects("proj-1");
-    fireEvent.click(screen.getByRole("checkbox", { name: /this is a security announcement/i }));
-    fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
-
-    await waitFor(() => {
-      expect(showErrorMock).toHaveBeenCalledWith(
-        expect.stringContaining("security label couldn't be attached"),
-      );
-    });
-    // The case itself was created successfully, so this is still a navigate-away, not a blocking failure.
-    expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
-  });
-
-  it("the dry run creates one case in the configured test project (DCPSUB) and shows a link to it", async () => {
-    projectSearchPostMock.mockImplementation((url: string, body: unknown) => {
-      if (url === "/projects/search") {
-        return Promise.resolve({
-          projects: [
-            { id: "other-1", name: "Other", key: "OTHER" },
-            { id: "dcpsub-id", name: "DCPSUB Test Project", key: "DCPSUB" },
-          ],
-          total: 2,
-          limit: 10,
-          offset: 0,
-          hasMore: false,
-        });
-      }
-      // Tag-attach calls (POST /cases/{id}/tags) also flow through this mock.
-      void body;
-      return Promise.resolve({ id: "tag-1", label: "Dry Run", color: null });
-    });
-    postCaseMutateAsyncMock.mockResolvedValue({ id: "case-test-1", internalId: "WSO2-9001" });
-    renderPage();
-
-    fillSubjectAndDescription();
-    fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
-
-    await waitFor(() => {
-      expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "announcement", projectId: "dcpsub-id" }),
-      );
-    });
-
-    expect(await screen.findByText(/WSO2-9001/)).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: /view it/i });
-    expect(link).toHaveAttribute("href", "/announcements/case-test-1");
-
-    // Doesn't touch the real create flow or navigate away.
+    await waitFor(() =>
+      expect(showErrorMock).toHaveBeenCalledWith("a dry run must be recorded before submitting for approval"),
+    );
     expect(navigateMock).not.toHaveBeenCalled();
   });
 
-  it("the dry run surfaces an error and creates nothing when the test project can't be found", async () => {
-    projectSearchPostMock.mockResolvedValue({
-      projects: [],
-      total: 0,
-      limit: 10,
-      offset: 0,
-      hasMore: false,
-    });
+  it("clicking Save as draft creates a new draft and navigates to the Pending tab", async () => {
+    renderPage();
+    fillSubjectAndDescription();
+
+    fireEvent.click(screen.getByRole("button", { name: /save as draft/i }));
+
+    await waitFor(() =>
+      expect(createDraftMock.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "customer", subject: "Scheduled maintenance" }),
+      ),
+    );
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/announcements?tab=pending", undefined));
+  });
+
+  it("re-saving an already-created draft updates it instead of creating a second one", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
+    selectProjects("proj-1");
+    await runDryRun();
+    await waitFor(() => expect(createDraftMock.mutate).toHaveBeenCalledTimes(1));
+    createDraftMock.mutateAsync.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /save as draft/i }));
+
+    await waitFor(() => expect(updateDraftMock.mutateAsync).toHaveBeenCalled());
+    expect(createDraftMock.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an error and does not navigate when Save as draft fails", async () => {
+    createDraftMock.mutateAsync.mockRejectedValue(new Error("network down"));
+    renderPage();
+    fillSubjectAndDescription();
+
+    fireEvent.click(screen.getByRole("button", { name: /save as draft/i }));
+
+    await waitFor(() =>
+      expect(showErrorMock).toHaveBeenCalledWith("Could not save this draft. Please try again."),
+    );
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("attaches a fixed security label to the dry-run case when 'This is a security announcement' is checked", async () => {
+    mockSuccessfulDryRun();
+    renderPage();
+    fillSubjectAndDescription();
+    fireEvent.click(screen.getByRole("checkbox", { name: /this is a security announcement/i }));
+
+    await runDryRun();
+
+    // The dry-run mechanism itself (useAnnouncementDryRun) attaches the tag;
+    // this just confirms the security flag reaches the draft payload.
+    await waitFor(() =>
+      expect(createDraftMock.mutate).toHaveBeenCalledWith(
+        expect.objectContaining({ isSecurityAnnouncement: true }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("the dry run surfaces an error and creates no draft when the test project can't be found", async () => {
+    projectSearchPostMock.mockResolvedValue({ projects: [], total: 0, limit: 10, offset: 0, hasMore: false });
     renderPage();
 
     fillSubjectAndDescription();
@@ -381,6 +428,7 @@ describe("CsmAnnouncementCreatePage", () => {
       expect(showErrorMock).toHaveBeenCalledWith(expect.stringContaining("DCPSUB"));
     });
     expect(postCaseMutateAsyncMock).not.toHaveBeenCalled();
+    expect(createDraftMock.mutate).not.toHaveBeenCalled();
   });
 
   it("the dry run button is disabled until subject and description are filled, independent of any project selection", () => {
@@ -412,14 +460,8 @@ describe("CsmAnnouncementCreatePage", () => {
     expect(screen.getByLabelText(/subject/i)).toBeInTheDocument();
   });
 
-  it("unchecking an exclusion drops it from the resolved-audience request", async () => {
-    projectSearchPostMock.mockResolvedValue({
-      projects: [],
-      total: 0,
-      limit: 50,
-      offset: 0,
-      hasMore: false,
-    });
+  it("unchecking an exclusion drops it from the resolved-audience preview request", async () => {
+    projectSearchPostMock.mockResolvedValue({ projects: [], total: 0, limit: 50, offset: 0, hasMore: false });
     renderPage();
 
     fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
@@ -442,13 +484,7 @@ describe("CsmAnnouncementCreatePage", () => {
     excludedProjectKeysGetMock.mockResolvedValue({
       excludedProjectKeys: ["Apexia", "Veridian", "Veloxis"],
     });
-    projectSearchPostMock.mockResolvedValue({
-      projects: [],
-      total: 0,
-      limit: 50,
-      offset: 0,
-      hasMore: false,
-    });
+    projectSearchPostMock.mockResolvedValue({ projects: [], total: 0, limit: 50, offset: 0, hasMore: false });
     renderPage();
 
     fireEvent.click(screen.getByRole("radio", { name: /all customer projects/i }));
@@ -532,75 +568,71 @@ describe("CsmAnnouncementCreatePage", () => {
       fireEvent.click(await screen.findByRole("option", { name: /4\.2\.0/i }));
     }
 
-    it("keeps Create disabled until product, version, subject, and description are filled", async () => {
+    it("keeps Save as draft disabled until product, version, subject, and description are filled", async () => {
       mockEolBackend();
       renderPage();
       switchToEolKind();
 
-      const submit = screen.getByRole("button", { name: /create announcement/i });
-      expect(submit).toBeDisabled();
+      const saveDraft = screen.getByRole("button", { name: /save as draft/i });
+      expect(saveDraft).toBeDisabled();
 
       await selectProductAndVersion();
-      expect(submit).toBeDisabled();
+      expect(saveDraft).toBeDisabled();
 
       fillSubjectAndDescription();
-      await waitFor(() => expect(submit).not.toBeDisabled());
+      await waitFor(() => expect(saveDraft).toBeEnabled());
     });
 
-    it("resolves the audience for the selected product version and fans out one POST /cases call per resolved project", async () => {
-      mockEolBackend();
-      postCaseMutateAsyncMock.mockResolvedValue({ id: "ann-eol-1" });
-      renderPage();
-      switchToEolKind();
-      await selectProductAndVersion();
-
-      expect(await screen.findByText("Project A")).toBeInTheDocument();
-      expect(screen.getByText("Project B")).toBeInTheDocument();
-
-      fillSubjectAndDescription();
-      fireEvent.click(screen.getByRole("button", { name: /create announcement/i }));
-
-      await waitFor(() => {
-        expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(2);
-      });
-      expect(postCaseMutateAsyncMock).toHaveBeenCalledWith({
-        type: "announcement",
-        projectId: "proj-a",
-        subject: "Scheduled maintenance",
-        description: "<p>Maintenance window details.</p>",
-      });
-      expect(postCaseMutateAsyncMock).toHaveBeenCalledWith({
-        type: "announcement",
-        projectId: "proj-b",
-        subject: "Scheduled maintenance",
-        description: "<p>Maintenance window details.</p>",
-      });
-      await waitFor(() => {
-        expect(navigateMock).toHaveBeenCalledWith("/announcements", undefined);
-      });
-    });
-
-    it("the dry run creates one case in the configured test project, tagged Dry Run only", async () => {
+    it("running a dry run creates a draft with the eol kind and product/version audience", async () => {
       mockEolBackend();
       postCaseMutateAsyncMock.mockResolvedValue({ id: "case-eol-test-1", internalId: "WSO2-9002" });
       renderPage();
       switchToEolKind();
-
+      await selectProductAndVersion();
       fillSubjectAndDescription();
-      fireEvent.click(screen.getByRole("button", { name: /run dry run/i }));
 
-      await waitFor(() => {
-        expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
-          expect.objectContaining({ type: "announcement", projectId: "dcpsub-id" }),
-        );
-      });
-      expect(await screen.findByText(/WSO2-9002/)).toBeInTheDocument();
+      await runDryRun();
 
-      // No security label exists on this flow at all — only the "Dry Run" tag.
-      expect(projectSearchPostMock).not.toHaveBeenCalledWith(
-        expect.stringContaining("/tags"),
-        expect.objectContaining({ label: "Security Announcement" }),
+      await waitFor(() =>
+        expect(createDraftMock.mutate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            kind: "eol",
+            audienceDefinition: { productId: "prod-1", productVersionId: "ver-1" },
+          }),
+          expect.anything(),
+        ),
       );
+    });
+
+    it("Submit for approval is disabled until the resolved audience is non-empty, even with a recorded dry run", async () => {
+      mockEolBackend();
+      postCaseMutateAsyncMock.mockResolvedValue({ id: "case-eol-test-2", internalId: "WSO2-9003" });
+      renderPage();
+      switchToEolKind();
+      fillSubjectAndDescription();
+      await runDryRun();
+
+      // No product/version picked — resolvedAudience.total stays 0.
+      const submit = screen.getByRole("button", { name: /submit for approval/i });
+      expect(submit).toBeDisabled();
+    });
+
+    it("clicking Submit for approval submits the eol request once a dry run is recorded", async () => {
+      mockEolBackend();
+      postCaseMutateAsyncMock.mockResolvedValue({ id: "case-eol-test-3", internalId: "WSO2-9004" });
+      renderPage();
+      switchToEolKind();
+      await selectProductAndVersion();
+      expect(await screen.findByText("Project A")).toBeInTheDocument();
+      fillSubjectAndDescription();
+      await runDryRun();
+
+      const submit = await screen.findByRole("button", { name: /submit for approval/i });
+      await waitFor(() => expect(submit).toBeEnabled());
+      fireEvent.click(submit);
+
+      await waitFor(() => expect(submitMock.mutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/announcements?tab=pending", undefined));
     });
 
     it("selecting a different product resets the previously chosen version", async () => {

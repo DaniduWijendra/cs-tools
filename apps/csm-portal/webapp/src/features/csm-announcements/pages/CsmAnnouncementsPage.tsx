@@ -35,7 +35,7 @@ import {
 } from "@wso2/oxygen-ui";
 import { Plus, Search, X } from "@wso2/oxygen-ui-icons-react";
 import { useMemo, useState, type ChangeEvent, type JSX, type ReactNode } from "react";
-import { Link as RouterLink } from "react-router";
+import { Link as RouterLink, useSearchParams } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
 import ColumnCustomizerButton from "@components/column-customizer/ColumnCustomizerButton";
 import MultiSelectField from "@components/MultiSelectField";
@@ -203,7 +203,15 @@ function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow)
  */
 export default function CsmAnnouncementsPage(): JSX.Element {
   const navigate = useNavTransition();
-  const [tab, setTab] = useState<RegistryTabId>("announcements");
+  const [searchParams] = useSearchParams();
+  // Seeded once from `?tab=pending` (e.g. the create form's post-save
+  // redirect landing straight on the request just saved), not kept in sync
+  // afterward — clicking the tabs below only updates local state, matching
+  // this page's existing non-URL-driven tab pattern (see PENDING_STATE_OPTIONS'
+  // own doc comment on why this page doesn't use the nav-tree tab system).
+  const [tab, setTab] = useState<RegistryTabId>(
+    searchParams.get("tab") === "pending" ? "pending" : "announcements",
+  );
   const [filters, setFilters] = useState<AnnouncementFilters>(DEFAULT_ANNOUNCEMENT_FILTERS);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_ROWS_PER_PAGE);

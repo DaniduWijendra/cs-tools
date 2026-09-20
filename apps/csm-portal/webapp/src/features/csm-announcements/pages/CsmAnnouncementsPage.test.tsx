@@ -82,9 +82,10 @@ const mockedUseSearchRequests = vi.mocked(useSearchAnnouncementRequests);
 const ANNOUNCEMENT_COLUMN_COUNT = 8;
 
 /** `CsmAnnouncementsPage` renders a `RouterLink` per row, so every render
- * here needs router context. */
-function render(ui: ReactElement): ReturnType<typeof rtlRender> {
-  return rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
+ * here needs router context. `initialPath` lets a test land on a specific
+ * URL (e.g. `?tab=pending`, the create form's post-save redirect target). */
+function render(ui: ReactElement, initialPath = "/"): ReturnType<typeof rtlRender> {
+  return rtlRender(<MemoryRouter initialEntries={[initialPath]}>{ui}</MemoryRouter>);
 }
 
 const ROW: CsmAnnouncementRow = {
@@ -331,6 +332,23 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     render(<CsmAnnouncementsPage />);
     fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
     expect(screen.getByText(/no pending approval requests/i)).toBeInTheDocument();
+  });
+
+  it("lands directly on the Pending tab when opened with ?tab=pending", () => {
+    mockResult({ data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false } });
+    mockedUseSearchRequests.mockReturnValue({
+      data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
+    render(<CsmAnnouncementsPage />, "/announcements?tab=pending");
+
+    // The Pending tab's own content shows immediately — no click needed —
+    // and the Announcements tab's row isn't rendered.
+    expect(screen.getByText("Upcoming maintenance")).toBeInTheDocument();
+    expect(screen.queryByText("Scheduled maintenance on Choreo")).not.toBeInTheDocument();
   });
 });
 
