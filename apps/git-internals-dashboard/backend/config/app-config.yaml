@@ -112,9 +112,11 @@ api:
   timeseriesDefaultDays: 30
   timeseriesMinDays: 7
   timeseriesMaxDays: 365
-  # Max length of the free-text `priority` and `status` query parameters.
+  # Max length of the free-text `priority`, `status`, and `abtTeam` query
+  # parameters.
   priorityParamMaxLength: 50
   statusParamMaxLength: 50
+  abtTeamParamMaxLength: 100
 
 securityHeaders:
   # Every key below is optional and ships commented out, same as `database:`

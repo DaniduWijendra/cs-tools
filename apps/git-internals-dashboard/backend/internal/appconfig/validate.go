@@ -143,6 +143,7 @@ func Validate(cfg *Config) error {
 	positive("api.timeseriesMaxDays", cfg.API.TimeseriesMaxDays)
 	positive("api.priorityParamMaxLength", cfg.API.PriorityParamMaxLength)
 	positive("api.statusParamMaxLength", cfg.API.StatusParamMaxLength)
+	positive("api.abtTeamParamMaxLength", cfg.API.AbtTeamParamMaxLength)
 	if cfg.API.IssuesDefaultLimit > cfg.API.IssuesMaxLimit {
 		add("api.issuesDefaultLimit: must not exceed api.issuesMaxLimit")
 	}

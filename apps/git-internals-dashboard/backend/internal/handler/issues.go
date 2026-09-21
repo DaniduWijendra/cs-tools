@@ -33,8 +33,10 @@ import (
 )
 
 // IssuesHandler serves GET /issues and GET /issues/{id}.
-// Privacy: the row shape it returns carries no title, labels, assignees,
-// opener, or event actors.
+// Privacy: the row shape it returns includes title, ABT team, and
+// opened-by (a @wso2.com address) inline on each issue, but it still never
+// returns labels, assignees, or event actors, and the issue body itself is
+// never returned by any API.
 type IssuesHandler struct {
 	pool *pgxpool.Pool
 	cfg  *config.AppConfig
@@ -70,6 +72,9 @@ type issueWire struct {
 	GithubCreatedAt *time.Time `json:"githubCreatedAt"`
 	GithubUpdatedAt *time.Time `json:"githubUpdatedAt"`
 	Sla             *slaWire   `json:"sla"`
+	Title           *string    `json:"title"`
+	AbtTeam         *string    `json:"abtTeam"`
+	OpenedBy        *string    `json:"openedBy"`
 }
 
 type issueRow struct {
@@ -90,12 +95,16 @@ type issueRow struct {
 	SlaState        *string
 	SlaRunning      *bool
 	BreachedEver    *bool
+	Title           *string
+	AbtTeam         *string
+	OpenedBy        *string
 }
 
 const issueListSelect = `
 	i.id, i.github_number, i.state, i.html_url, r.owner, r.name, i.priority, i.current_status,
 	i.github_created_at, i.github_updated_at,
-	s.budget_hours, s.consumed_hours, s.remaining_hours, s.pct_consumed, s.sla_state, s.sla_running, s.breached_ever
+	s.budget_hours, s.consumed_hours, s.remaining_hours, s.pct_consumed, s.sla_state, s.sla_running, s.breached_ever,
+	i.title, i.abt_team, i.opened_by
 `
 
 const issueListFrom = `
@@ -112,6 +121,7 @@ func scanIssueRow(row pgx.Row) (issueRow, error) {
 		&r.ID, &r.GithubNumber, &r.State, &r.HTMLURL, &r.Owner, &r.Name, &r.Priority, &r.CurrentStatus,
 		&r.GithubCreatedAt, &r.GithubUpdatedAt,
 		&r.BudgetHours, &r.ConsumedHours, &r.RemainingHours, &r.PctConsumed, &r.SlaState, &r.SlaRunning, &r.BreachedEver,
+		&r.Title, &r.AbtTeam, &r.OpenedBy,
 	)
 	return r, err
 }
@@ -130,6 +140,9 @@ func toIssueWire(r issueRow) issueWire {
 		CurrentStatus:   r.CurrentStatus,
 		GithubCreatedAt: r.GithubCreatedAt,
 		GithubUpdatedAt: r.GithubUpdatedAt,
+		Title:           r.Title,
+		AbtTeam:         r.AbtTeam,
+		OpenedBy:        r.OpenedBy,
 	}
 	if r.SlaState != nil {
 		consumed := 0.0

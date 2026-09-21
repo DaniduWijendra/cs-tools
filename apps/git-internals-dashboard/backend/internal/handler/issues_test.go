@@ -88,6 +88,7 @@ func TestListIssuesValidation400s(t *testing.T) {
 		{"bad bucket", "bucket=nonexistent"},
 		{"bad sort", "sort=nonexistent"},
 		{"priority too long", "priority=" + strings.Repeat("x", 51)},
+		{"abtTeam too long", "abtTeam=" + strings.Repeat("x", 101)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,6 +154,9 @@ type issueFixture struct {
 	pctConsumed   *float64
 	createdAt     time.Time // zero value defaults to seedIssuesFixture's `base`
 	updatedAt     time.Time
+	title         *string
+	abtTeam       *string
+	openedBy      *string
 }
 
 // strp returns a pointer to s, for building literal *string fixture fields.
@@ -195,13 +199,13 @@ func seedIssuesFixture(t *testing.T, pool *pgxpool.Pool) (repoID int32) {
 		// ranking among these five (101-104,107 are the base-scope set), so a
 		// sort=age test can't pass by accident of sharing another field's order:
 		// oldest -> newest is 103, 107, 104, 101, 102.
-		{number: 101, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "OPEN", slaState: "VIOLATED", budgetHours: f64p(24), pctConsumed: f64p(1.5), createdAt: base.Add(-1 * time.Hour), updatedAt: base.Add(5 * time.Hour)},
-		{number: 102, priority: strp("High(P2)"), currentStatus: strp("WOC"), state: "OPEN", slaState: "AT_RISK", budgetHours: f64p(24), pctConsumed: f64p(0.8), createdAt: base, updatedAt: base.Add(4 * time.Hour)},
+		{number: 101, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "OPEN", slaState: "VIOLATED", budgetHours: f64p(24), pctConsumed: f64p(1.5), createdAt: base.Add(-1 * time.Hour), updatedAt: base.Add(5 * time.Hour), title: strp("Critical bug in auth"), abtTeam: strp("Atlas"), openedBy: strp("jane@wso2.com")},
+		{number: 102, priority: strp("High(P2)"), currentStatus: strp("WOC"), state: "OPEN", slaState: "AT_RISK", budgetHours: f64p(24), pctConsumed: f64p(0.8), createdAt: base, updatedAt: base.Add(4 * time.Hour), abtTeam: strp("Atlas")},
 		{number: 103, priority: strp("Medium(P3)"), currentStatus: strp("Open"), state: "OPEN", slaState: "OK", budgetHours: f64p(48), pctConsumed: f64p(0.2), createdAt: base.Add(-4 * time.Hour), updatedAt: base.Add(3 * time.Hour)},
 		{number: 104, priority: nil, currentStatus: strp("In Progress"), state: "OPEN", slaState: "NO_SLA", createdAt: base.Add(-2 * time.Hour), updatedAt: base.Add(2 * time.Hour)},
 		{number: 105, priority: strp("Critical(P1)"), currentStatus: strp("Resolved"), state: "OPEN", slaState: "TERMINAL", updatedAt: base.Add(1 * time.Hour)},
 		{number: 106, priority: strp("Medium(P3)"), currentStatus: strp("Resolved"), state: "CLOSED", slaState: "TERMINAL", updatedAt: base},
-		{number: 107, priority: strp("High(P2)"), currentStatus: strp("Pending Patch Queue"), state: "OPEN", slaState: "NO_SLA", createdAt: base.Add(-3 * time.Hour), updatedAt: base.Add(6 * time.Hour)},
+		{number: 107, priority: strp("High(P2)"), currentStatus: strp("Pending Patch Queue"), state: "OPEN", slaState: "NO_SLA", createdAt: base.Add(-3 * time.Hour), updatedAt: base.Add(6 * time.Hour), abtTeam: strp("Nova")},
 		{number: 108, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "CLOSED", slaState: "OK", budgetHours: f64p(24), pctConsumed: f64p(0.1), updatedAt: base.Add(7 * time.Hour)},
 	}
 
@@ -212,9 +216,9 @@ func seedIssuesFixture(t *testing.T, pool *pgxpool.Pool) (repoID int32) {
 		}
 		var issueID int32
 		if err := pool.QueryRow(ctx, `
-			INSERT INTO issues (repository_id, github_number, state, html_url, priority, current_status, github_created_at, github_updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id
-		`, repoID, f.number, f.state, "https://github.com/test-owner/test-issues/issues/"+strconv.Itoa(f.number), f.priority, f.currentStatus, createdAt, f.updatedAt).Scan(&issueID); err != nil {
+			INSERT INTO issues (repository_id, github_number, state, html_url, priority, current_status, github_created_at, github_updated_at, title, abt_team, opened_by)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id
+		`, repoID, f.number, f.state, "https://github.com/test-owner/test-issues/issues/"+strconv.Itoa(f.number), f.priority, f.currentStatus, createdAt, f.updatedAt, f.title, f.abtTeam, f.openedBy).Scan(&issueID); err != nil {
 			t.Fatalf("insert issue %d: %v", f.number, err)
 		}
 		if _, err := pool.Exec(ctx, `
@@ -469,6 +473,87 @@ func TestListIssuesPriorityFilter(t *testing.T) {
 	h.ListIssues(rec, req)
 
 	assertSameSet(t, numbersOf(decodeIssueList(t, rec)), []int{102, 107})
+}
+
+// TestListIssuesAbtTeamFilter verifies the abtTeam param narrows results to
+// issues with that exact ABT team.
+func TestListIssuesAbtTeamFilter(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&abtTeam=Atlas", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+
+	assertSameSet(t, numbersOf(decodeIssueList(t, rec)), []int{101, 102})
+}
+
+// TestListIssuesAbtTeamFilterNarrowedByBucket verifies the abtTeam param
+// combines with bucket rather than being overridden by it: bucket=cs alone
+// returns both 102 and 107 (both CS-side), but adding abtTeam=Atlas narrows
+// to just 102 since 107's ABT team is Nova.
+func TestListIssuesAbtTeamFilterNarrowedByBucket(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&bucket=cs", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+	assertSameSet(t, numbersOf(decodeIssueList(t, rec)), []int{102, 107})
+
+	req = httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&abtTeam=Atlas&bucket=cs", nil)
+	rec = httptest.NewRecorder()
+	h.ListIssues(rec, req)
+	assertSameSet(t, numbersOf(decodeIssueList(t, rec)), []int{102})
+}
+
+// TestListIssuesWireIncludesTitleAbtTeamOpenedBy verifies title/abtTeam/
+// openedBy round-trip onto the wire: present when set on the row, null when
+// not.
+func TestListIssuesWireIncludesTitleAbtTeamOpenedBy(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+
+	issues := decodeIssueList(t, rec)
+	byNumber := make(map[int]issueWire, len(issues))
+	for _, iss := range issues {
+		byNumber[iss.Number] = iss
+	}
+
+	with, ok := byNumber[101]
+	if !ok {
+		t.Fatalf("expected issue 101 in response, got %v", numbersOf(issues))
+	}
+	if with.Title == nil || *with.Title != "Critical bug in auth" {
+		t.Errorf("expected title=%q, got %v", "Critical bug in auth", with.Title)
+	}
+	if with.AbtTeam == nil || *with.AbtTeam != "Atlas" {
+		t.Errorf("expected abtTeam=%q, got %v", "Atlas", with.AbtTeam)
+	}
+	if with.OpenedBy == nil || *with.OpenedBy != "jane@wso2.com" {
+		t.Errorf("expected openedBy=%q, got %v", "jane@wso2.com", with.OpenedBy)
+	}
+
+	without, ok := byNumber[103]
+	if !ok {
+		t.Fatalf("expected issue 103 in response, got %v", numbersOf(issues))
+	}
+	if without.Title != nil {
+		t.Errorf("expected title=nil, got %v", *without.Title)
+	}
+	if without.AbtTeam != nil {
+		t.Errorf("expected abtTeam=nil, got %v", *without.AbtTeam)
+	}
+	if without.OpenedBy != nil {
+		t.Errorf("expected openedBy=nil, got %v", *without.OpenedBy)
+	}
 }
 
 // TestListIssuesQNumberFilter verifies q= filters to the issue whose GitHub

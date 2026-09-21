@@ -43,11 +43,26 @@ type issuesQuery struct {
 	State    string
 	SlaState string
 	Status   string
+	AbtTeam  string
 	Q        string
 	Limit    int
 	Offset   int
 	Bucket   string
 	Sort     issueSortField
+}
+
+// optionalText reads name from v, validating it against maxLen. Returns
+// ("", "") when the param is absent, (value, "") when present and valid, or
+// ("", errMsg) on the first length violation.
+func optionalText(v url.Values, name string, maxLen int) (value string, errMsg string) {
+	raw := v.Get(name)
+	if raw == "" {
+		return "", ""
+	}
+	if len(raw) > maxLen {
+		return "", fmt.Sprintf("%s must be at most %d characters", name, maxLen)
+	}
+	return raw, ""
 }
 
 // parseIssuesQuery validates v against lim and returns a non-empty error
@@ -62,12 +77,11 @@ func parseIssuesQuery(v url.Values, lim appconfig.API) (issuesQuery, string) {
 		}
 		q.Repo = repo
 	}
-	if priority := v.Get("priority"); priority != "" {
-		if len(priority) > lim.PriorityParamMaxLength {
-			return q, fmt.Sprintf("priority must be at most %d characters", lim.PriorityParamMaxLength)
-		}
-		q.Priority = priority
+	priority, errMsg := optionalText(v, "priority", lim.PriorityParamMaxLength)
+	if errMsg != "" {
+		return q, errMsg
 	}
+	q.Priority = priority
 	if state := v.Get("state"); state != "" {
 		if state != "OPEN" && state != "CLOSED" {
 			return q, "state must be OPEN or CLOSED"
@@ -82,12 +96,16 @@ func parseIssuesQuery(v url.Values, lim appconfig.API) (issuesQuery, string) {
 			return q, "slaState must be one of NO_SLA, OK, AT_RISK, VIOLATED, TERMINAL"
 		}
 	}
-	if status := v.Get("status"); status != "" {
-		if len(status) > lim.StatusParamMaxLength {
-			return q, fmt.Sprintf("status must be at most %d characters", lim.StatusParamMaxLength)
-		}
-		q.Status = status
+	status, errMsg := optionalText(v, "status", lim.StatusParamMaxLength)
+	if errMsg != "" {
+		return q, errMsg
 	}
+	q.Status = status
+	abtTeam, errMsg := optionalText(v, "abtTeam", lim.AbtTeamParamMaxLength)
+	if errMsg != "" {
+		return q, errMsg
+	}
+	q.AbtTeam = abtTeam
 	if qq := v.Get("q"); qq != "" {
 		if !qParamRe.MatchString(qq) {
 			return q, "q must be an issue number"
@@ -271,6 +289,9 @@ func buildIssuesWhere(csStatuses, productSideStatuses []string, q issuesQuery) (
 	if q.Q != "" {
 		n, _ := strconv.Atoi(q.Q) // format guaranteed by parseIssuesQuery
 		conditions = append(conditions, "i.github_number = "+args.add(n))
+	}
+	if q.AbtTeam != "" {
+		conditions = append(conditions, "i.abt_team = "+args.add(q.AbtTeam))
 	}
 
 	return strings.Join(conditions, " AND "), args.values

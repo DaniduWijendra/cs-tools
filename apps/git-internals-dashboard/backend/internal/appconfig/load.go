@@ -187,6 +187,7 @@ type rawAPI struct {
 	TimeseriesMaxDays      *int `yaml:"timeseriesMaxDays"`
 	PriorityParamMaxLength *int `yaml:"priorityParamMaxLength"`
 	StatusParamMaxLength   *int `yaml:"statusParamMaxLength"`
+	AbtTeamParamMaxLength  *int `yaml:"abtTeamParamMaxLength"`
 }
 
 func (r rawAPI) resolve(d API) API {
@@ -217,6 +218,9 @@ func (r rawAPI) resolve(d API) API {
 	}
 	if r.StatusParamMaxLength != nil {
 		a.StatusParamMaxLength = *r.StatusParamMaxLength
+	}
+	if r.AbtTeamParamMaxLength != nil {
+		a.AbtTeamParamMaxLength = *r.AbtTeamParamMaxLength
 	}
 	return a
 }

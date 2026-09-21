@@ -117,6 +117,7 @@ type API struct {
 	TimeseriesMaxDays      int
 	PriorityParamMaxLength int
 	StatusParamMaxLength   int
+	AbtTeamParamMaxLength  int
 }
 
 // Readiness holds GET /readyz's tuning: the DB ping deadline, how long a
@@ -179,6 +180,7 @@ func Default() Config {
 			TimeseriesMaxDays:      365,
 			PriorityParamMaxLength: 50,
 			StatusParamMaxLength:   50,
+			AbtTeamParamMaxLength:  100,
 		},
 		SecurityHeaders: SecurityHeaders{
 			"Content-Security-Policy":           "default-src 'none'; frame-ancestors 'none'",
