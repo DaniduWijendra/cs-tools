@@ -52,6 +52,25 @@ const progressInterval = 25
 
 var interIssueDelay = 150 * time.Millisecond // courtesy gap for the secondary rate limiter; overridable by tests
 
+// rateLimitSuffix returns ", quota: N remaining (resets HH:MM:SS)" for a
+// progress log line, or "" when client is nil (synthetic fixtures — no
+// GitHub calls happen) or no response has reported a quota yet. GitHub's
+// resetAt is trimmed to time-of-day since it's always today or minutes away.
+func rateLimitSuffix(client github.Client) string {
+	if client == nil {
+		return ""
+	}
+	remaining, resetAt, ok := client.RateLimitRemaining()
+	if !ok {
+		return ""
+	}
+	resetLabel := resetAt
+	if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
+		resetLabel = t.Local().Format("15:04:05")
+	}
+	return fmt.Sprintf(", quota: %d remaining (resets %s)", remaining, resetLabel)
+}
+
 // main runs one idempotent seed pass: reset, config sync, then ingest every
 // configured repo's issues (real GitHub data if GITHUB_TOKEN is set,
 // synthetic fixtures otherwise), backfilling daily sla_snapshots as it goes.
@@ -129,7 +148,7 @@ func main() {
 		if err != nil {
 			fatal(fmt.Sprintf("failed to gather issues for %s/%s", r.Owner, r.Name), err)
 		}
-		fmt.Printf("[seed]   %s/%s: %d issues (gathered in %s)\n", r.Owner, r.Name, len(pairs), time.Since(gatherStart).Round(time.Second))
+		fmt.Printf("[seed]   %s/%s: %d issues (gathered in %s%s)\n", r.Owner, r.Name, len(pairs), time.Since(gatherStart).Round(time.Second), rateLimitSuffix(client))
 
 		source := "synthetic"
 		if token != "" {
@@ -165,7 +184,7 @@ func main() {
 			}
 
 			if (i+1)%progressInterval == 0 || i+1 == len(pairs) {
-				fmt.Printf("[seed]     ingested %d/%d issues (%s elapsed)\n", i+1, len(pairs), time.Since(ingestStart).Round(time.Second))
+				fmt.Printf("[seed]     ingested %d/%d issues (%s elapsed%s)\n", i+1, len(pairs), time.Since(ingestStart).Round(time.Second), rateLimitSuffix(client))
 			}
 		}
 
@@ -231,7 +250,7 @@ func gatherRepoIssues(ctx context.Context, client github.Client, now time.Time, 
 			out = append(out, ingest.Pair{Node: node, Detail: *detail})
 		}
 		if (i+1)%progressInterval == 0 || i+1 == len(nodes) {
-			fmt.Printf("[seed]     fetched %d/%d issue details (%s elapsed)\n", i+1, len(nodes), time.Since(fetchStart).Round(time.Second))
+			fmt.Printf("[seed]     fetched %d/%d issue details (%s elapsed%s)\n", i+1, len(nodes), time.Since(fetchStart).Round(time.Second), rateLimitSuffix(client))
 		}
 		select {
 		case <-ctx.Done():

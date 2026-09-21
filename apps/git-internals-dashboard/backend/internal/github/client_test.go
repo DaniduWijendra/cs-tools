@@ -128,6 +128,37 @@ func TestSearchAllFailsOnTruncatedResults(t *testing.T) {
 	}
 }
 
+// TestRateLimitRemainingTracksLatestResponse verifies RateLimitRemaining
+// reports "not yet known" before any request, then the most recently
+// observed rateLimit{remaining, resetAt} after a search response carries it
+// — this is what seed's progress logging reads to show quota consumption.
+func TestRateLimitRemainingTracksLatestResponse(t *testing.T) {
+	fastTimings(t)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},
+			"nodes":[{"number":1,"state":"OPEN","url":"https://x/1","createdAt":"2026-01-01T00:00:00Z",
+			"updatedAt":"2026-01-02T00:00:00Z","closedAt":null,"labels":{"nodes":[]}}]},
+			"rateLimit":{"remaining":4321,"resetAt":"2026-01-01T01:00:00Z"}}}`))
+	})
+
+	if _, _, ok := client.RateLimitRemaining(); ok {
+		t.Fatal("expected RateLimitRemaining to report unknown before any request")
+	}
+
+	if _, err := client.SearchAll(context.Background(), `repo:acme/widgets is:open`); err != nil {
+		t.Fatalf("SearchAll: %v", err)
+	}
+
+	remaining, resetAt, ok := client.RateLimitRemaining()
+	if !ok {
+		t.Fatal("expected RateLimitRemaining to report known after a response carried it")
+	}
+	if remaining != 4321 || resetAt != "2026-01-01T01:00:00Z" {
+		t.Errorf("expected remaining=4321 resetAt=2026-01-01T01:00:00Z, got remaining=%d resetAt=%s", remaining, resetAt)
+	}
+}
+
 // TestGqlRetriesThenSucceeds verifies gql retries a transient failure and
 // returns success once a later attempt gets a 200.
 func TestGqlRetriesThenSucceeds(t *testing.T) {

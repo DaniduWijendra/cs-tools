@@ -85,4 +85,10 @@ type Client interface {
 	// FetchIssueDetail returns one issue's status timeline and per-project
 	// current status, or (nil, nil) if the issue does not exist.
 	FetchIssueDetail(ctx context.Context, owner, name string, number int) (*IssueDetail, error)
+
+	// RateLimitRemaining returns the GitHub API quota remaining as of the
+	// most recent SearchAll/FetchRepoIssues/FetchIssueDetail response, and
+	// when it resets (GitHub's raw ISO-8601 timestamp). ok is false until at
+	// least one such response has been received.
+	RateLimitRemaining() (remaining int, resetAt string, ok bool)
 }

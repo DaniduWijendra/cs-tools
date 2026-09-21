@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/appconfig"
@@ -69,6 +70,40 @@ type httpClient struct {
 	token    string
 	endpoint string
 	hc       *http.Client
+
+	// rateLimitMu guards rateLimit, the most recently observed
+	// rateLimit{remaining, resetAt} from any query that requested it (search,
+	// detail). Read by RateLimitRemaining, e.g. for seed's progress logging.
+	rateLimitMu sync.Mutex
+	rateLimit   *rateLimitInfo
+}
+
+// rateLimitInfo is a snapshot of GitHub's GraphQL rateLimit object as of the
+// most recent request that requested it.
+type rateLimitInfo struct {
+	remaining int
+	resetAt   string // GitHub's raw ISO-8601 timestamp, e.g. "2026-09-21T15:00:00Z"
+}
+
+// recordRateLimit stores the most recently observed rateLimit snapshot,
+// overwriting whatever was there — callers only ever care about the latest.
+func (c *httpClient) recordRateLimit(info rateLimitInfo) {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+	c.rateLimit = &info
+}
+
+// RateLimitRemaining returns the GitHub API quota remaining as of the most
+// recent search/detail response, and when it resets. ok is false until at
+// least one such response has been received (e.g. before the first request,
+// or when running against synthetic fixtures with no client at all).
+func (c *httpClient) RateLimitRemaining() (remaining int, resetAt string, ok bool) {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+	if c.rateLimit == nil {
+		return 0, "", false
+	}
+	return c.rateLimit.remaining, c.rateLimit.resetAt, true
 }
 
 // NewClient returns a Client that talks to the real GitHub GraphQL API using
@@ -220,7 +255,7 @@ query ($q: String!, $after: String) {
       }
     }
   }
-  rateLimit { remaining }
+  rateLimit { remaining resetAt }
 }`
 
 type searchData struct {
@@ -244,6 +279,14 @@ type searchData struct {
 			} `json:"labels"`
 		} `json:"nodes"`
 	} `json:"search"`
+	RateLimit rateLimitData `json:"rateLimit"`
+}
+
+// rateLimitData mirrors GraphQL's rateLimit { remaining resetAt } shape,
+// present on both searchData and detailData.
+type rateLimitData struct {
+	Remaining int    `json:"remaining"`
+	ResetAt   string `json:"resetAt"`
 }
 
 // SearchAll runs q against GitHub's issue search, paginating until
@@ -261,6 +304,7 @@ func (c *httpClient) SearchAll(ctx context.Context, q string) ([]IssueNode, erro
 		if err != nil {
 			return nil, err
 		}
+		c.recordRateLimit(rateLimitInfo{remaining: data.RateLimit.Remaining, resetAt: data.RateLimit.ResetAt})
 		issueCount = data.Search.IssueCount
 		for _, n := range data.Search.Nodes {
 			if n.Number == nil {
@@ -429,10 +473,11 @@ query ($owner: String!, $name: String!, $number: Int!, $tlCursor: String, $piCur
       }
     }
   }
-  rateLimit { remaining }
+  rateLimit { remaining resetAt }
 }`
 
 type detailData struct {
+	RateLimit  rateLimitData `json:"rateLimit"`
 	Repository *struct {
 		Issue *struct {
 			Number        int `json:"number"`
@@ -489,6 +534,7 @@ func (c *httpClient) FetchIssueDetail(ctx context.Context, owner, name string, n
 		if err != nil {
 			return nil, err
 		}
+		c.recordRateLimit(rateLimitInfo{remaining: data.RateLimit.Remaining, resetAt: data.RateLimit.ResetAt})
 		if data.Repository == nil || data.Repository.Issue == nil {
 			return nil, nil
 		}
