@@ -85,7 +85,7 @@ func TestGetProjectConsumption_NeverReturnsSecrets(t *testing.T) {
 			SecondarySecretKey:  strPtrLocal(secondary),
 		},
 	}
-	svc := NewProjectConsumptionService(repo, nil, true)
+	svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 	view, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestGetProjectConsumption_UnprovisionedProjectIsPending(t *testing.T) {
 		key:   "ACME-PROD",
 		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusPending},
 	}
-	svc := NewProjectConsumptionService(repo, nil, true)
+	svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 	view, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestGetProjectConsumption_UnprovisionedProjectIsPending(t *testing.T) {
 }
 
 func TestGetProjectConsumption_RejectsNonUUID(t *testing.T) {
-	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, nil, true)
+	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, nil, alwaysUnrestrictedAccess{}, true)
 
 	_, err := svc.GetProjectConsumption(context.Background(), "6fa0b42d1bfa4a69a002c9d3604bcb77")
 	var validationErr *apierror.ValidationError
@@ -198,7 +198,7 @@ func TestUpdateProjectConsumption_RequiresStepArtefacts(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			repo := &fakeProjectConsumptionRepo{}
-			svc := NewProjectConsumptionService(repo, nil, true)
+			svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 			_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID, tc.req)
 			var validationErr *apierror.ValidationError
@@ -223,7 +223,7 @@ func TestUpdateProjectConsumption_SubscribedNeedsNoArtefacts(t *testing.T) {
 		key:   "ACME",
 		state: domain.ProjectConsumption{Status: domain.ConsumptionStatusSubscribed},
 	}
-	svc := NewProjectConsumptionService(repo, nil, true)
+	svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 	_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{Status: int16(domain.ConsumptionStatusSubscribed)})
@@ -238,7 +238,7 @@ func TestUpdateProjectConsumption_SubscribedNeedsNoArtefacts(t *testing.T) {
 func TestUpdateProjectConsumption_RejectsOutOfRangeStatus(t *testing.T) {
 	for _, status := range []int16{0, 6, -1, 100} {
 		repo := &fakeProjectConsumptionRepo{}
-		svc := NewProjectConsumptionService(repo, nil, true)
+		svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 		_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 			domain.UpdateProjectConsumptionRequest{Status: status})
@@ -267,7 +267,7 @@ func TestUpdateProjectConsumption_StaleStatusIsNoOp(t *testing.T) {
 			ConsumerSecret:      strPtrLocal("secret"),
 		},
 	}
-	svc := NewProjectConsumptionService(repo, nil, true)
+	svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 	resp, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{
@@ -289,7 +289,7 @@ func TestUpdateProjectConsumption_StaleStatusIsNoOp(t *testing.T) {
 // write: recording step 4 must not clear step 2's application id.
 func TestUpdateProjectConsumption_ForwardsOnlySuppliedFields(t *testing.T) {
 	repo := &fakeProjectConsumptionRepo{name: "Acme", key: "ACME"}
-	svc := NewProjectConsumptionService(repo, nil, true)
+	svc := NewProjectConsumptionService(repo, nil, alwaysUnrestrictedAccess{}, true)
 
 	_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
 		domain.UpdateProjectConsumptionRequest{
@@ -404,7 +404,7 @@ func TestProcessLicenseDownload_FullFlow(t *testing.T) {
 			SubscriptionData: json.RawMessage(`{"deploymentId":"11111111-1111-1111-1111-111111111111"}`),
 		},
 	}
-	svc := NewProjectConsumptionService(repo, choreo, true)
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
 
 	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
 	if err != nil {
@@ -457,7 +457,7 @@ func TestProcessLicenseDownload_ResumeFromSubscribed(t *testing.T) {
 		},
 		licenseRes: domain.License{Signature: "sig-resumed"},
 	}
-	svc := NewProjectConsumptionService(repo, choreo, true)
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
 
 	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
 	if err != nil {
@@ -489,7 +489,7 @@ func TestProcessLicenseDownload_CompletedDirectLicense(t *testing.T) {
 		licenseRes: domain.License{Signature: "sig-direct"},
 	}
 	repo := &fakeProjectConsumptionRepo{}
-	svc := NewProjectConsumptionService(repo, choreo, true)
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
 
 	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
 	if err != nil {
@@ -529,7 +529,7 @@ func TestProcessLicenseDownload_PostgresWriteErrorIsNonFatal(t *testing.T) {
 		licenseRes: domain.License{Signature: "sig-db-err"},
 	}
 	repo := &fakeProjectConsumptionRepo{upsertErr: errors.New("db write failed")}
-	svc := NewProjectConsumptionService(repo, choreo, true)
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
 
 	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
 	if err != nil {
@@ -558,7 +558,7 @@ func TestProcessLicenseDownload_ServiceNowWriteErrorIsFatal(t *testing.T) {
 		updateStatusErr: errors.New("servicenow update failed"),
 	}
 	repo := &fakeProjectConsumptionRepo{}
-	svc := NewProjectConsumptionService(repo, choreo, true)
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
 
 	_, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
 	if err == nil {
@@ -570,7 +570,7 @@ func TestProcessLicenseDownload_ServiceNowWriteErrorIsFatal(t *testing.T) {
 }
 
 func TestProcessLicenseDownload_ValidationErrors(t *testing.T) {
-	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, &fakeChoreoSubscriptionClient{}, true)
+	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, &fakeChoreoSubscriptionClient{}, alwaysUnrestrictedAccess{}, true)
 
 	// Bad project ID
 	_, err := svc.ProcessLicenseDownload(context.Background(), "invalid-uuid", "11111111-1111-1111-1111-111111111111", "test@wso2.com")
@@ -588,5 +588,91 @@ func TestProcessLicenseDownload_ValidationErrors(t *testing.T) {
 	_, err = svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "")
 	if err == nil {
 		t.Fatal("expected validation error for empty email")
+	}
+}
+
+// scopedAccess is an AccessService stub restricted to a fixed project list,
+// standing in for a customer caller resolved from their own user token.
+type scopedAccess struct{ projectIDs []string }
+
+func (s scopedAccess) ResolveScope(context.Context) (AccessScope, error) {
+	return AccessScope{ProjectIDs: s.projectIDs}, nil
+}
+
+// Every method here takes the project id from the request path. A caller
+// outside the project's scope must not be able to read its provisioning state,
+// overwrite its stored credentials, or drive an upstream that mints a real
+// Choreo application for it — and must not learn the project exists either, so
+// the refusal is a 404 and not a 403.
+func TestProjectConsumption_RefusesAProjectOutsideTheCallersScope(t *testing.T) {
+	const otherProjectID = "11111111-2222-3333-4444-555555555555"
+	access := scopedAccess{projectIDs: []string{otherProjectID}}
+
+	t.Run("get", func(t *testing.T) {
+		repo := &fakeProjectConsumptionRepo{
+			getErr: errors.New("the repository must not be reached for an unauthorized project"),
+		}
+		svc := NewProjectConsumptionService(repo, nil, access, true)
+		_, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID)
+		assertNotFound(t, err)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		repo := &fakeProjectConsumptionRepo{}
+		svc := NewProjectConsumptionService(repo, nil, access, true)
+		_, err := svc.UpdateProjectConsumption(context.Background(), testConsumptionProjectID,
+			domain.UpdateProjectConsumptionRequest{
+				Status:        int16(domain.ConsumptionStatusCreated),
+				ApplicationID: strPtrLocal("app-1"),
+			})
+		assertNotFound(t, err)
+		if repo.upsertCalls != 0 {
+			t.Errorf("the write must be refused before it reaches the repository, got %d upserts", repo.upsertCalls)
+		}
+	})
+
+	t.Run("license", func(t *testing.T) {
+		choreo := &fakeChoreoSubscriptionClient{}
+		svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, choreo, access, true)
+		_, err := svc.ProcessLicenseDownload(context.Background(),
+			testConsumptionProjectID, "22222222-3333-4444-5555-666666666666", "user@example.com")
+		assertNotFound(t, err)
+	})
+}
+
+// A caller whose scope does include the project is unaffected — the check
+// narrows access, it does not become a second gate on the happy path.
+func TestProjectConsumption_AllowsAProjectInsideTheCallersScope(t *testing.T) {
+	repo := &fakeProjectConsumptionRepo{name: "Acme Production", key: "ACME-PROD"}
+	svc := NewProjectConsumptionService(repo, nil, scopedAccess{projectIDs: []string{testConsumptionProjectID}}, true)
+
+	if _, err := svc.GetProjectConsumption(context.Background(), testConsumptionProjectID); err != nil {
+		t.Fatalf("a caller scoped to this project must be served: %v", err)
+	}
+}
+
+// openapi.yaml declares the licence request's email as format: email. A
+// constraint the service does not enforce is not a constraint: without this
+// the address is forwarded to the licensing service and ends up on the issued
+// licence.
+func TestProcessLicenseDownload_RejectsAMalformedEmail(t *testing.T) {
+	choreo := &fakeChoreoSubscriptionClient{}
+	svc := NewProjectConsumptionService(&fakeProjectConsumptionRepo{}, choreo, alwaysUnrestrictedAccess{}, true)
+
+	for _, email := range []string{"", "invalid", "no-at-sign.example.com", "user@nodot"} {
+		_, err := svc.ProcessLicenseDownload(context.Background(),
+			testConsumptionProjectID, "22222222-3333-4444-5555-666666666666", email)
+		var ve *apierror.ValidationError
+		if !errors.As(err, &ve) {
+			t.Errorf("email %q: expected a ValidationError, got %v", email, err)
+		}
+	}
+}
+
+func assertNotFound(t *testing.T, err error) {
+	t.Helper()
+	var nfe *apierror.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Fatalf("expected an *apierror.NotFoundError so existence is not revealed, got %v", err)
 	}
 }

@@ -1141,14 +1141,20 @@ paths:
     get:
       summary: Get a project's product-consumption provisioning state.
       description: >
-        Postgres data source only; there is no ServiceNow equivalent. On the
-        ServiceNow path this state lives on the customer_project record and is
-        reached through the product-consumption scripted REST API, which the
-        Choreo subscription operation calls directly.
+        Reads the Postgres mirror of the provisioning state, so this route is
+        registered only where a database pool and an encryption key
+        (CONSUMPTION_SECRET_KEY) are both configured — without the key it is not
+        registered at all, rather than storing the credentials in the clear.
+        This is independent of DATA_SOURCE: a configured pool enables it on the
+        ServiceNow data source too, which is what staging and production run.
 
-        Also requires an encryption key to be configured (CONSUMPTION_SECRET_KEY);
-        without one these routes are not registered at all, rather than storing
-        the credentials in the clear.
+        ServiceNow remains the source of truth for the status itself. There it
+        lives on the customer_project record and is reached through the
+        product-consumption scripted REST API, which the Choreo subscription
+        operation calls directly.
+
+        Scoped to the caller: a project the caller may not see is reported as
+        not found.
 
         A project that has never entered the provisioning flow reports status 1
         (pending) rather than 404 — "not provisioned yet" is the first step of
@@ -1178,8 +1184,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
-          description: Project not found.
+          description: Project not found, or it exists but is outside the caller's access scope.
           content:
             application/json:
               schema:
@@ -1194,7 +1212,8 @@ paths:
     patch:
       summary: Record the completion of one product-consumption provisioning step.
       description: >
-        Postgres data source only — see the GET on this path.
+        Writes the Postgres mirror, so it carries the same registration
+        requirements and caller scoping as the GET on this path.
 
         The status may only move forward. The flow is resumable: a caller reads
         the current status and runs only the steps above it, so an out-of-order
@@ -1236,8 +1255,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
-          description: Project not found.
+          description: Project not found, or it exists but is outside the caller's access scope.
           content:
             application/json:
               schema:
@@ -1256,6 +1287,15 @@ paths:
         Executes the 5-step resumable provisioning sequence (application creation,
         subscription, credential generation, secret key generation) and issues a
         signed deployment license.
+
+        Registered whenever the Choreo subscription operation is configured. It
+        needs no database and no DATA_SOURCE setting: status is read from
+        ServiceNow through that operation, and Postgres is touched only to
+        mirror what the sequence did, which is best-effort and skipped entirely
+        where no mirror is configured.
+
+        Scoped to the caller: a project the caller may not see is reported as
+        not found.
       operationId: getDeploymentLicense
       parameters:
         - name: id
@@ -1289,8 +1329,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
-          description: Project or deployment not found.
+          description: The deployment was not found, or the project does not exist or is outside the caller's access scope.
           content:
             application/json:
               schema:
@@ -7440,6 +7492,10 @@ components:
         email:
           type: string
           format: email
+          description: >
+            The address the licence is issued to. Enforced at runtime, not only
+            documented: a value that is not a well-formed address is a 400
+            before the licensing service is called.
       required:
         - email
 

@@ -225,6 +225,10 @@ status is not ahead of what is stored is a no-op that returns the stored state, 
 matters: applying an out-of-order write would re-run a side-effecting step and create a **second**
 Choreo application for a customer who already has one.
 
+All three routes are scoped to the caller. The project id comes from the request path, so a caller
+who cannot see a project can neither read its provisioning state nor drive provisioning for it; the
+refusal is a 404, never a 403, so a project's existence is not revealed either.
+
 Credentials are encrypted at rest (`internal/crypto`, AES-256-GCM) and never returned by either
 endpoint — the read reports only `hasConsumerSecret`/`hasSecretKeys`. Both routes need a key and are
 not registered without one, so a deployment missing `CONSUMPTION_SECRET_KEY` loses the feature

@@ -18,6 +18,7 @@ package service
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
@@ -134,4 +135,35 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 		return AccessScope{}, err
 	}
 	return access.ResolveScope(ctx)
+}
+
+// authorizeProject refuses a caller who may not act on this project.
+//
+// The scoped reads in this package push the caller's AccessScope down into the
+// query, so the scope predicate and the row lookup happen together. That works
+// for a read; it does not for a write or for a call that leaves the service
+// entirely (the Choreo provisioning sequence), which have no such predicate to
+// attach to. Those check membership here instead, before doing anything.
+//
+// Refused as not-found, not forbidden: a caller who cannot see a project must
+// not be able to learn it exists by comparing 403 against 404 — the same
+// reasoning as the scope predicates in the project and case repositories.
+//
+// projectID is compared case-insensitively. Postgres renders uuid values in
+// lower case, but the id here comes from the request path, and a caller who
+// upper-cases a UUID they legitimately hold must not be locked out.
+func authorizeProject(ctx context.Context, access AccessService, projectID string) error {
+	scope, err := resolveScopeForID(ctx, access, projectID)
+	if err != nil {
+		return err
+	}
+	if scope.Unrestricted {
+		return nil
+	}
+	for _, id := range scope.ProjectIDs {
+		if strings.EqualFold(id, projectID) {
+			return nil
+		}
+	}
+	return &apierror.NotFoundError{Msg: "project not found"}
 }

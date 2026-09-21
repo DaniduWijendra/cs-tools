@@ -43,19 +43,27 @@ const consumptionApplicationDescription = "Product consumption tracking applicat
 type projectConsumptionService struct {
 	repo         repository.ProjectConsumptionRepository
 	choreoClient choreosubscription.Client
+	access       AccessService
 	dualWrite    bool
 }
 
 // NewProjectConsumptionService constructs a ProjectConsumptionService backed by
 // the given repository, Choreo subscription client, and dual-write setting.
+//
+// access scopes every method to the caller. Each of them takes the project id
+// straight from the request path, and between them they read provisioning
+// state, overwrite stored credentials and drive an upstream that mints real
+// Choreo applications — so none may run on a project the caller cannot see.
 func NewProjectConsumptionService(
 	repo repository.ProjectConsumptionRepository,
 	choreoClient choreosubscription.Client,
+	access AccessService,
 	dualWrite bool,
 ) ProjectConsumptionService {
 	return &projectConsumptionService{
 		repo:         repo,
 		choreoClient: choreoClient,
+		access:       access,
 		dualWrite:    dualWrite,
 	}
 }
@@ -65,7 +73,17 @@ func (s *projectConsumptionService) GetProjectConsumption(ctx context.Context, p
 	if err := validateUUIDs("projectId", []string{projectID}); err != nil {
 		return domain.ProjectConsumptionView{}, err
 	}
+	if err := authorizeProject(ctx, s.access, projectID); err != nil {
+		return domain.ProjectConsumptionView{}, err
+	}
+	return s.readConsumption(ctx, projectID)
+}
 
+// readConsumption is GetProjectConsumption without the authorization check, for
+// callers in this file that have already made it. Kept separate so re-reading
+// the state after a write does not re-resolve the caller's scope, which for a
+// user-token caller is two more queries per request.
+func (s *projectConsumptionService) readConsumption(ctx context.Context, projectID string) (domain.ProjectConsumptionView, error) {
 	state, name, key, err := s.repo.Get(ctx, projectID)
 	if err != nil {
 		return domain.ProjectConsumptionView{}, err
@@ -84,6 +102,9 @@ func (s *projectConsumptionService) GetProjectConsumption(ctx context.Context, p
 // error, so that a retrying caller converges instead of failing.
 func (s *projectConsumptionService) UpdateProjectConsumption(ctx context.Context, projectID string, req domain.UpdateProjectConsumptionRequest) (domain.UpdateProjectConsumptionResponse, error) {
 	if err := validateUUIDs("projectId", []string{projectID}); err != nil {
+		return domain.UpdateProjectConsumptionResponse{}, err
+	}
+	if err := authorizeProject(ctx, s.access, projectID); err != nil {
 		return domain.UpdateProjectConsumptionResponse{}, err
 	}
 
@@ -111,7 +132,7 @@ func (s *projectConsumptionService) UpdateProjectConsumption(ctx context.Context
 	case errors.Is(err, repository.ErrConsumptionStatusStale):
 		// Another caller already advanced past this step. Report what is
 		// actually stored so the caller can resume from there.
-		view, getErr := s.GetProjectConsumption(ctx, projectID)
+		view, getErr := s.readConsumption(ctx, projectID)
 		if getErr != nil {
 			return domain.UpdateProjectConsumptionResponse{}, getErr
 		}
@@ -126,7 +147,7 @@ func (s *projectConsumptionService) UpdateProjectConsumption(ctx context.Context
 	// Re-read rather than mapping the write's own RETURNING row: the response
 	// carries the project's name and key, which the write does not select, and
 	// this keeps a single definition of the view's shape.
-	view, err := s.GetProjectConsumption(ctx, projectID)
+	view, err := s.readConsumption(ctx, projectID)
 	if err != nil {
 		return domain.UpdateProjectConsumptionResponse{}, err
 	}
@@ -207,8 +228,11 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	if err := validateUUIDs("deploymentId", []string{deploymentID}); err != nil {
 		return domain.License{}, err
 	}
-	if email == "" {
-		return domain.License{}, &apierror.ValidationError{Msg: "email is required"}
+	if err := validateEmail(email); err != nil {
+		return domain.License{}, err
+	}
+	if err := authorizeProject(ctx, s.access, projectID); err != nil {
+		return domain.License{}, err
 	}
 	if s.choreoClient == nil {
 		return domain.License{}, errors.New("choreo subscription client not configured")

@@ -167,6 +167,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 			service.NewProjectConsumptionService(
 				consumptionRepo,
 				choreoClient,
+				accessSvc,
 				cfg.ConsumptionDualWriteEnabled,
 			),
 		)

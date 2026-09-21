@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -374,6 +375,20 @@ func (c *client) GetDeploymentLicense(ctx context.Context, projectID, deployment
 		msg := out.Result.Message
 		if msg == "" {
 			msg = "no reason given"
+		}
+		// A missing deployment is the caller's mistake, not this service's, and
+		// openapi.yaml documents a 404 for it. Every other refusal stays an
+		// ordinary error and surfaces as a 500, which is what it is: the
+		// licensing service declined for a reason we do not model.
+		//
+		// Matching on the upstream message is the only signal available — the
+		// refusal carries no code, and the transport status is 200 either way.
+		// If that wording ever changes the case degrades to a 500 rather than
+		// misreporting something else as not-found, so this fails safe.
+		if strings.Contains(strings.ToLower(msg), "not found") {
+			slog.WarnContext(ctx, "the licensing service reported the deployment as not found",
+				"projectId", projectID, "deploymentId", deploymentID, "upstreamMessage", msg)
+			return domain.License{}, &apierror.NotFoundError{Msg: "deployment not found"}
 		}
 		return domain.License{}, fmt.Errorf("choreosubscription: the licensing service did not issue a licence: %s", msg)
 	}

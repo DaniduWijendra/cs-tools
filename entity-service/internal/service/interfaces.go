@@ -268,13 +268,27 @@ type ProjectStatsService interface {
 // a Choreo application for the project, subscribes it to the tracking API and
 // mints the credentials a deployment's license is built from.
 //
-// This is the mirror image of ProjectContactService and friends: all methods
-// require the **Postgres** data source, and there is no ServiceNow
-// implementation. On the ServiceNow path this state lives on the
-// customer_project record and is reached through the product-consumption
-// scripted REST API, which the Choreo subscription operation calls directly —
+// The two halves need different things, and neither is gated on DATA_SOURCE —
+// staging and production both run DATA_SOURCE=servicenow and need both.
+//
+//   - GetProjectConsumption and UpdateProjectConsumption read and write the
+//     Postgres mirror, so they need a pool and CONSUMPTION_SECRET_KEY (the
+//     stored OAuth2 credentials and secret keys are never held in the clear).
+//     A pool enables them on either data source.
+//   - ProcessLicenseDownload needs neither. It reads status from ServiceNow
+//     through the configured Choreo subscription operation and touches
+//     Postgres only to mirror what it did, which is best-effort and skipped
+//     entirely when there is no repository.
+//
+// ServiceNow remains the source of truth for the status itself. There it lives
+// on the customer_project record, reached through the product-consumption
+// scripted REST API that the Choreo subscription operation calls directly —
 // neither this service nor the ServiceNow integration service sits in that
 // path at all.
+//
+// Every method is scoped to the caller (see AccessService): the project id
+// comes from the request path, so a caller who cannot see a project can
+// neither read its provisioning state nor drive provisioning for it.
 type ProjectConsumptionService interface {
 	// GetProjectConsumption returns the project's current provisioning state.
 	// A project that has never entered the flow reports status 1 (pending)

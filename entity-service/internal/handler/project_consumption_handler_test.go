@@ -32,6 +32,16 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/service"
 )
 
+// unrestrictedAccess is a service.AccessService stub for the one test here
+// that builds a real ProjectConsumptionService: it exercises the handler's
+// licence path end to end against a fake Choreo, not the scoping rules (those
+// are the service package's own tests).
+type unrestrictedAccess struct{}
+
+func (unrestrictedAccess) ResolveScope(context.Context) (service.AccessScope, error) {
+	return service.AccessScope{Unrestricted: true}, nil
+}
+
 type stubProjectConsumptionService struct {
 	service.ProjectConsumptionService
 
@@ -281,7 +291,7 @@ func TestGetDeploymentLicense_E2E_ChoreoFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	svc := service.NewProjectConsumptionService(nil, choreoClient, false)
+	svc := service.NewProjectConsumptionService(nil, choreoClient, unrestrictedAccess{}, false)
 	h := NewProjectConsumptionHandler(svc)
 
 	entityMux := http.NewServeMux()

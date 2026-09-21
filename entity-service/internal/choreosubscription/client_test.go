@@ -19,11 +19,13 @@ package choreosubscription
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 )
 
@@ -119,7 +121,7 @@ func TestNewClient_RequiresCredentials(t *testing.T) {
 func TestClient_GetDeploymentLicense_RejectsUnsuccessfulResult(t *testing.T) {
 	server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"result":{"success":false,"message":"Deployment not found"}}`))
+		_, _ = w.Write([]byte(`{"result":{"success":false,"message":"Subscription is not active"}}`))
 	}))
 	defer server.Close()
 
@@ -128,8 +130,35 @@ func TestClient_GetDeploymentLicense_RejectsUnsuccessfulResult(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the licensing service reports success:false")
 	}
-	if !strings.Contains(err.Error(), "Deployment not found") {
+	if !strings.Contains(err.Error(), "Subscription is not active") {
 		t.Errorf("the upstream reason should reach the caller, got %v", err)
+	}
+	var nfe *apierror.NotFoundError
+	if errors.As(err, &nfe) {
+		t.Errorf("a refusal that is not a missing deployment must not become a 404, got %v", err)
+	}
+}
+
+// A missing deployment is the one refusal that is the caller's mistake rather
+// than ours, and openapi.yaml documents a 404 for it -- which writeServiceError
+// only produces for an *apierror.NotFoundError. Any other refusal stays a 500.
+func TestClient_GetDeploymentLicense_MissingDeploymentIsNotFound(t *testing.T) {
+	server := httptest.NewServer(withToken(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"success":false,"message":"Deployment not found"}}`))
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server).GetDeploymentLicense(
+		context.Background(), "proj-1", "dep-1", domain.DeploymentLicenseRequest{Email: "user@example.com"})
+	var nfe *apierror.NotFoundError
+	if !errors.As(err, &nfe) {
+		t.Fatalf("expected an *apierror.NotFoundError, got %v", err)
+	}
+	// The upstream wording is logged, not returned: the caller is told what
+	// happened, not how the licensing service phrased it.
+	if strings.Contains(nfe.Msg, "Deployment not found") {
+		t.Errorf("the upstream message should not be echoed verbatim, got %q", nfe.Msg)
 	}
 }
 
