@@ -18,6 +18,7 @@
 // prefix); a sync run is triggered via POST /sync/runs.
 import { qs, request } from "./client";
 import type {
+  GlobalFilters,
   IssueDetail,
   IssueFilters,
   IssueListResponse,
@@ -25,7 +26,6 @@ import type {
   SyncStatus,
   SyncSummary,
   Taxonomy,
-  TitleMap,
   Timeseries,
 } from "./types";
 
@@ -35,16 +35,11 @@ export const api = {
 
   getIssue: (id: number) => request<IssueDetail>(`/issues/${id}`),
 
-  getIssueTitles: (ids: number[]) =>
-    request<{ titles: TitleMap }>(`/issues/titles`, {
-      method: "POST",
-      body: JSON.stringify({ ids }),
-    }).then((r) => r.titles),
+  getTimeseries: (
+    params: { days?: number; repo?: string; groupBy?: string; metric?: string; abtTeam?: string } = {},
+  ) => request<Timeseries>(`/metrics/timeseries${qs(params as Record<string, string | number | undefined>)}`),
 
-  getTimeseries: (params: { days?: number; repo?: string; groupBy?: string; metric?: string } = {}) =>
-    request<Timeseries>(`/metrics/timeseries${qs(params as Record<string, string | number | undefined>)}`),
-
-  getOverview: (params: { repo?: string; priority?: string } = {}) =>
+  getOverview: (params: GlobalFilters = {}) =>
     request<Overview>(`/metrics/overview${qs(params as Record<string, string | number | undefined>)}`),
 
   getTaxonomy: () => request<Taxonomy>(`/taxonomy`),

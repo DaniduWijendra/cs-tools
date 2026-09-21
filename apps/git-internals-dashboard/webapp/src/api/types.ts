@@ -29,8 +29,8 @@ export interface Sla {
   slaRunning: boolean | null;
 }
 
-// PRIVACY: rows carry no title, assignees, opener, or labels. Titles are
-// resolved separately at render time via useIssueTitles().
+// PRIVACY: rows carry title, ABT team, and opened-by (a @wso2.com address),
+// but no labels, assignees, or event actors.
 export interface IssueRow {
   id: number;
   number: number | null;
@@ -42,6 +42,9 @@ export interface IssueRow {
   githubCreatedAt: string | null;
   githubUpdatedAt: string | null;
   sla: Sla | null;
+  title: string | null;
+  abtTeam: string | null;
+  openedBy: string | null;
 }
 
 export interface StatusEvent {
@@ -63,8 +66,6 @@ export interface IssueListResponse {
   offset: number;
   hasMore: boolean;
 }
-
-export type TitleMap = Record<number, string | null>;
 
 export interface OverviewHeroStat {
   n: number;
@@ -127,7 +128,8 @@ export interface UnknownStatus {
 
 export interface Overview {
   refreshedAt: string;
-  filters: { repo: string | null; priority: string | null };
+  filters: { repo: string | null; priority: string | null; abtTeam: string | null };
+  abtTeams: string[];
   hero: {
     violated: OverviewHeroStat;
     atRisk: OverviewHeroStat;
@@ -211,6 +213,7 @@ export type BucketKey =
 export interface IssueFilters {
   repo?: string;
   priority?: string;
+  abtTeam?: string;
   state?: "OPEN" | "CLOSED";
   slaState?: SlaState;
   status?: string;
@@ -219,4 +222,10 @@ export interface IssueFilters {
   offset?: number;
   bucket?: BucketKey;
   sort?: IssueSortField;
+}
+
+export interface GlobalFilters {
+  repo?: string;
+  priority?: string;
+  abtTeam?: string;
 }
