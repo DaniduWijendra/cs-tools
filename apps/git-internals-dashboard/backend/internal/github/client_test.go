@@ -77,12 +77,14 @@ func TestSearchAllPaginatesUntilExhausted(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
 			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":2,"pageInfo":{"hasNextPage":true,"endCursor":"cursor1"},
-				"nodes":[{"number":1,"state":"OPEN","url":"https://x/1","createdAt":"2026-01-01T00:00:00Z",
+				"nodes":[{"number":1,"state":"OPEN","url":"https://x/1","title":"Widget is on fire","body":"Steps to reproduce...",
+				"createdAt":"2026-01-01T00:00:00Z",
 				"updatedAt":"2026-01-02T00:00:00Z","closedAt":null,"labels":{"nodes":[{"name":"Priority/High(P2)"}]}}]}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":2,"pageInfo":{"hasNextPage":false,"endCursor":null},
-			"nodes":[{"number":2,"state":"CLOSED","url":"https://x/2","createdAt":"2026-01-03T00:00:00Z",
+			"nodes":[{"number":2,"state":"CLOSED","url":"https://x/2","title":"Second widget issue","body":"More details...",
+			"createdAt":"2026-01-03T00:00:00Z",
 			"updatedAt":"2026-01-04T00:00:00Z","closedAt":"2026-01-05T00:00:00Z","labels":{"nodes":[]}}]}}}`))
 	})
 
@@ -96,8 +98,14 @@ func TestSearchAllPaginatesUntilExhausted(t *testing.T) {
 	if issues[0].Number != 1 || issues[0].Labels[0] != "Priority/High(P2)" {
 		t.Errorf("unexpected first issue: %+v", issues[0])
 	}
+	if issues[0].Title != "Widget is on fire" || issues[0].Body != "Steps to reproduce..." {
+		t.Errorf("expected first issue's title/body populated from the search response, got %+v", issues[0])
+	}
 	if issues[1].Number != 2 || issues[1].ClosedAt == nil || *issues[1].ClosedAt != "2026-01-05T00:00:00Z" {
 		t.Errorf("unexpected second issue: %+v", issues[1])
+	}
+	if issues[1].Title != "Second widget issue" || issues[1].Body != "More details..." {
+		t.Errorf("expected second issue's title/body populated from the search response, got %+v", issues[1])
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Errorf("expected 2 HTTP calls (one per page), got %d", calls)

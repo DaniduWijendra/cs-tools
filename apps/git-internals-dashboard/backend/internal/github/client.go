@@ -34,9 +34,7 @@ import (
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/appconfig"
 )
 
-// graphQLPath is a var (not const) so titles_test.go can point FetchTitles
-// at an httptest server; production code never reassigns it.
-var graphQLPath = "https://api.github.com/graphql"
+const graphQLPath = "https://api.github.com/graphql"
 
 // Overridable only by tests, so retry/pagination pacing tests don't take
 // real wall-clock seconds; production code never reassigns these and always
@@ -63,7 +61,6 @@ func Apply(cfg appconfig.GitHub) {
 	searchPageDelay = time.Duration(cfg.SearchPageDelayMs) * time.Millisecond
 	detailPageDelay = time.Duration(cfg.DetailPageDelayMs) * time.Millisecond
 	gqlRetryAfterCap = time.Duration(cfg.RetryAfterCapSeconds) * time.Second
-	titlesTimeout = time.Duration(cfg.TitlesRequestTimeoutSeconds) * time.Second
 }
 
 type httpClient struct {
@@ -248,6 +245,8 @@ query ($q: String!, $after: String) {
         number
         state
         url
+        title
+        body
         createdAt
         updatedAt
         closedAt
@@ -269,6 +268,8 @@ type searchData struct {
 			Number    *int    `json:"number"`
 			State     string  `json:"state"`
 			URL       string  `json:"url"`
+			Title     string  `json:"title"`
+			Body      string  `json:"body"`
 			CreatedAt string  `json:"createdAt"`
 			UpdatedAt string  `json:"updatedAt"`
 			ClosedAt  *string `json:"closedAt"`
@@ -318,6 +319,8 @@ func (c *httpClient) SearchAll(ctx context.Context, q string) ([]IssueNode, erro
 				Number:    *n.Number,
 				State:     n.State,
 				URL:       n.URL,
+				Title:     n.Title,
+				Body:      n.Body,
 				CreatedAt: n.CreatedAt,
 				UpdatedAt: n.UpdatedAt,
 				ClosedAt:  n.ClosedAt,
