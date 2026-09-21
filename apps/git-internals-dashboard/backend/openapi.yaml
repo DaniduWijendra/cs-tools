@@ -87,6 +87,7 @@ paths:
           schema:
             type: string
             maxLength: 50
+        - $ref: '#/components/parameters/AbtTeamParam'
         - name: q
           in: query
           description: Issue number.
@@ -157,45 +158,6 @@ paths:
         "500":
           $ref: '#/components/responses/InternalServerError'
 
-  /issues/titles:
-    post:
-      summary: >
-        On-demand title resolution. Fetched live from GitHub, cached in
-        memory only (15 min) — titles are never persisted (PRIVACY).
-      operationId: postIssueTitles
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [ids]
-              properties:
-                ids:
-                  type: array
-                  minItems: 1
-                  maxItems: 200
-                  items:
-                    type: integer
-                    minimum: 1
-      responses:
-        "200":
-          description: Ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  titles:
-                    type: object
-                    additionalProperties:
-                      type: string
-                      nullable: true
-        "400":
-          $ref: '#/components/responses/BadRequest'
-        "500":
-          $ref: '#/components/responses/InternalServerError'
-
   /metrics/overview:
     get:
       summary: Dashboard hero counts, per-project/priority breakdowns, 12-week volume.
@@ -207,6 +169,7 @@ paths:
           schema:
             type: string
             maxLength: 50
+        - $ref: '#/components/parameters/AbtTeamParam'
       responses:
         "200":
           description: Ok
@@ -244,6 +207,7 @@ paths:
             type: string
             enum: [violated, at_risk, total]
             default: violated
+        - $ref: '#/components/parameters/AbtTeamParam'
       responses:
         "200":
           description: Ok
@@ -307,6 +271,13 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+
+    AbtTeamParam:
+      name: abtTeam
+      in: query
+      schema:
+        type: string
+        maxLength: 100
 
   responses:
     BadRequest:
@@ -452,6 +423,15 @@ components:
         currentStatus:
           type: string
           nullable: true
+        title:
+          type: string
+          nullable: true
+        abtTeam:
+          type: string
+          nullable: true
+        openedBy:
+          type: string
+          nullable: true
         githubCreatedAt:
           type: string
           format: date-time
@@ -508,6 +488,23 @@ components:
 
     Overview:
       type: object
+      properties:
+        filters:
+          type: object
+          properties:
+            repo:
+              type: string
+              nullable: true
+            priority:
+              type: string
+              nullable: true
+            abtTeam:
+              type: string
+              nullable: true
+        abtTeams:
+          type: array
+          items:
+            type: string
 
     Timeseries:
       type: object
