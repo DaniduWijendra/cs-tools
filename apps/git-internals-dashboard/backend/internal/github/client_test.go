@@ -484,3 +484,66 @@ func TestFetchRepoIssuesDedupesOpenOverClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchRepoIssuesSplitsWhenClosedQueryTruncated reproduces the seed/sync
+// failure mode from a repo whose closedLookbackDays window matches more than
+// 1,000 closed issues: the plain closed:>=since query truncates, and even
+// the full-window closed:X..Y range still truncates, so FetchRepoIssues must
+// keep bisecting until each sub-range fits under GitHub Search's cap, then
+// merge every sub-range's issues back together.
+func TestFetchRepoIssuesSplitsWhenClosedQueryTruncated(t *testing.T) {
+	fastTimings(t)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		q, _ := body["variables"].(map[string]any)["q"].(string)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(q, "is:open"):
+			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}`))
+		case strings.Contains(q, "closed:>=2026-01-06"):
+			// The plain unbounded query GitHub can never satisfy once more
+			// than 1,000 issues fall in the window.
+			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":1200,"pageInfo":{"hasNextPage":false,"endCursor":null},
+				"nodes":[{"number":999,"state":"CLOSED","url":"https://x/999","createdAt":"2026-01-06T00:00:00Z",
+				"updatedAt":"2026-01-06T00:00:00Z","closedAt":"2026-01-06T00:00:00Z","labels":{"nodes":[]}}]}}}`))
+		case strings.Contains(q, "closed:2026-01-06..2026-01-10"):
+			// The full-window bounded retry still doesn't fit under the cap.
+			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":1200,"pageInfo":{"hasNextPage":false,"endCursor":null},
+				"nodes":[{"number":999,"state":"CLOSED","url":"https://x/999","createdAt":"2026-01-06T00:00:00Z",
+				"updatedAt":"2026-01-06T00:00:00Z","closedAt":"2026-01-06T00:00:00Z","labels":{"nodes":[]}}]}}}`))
+		case strings.Contains(q, "closed:2026-01-06..2026-01-08"):
+			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":2,"pageInfo":{"hasNextPage":false,"endCursor":null},
+				"nodes":[{"number":10,"state":"CLOSED","url":"https://x/10","createdAt":"2026-01-06T00:00:00Z",
+				"updatedAt":"2026-01-06T00:00:00Z","closedAt":"2026-01-06T00:00:00Z","labels":{"nodes":[]}},
+				{"number":11,"state":"CLOSED","url":"https://x/11","createdAt":"2026-01-07T00:00:00Z",
+				"updatedAt":"2026-01-07T00:00:00Z","closedAt":"2026-01-07T00:00:00Z","labels":{"nodes":[]}}]}}}`))
+		case strings.Contains(q, "closed:2026-01-09..2026-01-10"):
+			_, _ = w.Write([]byte(`{"data":{"search":{"issueCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},
+				"nodes":[{"number":12,"state":"CLOSED","url":"https://x/12","createdAt":"2026-01-09T00:00:00Z",
+				"updatedAt":"2026-01-09T00:00:00Z","closedAt":"2026-01-09T00:00:00Z","labels":{"nodes":[]}}]}}}`))
+		default:
+			t.Fatalf("unexpected query: %s", q)
+		}
+	})
+
+	now := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
+	issues, err := client.fetchRepoIssuesAt(context.Background(), "acme", "widgets", `label:"Origin/CS"`, 4, now)
+	if err != nil {
+		t.Fatalf("FetchRepoIssues: %v", err)
+	}
+	gotNumbers := make(map[int]bool, len(issues))
+	for _, issue := range issues {
+		gotNumbers[issue.Number] = true
+	}
+	wantNumbers := []int{10, 11, 12}
+	if len(issues) != len(wantNumbers) {
+		t.Fatalf("expected %d issues recovered via range-splitting, got %d: %+v", len(wantNumbers), len(issues), issues)
+	}
+	for _, n := range wantNumbers {
+		if !gotNumbers[n] {
+			t.Errorf("expected issue #%d in the split-recovered result, missing", n)
+		}
+	}
+}

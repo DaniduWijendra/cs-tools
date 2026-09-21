@@ -312,11 +312,32 @@ func buildRepoIssueQueries(owner, name, issueQuery string, closedLookbackDays in
 // closed within closedLookbackDays, deduplicated by issue number (open wins
 // if both appear).
 func (c *httpClient) FetchRepoIssues(ctx context.Context, owner, name, issueQuery string, closedLookbackDays int) ([]IssueNode, error) {
-	openQ, closedQ := buildRepoIssueQueries(owner, name, issueQuery, closedLookbackDays, time.Now())
+	return c.fetchRepoIssuesAt(ctx, owner, name, issueQuery, closedLookbackDays, time.Now())
+}
+
+// fetchRepoIssuesAt is FetchRepoIssues with an injectable now, so the
+// closed-query truncation fallback can be tested without depending on the
+// wall clock.
+func (c *httpClient) fetchRepoIssuesAt(ctx context.Context, owner, name, issueQuery string, closedLookbackDays int, now time.Time) ([]IssueNode, error) {
+	openQ, closedQ := buildRepoIssueQueries(owner, name, issueQuery, closedLookbackDays, now)
 
 	closed, err := c.SearchAll(ctx, closedQ)
 	if err != nil {
-		return nil, err
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Kind != errKindTruncated {
+			return nil, err
+		}
+		// More than 1,000 issues closed within the lookback window — GitHub
+		// Search can't return them from one unbounded closed:>=since query
+		// (its 1,000-result cap applies per query, not per repo). Fall back
+		// to bisecting the window into closed:X..Y ranges narrow enough for
+		// each one to fit under the cap.
+		base := fmt.Sprintf("repo:%s/%s is:issue %s is:closed", owner, name, issueQuery)
+		since := now.Add(-time.Duration(closedLookbackDays) * 24 * time.Hour)
+		closed, err = c.searchAllRangeSplit(ctx, base, "closed", since, now)
+		if err != nil {
+			return nil, err
+		}
 	}
 	open, err := c.SearchAll(ctx, openQ)
 	if err != nil {
@@ -335,6 +356,40 @@ func (c *httpClient) FetchRepoIssues(ctx context.Context, owner, name, issueQuer
 		out = append(out, issue)
 	}
 	return out, nil
+}
+
+// searchAllRangeSplit runs base bounded by field:since..until (whole UTC
+// days, inclusive) via SearchAll, recursively bisecting the date range
+// whenever a window still exceeds GitHub Search's 1,000-result cap — so the
+// full result set stays retrievable no matter how many issues fall in
+// [since, until]. Only reached as a fallback once an unbounded query has
+// already proven truncated; base must not itself contain a field: qualifier.
+func (c *httpClient) searchAllRangeSplit(ctx context.Context, base, field string, since, until time.Time) ([]IssueNode, error) {
+	since, until = since.UTC().Truncate(24*time.Hour), until.UTC().Truncate(24*time.Hour)
+	q := fmt.Sprintf("%s %s:%s..%s sort:updated-desc", base, field, since.Format("2006-01-02"), until.Format("2006-01-02"))
+	issues, err := c.SearchAll(ctx, q)
+	if err == nil {
+		return issues, nil
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Kind != errKindTruncated || !since.Before(until) {
+		// Not a truncation, or the window is already a single day — a single
+		// day matching more than 1,000 issues can't be split further, so
+		// this surfaces the same truncation error the caller already knows
+		// how to classify.
+		return nil, err
+	}
+	days := int(until.Sub(since).Hours() / 24)
+	mid := since.AddDate(0, 0, days/2)
+	left, err := c.searchAllRangeSplit(ctx, base, field, since, mid)
+	if err != nil {
+		return nil, err
+	}
+	right, err := c.searchAllRangeSplit(ctx, base, field, mid.AddDate(0, 0, 1), until)
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
 }
 
 // ---------------------------------------------------------------------------
