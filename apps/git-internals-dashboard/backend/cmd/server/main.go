@@ -112,7 +112,6 @@ func main() {
 	taxonomyHandler := handler.NewTaxonomyHandler(slaCfg)
 	issuesHandler := handler.NewIssuesHandler(pool, slaCfg, appCfg.API)
 	metricsHandler := handler.NewMetricsHandler(pool, slaCfg, appCfg.Cache, appCfg.API)
-	titlesHandler := handler.NewTitlesHandler(pool, githubToken, appCfg.Cache.Titles, appCfg.GitHub.TitlesBatchSize, appCfg.API)
 	syncHandler := handler.NewSyncHandler(pool, slaCfg, lock, runtime, githubToken,
 		time.Duration(appCfg.Jobs.SyncRunDeadlineMinutes)*time.Minute)
 
@@ -122,7 +121,6 @@ func main() {
 	mux.HandleFunc("GET /taxonomy", taxonomyHandler.GetTaxonomy)
 	mux.HandleFunc("GET /issues", issuesHandler.ListIssues)
 	mux.HandleFunc("GET /issues/{id}", issuesHandler.GetIssue)
-	mux.HandleFunc("POST /issues/titles", titlesHandler.PostTitles)
 	mux.HandleFunc("GET /metrics/overview", metricsHandler.GetOverview)
 	mux.HandleFunc("GET /metrics/timeseries", metricsHandler.GetTimeseries)
 	mux.HandleFunc("POST /sync/runs", syncHandler.PostSyncRuns)
