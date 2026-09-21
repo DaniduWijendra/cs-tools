@@ -15,7 +15,10 @@
 // under the License.
 
 // Shared grid templates so issue-list headers and rows stay aligned.
-export const gridTemplate = (showSlaState: boolean): string =>
-  showSlaState
-    ? "minmax(0,1fr) 158px 56px 168px 132px 150px 56px"
+export type IssueRowVariant = "full" | "compact";
+// full    = Issue | Project | Opened by | Pri | Status | SLA state | Budget | Age   (/issues)
+// compact = Issue | Project | Pri | Status | Budget | Age                          (attention set)
+export const gridTemplate = (variant: IssueRowVariant): string =>
+  variant === "full"
+    ? "minmax(0,1fr) 158px 210px 56px 168px 132px 150px 56px"
     : "minmax(0,1fr) 158px 56px 168px 150px 56px";

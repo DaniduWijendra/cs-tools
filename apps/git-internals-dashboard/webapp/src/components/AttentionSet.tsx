@@ -16,9 +16,10 @@
 
 import { useState } from "react";
 import { Box } from "@mui/material";
-import { useIssues, useIssueTitles } from "@api/hooks";
+import { useIssues } from "@api/hooks";
 import type { Overview, OverviewProject } from "@api/types";
 import { IssueTimelineRow } from "@components/IssueTimelineRow";
+import { projectNameFor } from "@lib/filters";
 import { gridTemplate } from "@lib/grid";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 
@@ -37,24 +38,22 @@ interface AttentionSetProps {
   projects: OverviewProject[];
   repo?: string;
   priority?: string;
+  abtTeam?: string;
   isCsStatus: (status: string | null | undefined) => boolean;
 }
 
 /** Filterable list of violated/at-risk/CS-side issues, with toggleable category chips. */
-export function AttentionSet({ hero, projects, repo, priority, isCsStatus }: AttentionSetProps) {
+export function AttentionSet({ hero, projects, repo, priority, abtTeam, isCsStatus }: AttentionSetProps) {
   const [active, setActive] = useState<Set<Category>>(new Set(["violated", "at_risk", "cs"]));
 
   // Capped summary, not a browse view: no pagination/sort controls of its
   // own, just a bounded top-N by SLA consumption. The full, paginated list
   // lives on the Issues page (bucket=attention).
-  const { data } = useIssues({ bucket: "attention", sort: "sla_consumption", limit: 50, repo, priority });
+  const { data } = useIssues({ bucket: "attention", sort: "sla_consumption", limit: 50, repo, priority, abtTeam });
   const issues = data?.issues;
 
-  const issueIds = (issues ?? []).map((i) => i.id);
-  const { data: titles, isPending: titlesPending } = useIssueTitles(issueIds);
-
   // Friendly project name for "owner/name", falling back to the repo's own name part.
-  const nameForRepo = (r: string | null) => projects.find((p) => p.repo === r)?.name ?? r?.split("/")[1] ?? "—";
+  const nameForRepo = (r: string | null) => projectNameFor(projects, r);
 
   // Flips a category chip's on/off membership in the active filter set.
   const toggle = (key: Category) =>
@@ -78,7 +77,7 @@ export function AttentionSet({ hero, projects, repo, priority, isCsStatus }: Att
     return false;
   });
 
-  const cols = gridTemplate(false);
+  const cols = gridTemplate("compact");
 
   return (
     <Box sx={{ ...acrylicSurfaceSx, overflow: "hidden", borderRadius: "16px", border: "1px solid var(--sla-border)", boxShadow: "0 1px 2px rgba(17,24,39,.04)" }}>
@@ -155,8 +154,6 @@ export function AttentionSet({ hero, projects, repo, priority, isCsStatus }: Att
           <IssueTimelineRow
             key={issue.id}
             issue={issue}
-            title={titles?.[issue.id] ?? null}
-            titleLoading={titlesPending}
             projectName={nameForRepo(issue.repo)}
             isCsStatus={isCsStatus}
           />
