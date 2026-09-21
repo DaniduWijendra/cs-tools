@@ -16,14 +16,16 @@
 
 import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Box, MenuItem, Select, Skeleton, TablePagination, type SelectChangeEvent } from "@mui/material";
-import { useOverview, useIssues, useIssueTitles, useTaxonomy, makeIsCsStatus } from "@api/hooks";
+import { Box, MenuItem, Skeleton, TablePagination } from "@mui/material";
+import { useOverview, useIssues, useTaxonomy, makeIsCsStatus } from "@api/hooks";
 import type { BucketKey } from "@api/types";
 import { DEFAULT_ISSUE_SORT, ISSUE_SORT_OPTIONS, type IssueSortField } from "@api/issueSort";
 import { BackButton } from "@components/BackButton";
 import { ErrorState } from "@components/ErrorState";
 import { StaleDataAlert } from "@components/StaleDataAlert";
+import { FilterSelect } from "@components/FilterSelect";
 import { errorMessage } from "@lib/apiError";
+import { useGlobalFilters, projectNameFor } from "@lib/filters";
 import { useReportFetchProgress } from "@lib/fetchProgress";
 import { IssueTimelineRow } from "@components/IssueTimelineRow";
 import { gridTemplate } from "@lib/grid";
@@ -60,47 +62,13 @@ const STATUS_TITLES: Record<string, string> = {
   "Pending Patch Queue": "Pending Patch Queue issues",
 };
 
-const PRIORITY_OPTIONS = [
-  { value: "Critical(P1)", label: "Critical · P1" },
-  { value: "High(P2)", label: "High · P2" },
-  { value: "Medium(P3)", label: "Medium · P3" },
-  { value: "Low(P4)", label: "Low · P4" },
-];
-
-// A native <select>'s options popup is rendered by the OS/browser, not the
-// page — no CSS/theme can reach it. MUI's Select renders its popup via
-// Popover/MenuItem, which Oxygen UI's AcrylicBaseTheme already themes
-// (background.paper + blur.medium, see MuiPopover/MuiMenuItem overrides in
-// node_modules/@wso2/oxygen-ui) — no custom sx needed for the popup itself.
-function FilterSelect({
-  value,
-  onChange,
-  children,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Select
-      value={value}
-      onChange={(e: SelectChangeEvent) => onChange(e.target.value)}
-      size="small"
-      sx={{ minWidth: 150 }}
-    >
-      {children}
-    </Select>
-  );
-}
-
 /** The filtered/drill-down issue list page, URL-driven by repo/priority/bucket/status/q. */
 export default function IssuesPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const [qInput, setQInput] = useState(params.get("q") ?? "");
 
-  const repo = params.get("repo") ?? undefined;
-  const priority = params.get("priority") ?? undefined;
+  const { repo, priority, abtTeam } = useGlobalFilters();
   const status = params.get("status") ?? undefined;
   const bucket = (params.get("bucket") ?? "all") as BucketKey;
   const sort = (params.get("sort") as IssueSortField | null) ?? DEFAULT_ISSUE_SORT;
@@ -168,7 +136,7 @@ export default function IssuesPage() {
     setParams(next, { replace: true });
   };
 
-  const { data: overview } = useOverview(repo, priority);
+  const { data: overview } = useOverview({ repo, priority, abtTeam });
   const { data: taxonomy } = useTaxonomy();
   const isCsStatus = makeIsCsStatus(taxonomy?.csStatuses);
   const {
@@ -183,6 +151,7 @@ export default function IssuesPage() {
     bucket,
     repo,
     priority,
+    abtTeam,
     status,
     q: params.get("q") ?? undefined,
     sort,
@@ -193,18 +162,12 @@ export default function IssuesPage() {
 
   const issues = data?.issues;
   const total = data?.total ?? 0;
-  const issueIds = (issues ?? []).map((i) => i.id);
-  const { data: titles, isPending: titlesPending } = useIssueTitles(issueIds);
 
-  const repoOptions = overview?.projects ?? [];
-  // Friendly project name for "owner/name", falling back to the repo's own name part.
-  const nameForRepo = (r: string | null) =>
-    overview?.projects.find((p) => p.repo === r)?.name ?? r?.split("/")[1] ?? "—";
-  const projName = repo ? nameForRepo(repo) : "All Projects";
+  const projName = repo ? projectNameFor(overview?.projects, repo ?? null) : "All Projects";
 
   // A single CS status gets its own titled list.
   const title = status ? (STATUS_TITLES[status] ?? `${status} issues`) : (BUCKET_TITLES[bucket] ?? "Issues");
-  const cols = gridTemplate(true);
+  const cols = gridTemplate("full");
 
   return (
     <Box aria-busy={isPlaceholderData}>
@@ -218,7 +181,7 @@ export default function IssuesPage() {
         <Box>
           <Box component="h1" sx={{ m: 0, fontSize: 22, fontWeight: 600, lineHeight: 1.2, letterSpacing: "-0.01em" }}>{title}</Box>
           <Box sx={{ mt: 0.75, fontSize: 13, color: "var(--sla-fg3)" }}>
-            {projName} ·{" "}
+            {abtTeam ? `${abtTeam} · ` : ""}{projName} ·{" "}
             <Box component="b" sx={{ fontWeight: 600, color: "var(--sla-fg2)", fontFamily: "var(--font-mono)" }}>
               {total}
             </Box>{" "}
@@ -236,22 +199,6 @@ export default function IssuesPage() {
               px: 1.5, fontSize: 13, color: "var(--sla-fg)", fontFamily: "inherit", "&:focus": { outline: "none", borderColor: "var(--sla-fg3)" },
             }}
           />
-          <FilterSelect value={repo ?? "all"} onChange={(v) => setParam("repo", v === "all" ? "" : v)}>
-            <MenuItem value="all">All Projects</MenuItem>
-            {repoOptions.map((r) => (
-              <MenuItem key={r.repoId} value={r.repo}>
-                {r.name}
-              </MenuItem>
-            ))}
-          </FilterSelect>
-          <FilterSelect value={priority ?? "all"} onChange={(v) => setParam("priority", v === "all" ? "" : v)}>
-            <MenuItem value="all">All Priorities</MenuItem>
-            {PRIORITY_OPTIONS.map((p) => (
-              <MenuItem key={p.value} value={p.value}>
-                {p.label}
-              </MenuItem>
-            ))}
-          </FilterSelect>
           <FilterSelect value={sort} onChange={(v) => setParam("sort", v === DEFAULT_ISSUE_SORT ? "" : v)}>
             {ISSUE_SORT_OPTIONS.map((o) => (
               <MenuItem key={o.value} value={o.value}>
@@ -296,6 +243,7 @@ export default function IssuesPage() {
         >
           <span>Issue</span>
           <span>Project</span>
+          <span>Opened by</span>
           <span>Pri</span>
           <span>Status</span>
           <span>SLA state</span>
@@ -322,10 +270,8 @@ export default function IssuesPage() {
             <IssueTimelineRow
               key={issue.id}
               issue={issue}
-              title={titles?.[issue.id] ?? null}
-              titleLoading={titlesPending}
-              showSlaState
-              projectName={nameForRepo(issue.repo)}
+              variant="full"
+              projectName={projectNameFor(overview?.projects, issue.repo)}
               isCsStatus={isCsStatus}
             />
           ))
