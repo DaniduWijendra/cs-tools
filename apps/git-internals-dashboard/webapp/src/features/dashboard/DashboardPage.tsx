@@ -22,6 +22,7 @@ import { StaleDataAlert } from "@components/StaleDataAlert";
 import { UnknownStatusAlert } from "@components/UnknownStatusAlert";
 import { errorMessage } from "@lib/apiError";
 import { useReportFetchProgress } from "@lib/fetchProgress";
+import { useGlobalFilters } from "@lib/filters";
 import { HeroCard, CsHeroCard } from "@components/HeroCard";
 import { ProjectCard } from "@components/ProjectCard";
 import { PriorityTierCard } from "@components/PriorityTierCard";
@@ -32,26 +33,27 @@ import { VolumePanel } from "@components/VolumePanel";
 import { AttentionSet } from "@components/AttentionSet";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 
-// repo/priority are global filters: string sets, null clears, undefined inherits the
-// current filter. status is list-scoped — only ever set when this drill asks for it
+// repo/priority/abtTeam are global filters: string sets, null clears, undefined inherits
+// the current filter. status is list-scoped — only ever set when this drill asks for it
 // (never inherited), so e.g. a single-CS-status refinement can't leak into a later
 // "Violated" drill.
 function buildDrillUrl(
   bucket: string,
-  opts: { repo?: string | null; priority?: string | null; status?: string | null },
+  opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null },
   currentSearch: string,
 ): string {
   const base = new URLSearchParams(currentSearch);
   const next = new URLSearchParams();
   next.set("bucket", bucket);
-  // Carries repo/priority from the current URL unless opts explicitly sets
+  // Carries repo/priority/abtTeam from the current URL unless opts explicitly sets
   // or clears (null) them for this drill.
-  const resolve = (key: "repo" | "priority") => {
+  const resolve = (key: "repo" | "priority" | "abtTeam") => {
     const v = opts[key] === undefined ? base.get(key) : opts[key];
     if (v) next.set(key, v);
   };
   resolve("repo");
   resolve("priority");
+  resolve("abtTeam");
   if (opts.status) next.set("status", opts.status);
   return `/issues?${next.toString()}`;
 }
@@ -67,29 +69,20 @@ const sectionLabelSx = { px: "2px", fontSize: 11, fontWeight: 600, textTransform
 
 /** The SLA overview page: hero metrics, per-project/priority breakdowns, trends, and volume. */
 export default function DashboardPage() {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const navigate = useNavigate();
 
-  const repo = params.get("repo") ?? undefined;
-  const priority = params.get("priority") ?? undefined;
+  const { repo, priority, abtTeam, setFilter } = useGlobalFilters();
 
-  const { data: overview, isLoading, isPlaceholderData, isError, error, errorUpdatedAt, refetch } = useOverview(repo, priority);
+  const { data: overview, isLoading, isPlaceholderData, isError, error, errorUpdatedAt, refetch } = useOverview({ repo, priority, abtTeam });
   useReportFetchProgress(isPlaceholderData);
   const { data: taxonomy } = useTaxonomy();
   const isCsStatus = makeIsCsStatus(taxonomy?.csStatuses);
 
-  // Sets or clears (empty value) one global filter in the URL.
-  const setFilter = (key: "repo" | "priority", value: string) => {
-    const next = new URLSearchParams(params);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    setParams(next, { replace: true });
-  };
-
-  // Navigates to /issues, pre-filtered to bucket plus any repo/priority/status override.
+  // Navigates to /issues, pre-filtered to bucket plus any repo/priority/abtTeam/status override.
   const drill = (
     bucket: string,
-    opts: { repo?: string | null; priority?: string | null; status?: string | null } = {},
+    opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null } = {},
   ) => {
     void navigate(buildDrillUrl(bucket, opts, params.toString()));
   };
@@ -245,12 +238,12 @@ export default function DashboardPage() {
       {/* Matrix + trend */}
       <Box component="section" sx={{ mb: "22px", display: "grid", gap: "18px", gridTemplateColumns: { lg: ".92fr 1.08fr" } }}>
         <PriorityStateMatrix matrix={overview.matrix} onDrill={(bucket, pKey) => drill(bucket, { priority: pKey ?? null })} />
-        <TimeseriesChart repo={repo} activePriority={priority} onPriorityFilter={(pKey) => setFilter("priority", pKey)} />
+        <TimeseriesChart repo={repo} abtTeam={abtTeam} activePriority={priority} onPriorityFilter={(pKey) => setFilter("priority", pKey)} />
       </Box>
 
       {/* Closest to breach */}
       <Box sx={{ mb: "22px" }}>
-        <ClosestToBreach repo={repo} priority={priority} projects={overview.projects} />
+        <ClosestToBreach repo={repo} priority={priority} abtTeam={abtTeam} projects={overview.projects} />
       </Box>
 
       {/* New-issue volume */}
@@ -283,7 +276,7 @@ export default function DashboardPage() {
       )}
 
       {/* Attention set */}
-      <AttentionSet hero={overview.hero} projects={overview.projects} repo={repo} priority={priority} isCsStatus={isCsStatus} />
+      <AttentionSet hero={overview.hero} projects={overview.projects} repo={repo} priority={priority} abtTeam={abtTeam} isCsStatus={isCsStatus} />
 
       {/* Footer */}
       <Box sx={{ mt: 3, textAlign: "center", fontSize: 11.5, color: "var(--sla-no-sla)" }}>
