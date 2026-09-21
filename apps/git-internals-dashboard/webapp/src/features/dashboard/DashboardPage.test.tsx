@@ -37,7 +37,8 @@ function jsonResponse(body: unknown): Response {
 
 const OVERVIEW = {
   refreshedAt: "2026-01-01T00:00:00Z",
-  filters: { repo: null, priority: null },
+  filters: { repo: null, priority: null, abtTeam: null },
+  abtTeams: [],
   hero: {
     violated: { n: 1, delta: 0, spark: [] },
     atRisk: { n: 0, delta: 0, spark: [] },
@@ -78,11 +79,17 @@ const OVERVIEW = {
   unknownStatuses: [],
 };
 
-/** Renders DashboardPage under a fresh QueryClient and a memory router at /. */
-function renderDashboardPage(fetchMock: ReturnType<typeof vi.fn>) {
+/** Renders DashboardPage under a fresh QueryClient and a memory router at /, with a stub /issues route so a drill navigation has somewhere to land. */
+function renderDashboardPage(fetchMock: ReturnType<typeof vi.fn>, initialEntries: string[] = ["/"]) {
   vi.stubGlobal("fetch", fetchMock);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const router = createMemoryRouter([{ path: "/", element: <DashboardPage /> }], { initialEntries: ["/"] });
+  const router = createMemoryRouter(
+    [
+      { path: "/", element: <DashboardPage /> },
+      { path: "/issues", element: <div>Issues</div> },
+    ],
+    { initialEntries },
+  );
   render(
     <QueryClientProvider client={queryClient}>
       <FetchProgressProvider>
@@ -131,7 +138,6 @@ describe("DashboardPage", () => {
       if (url.includes("/metrics/timeseries"))
         return Promise.resolve(jsonResponse({ window: 12, metric: "violated", groupBy: "priority", dates: [], series: [] }));
       if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
-      if (url.includes("/issues/titles")) return Promise.resolve(jsonResponse({ titles: {} }));
       if (url.includes("/issues")) return Promise.resolve(jsonResponse([]));
       return Promise.reject(new Error(`unexpected fetch: ${url}`));
     });
@@ -154,5 +160,26 @@ describe("DashboardPage", () => {
     resolveFocusedOverview?.(jsonResponse(OVERVIEW));
 
     await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
+  });
+
+  it("carries the abtTeam filter through a drill link", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(OVERVIEW));
+      if (url.includes("/metrics/timeseries"))
+        return Promise.resolve(jsonResponse({ window: 12, metric: "violated", groupBy: "priority", dates: [], series: [] }));
+      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
+      if (url.includes("/issues")) return Promise.resolve(jsonResponse([]));
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+
+    const router = renderDashboardPage(fetchMock, ["/?abtTeam=Atlas"]);
+
+    const violatedButton = await screen.findByTitle("View violated issues");
+    fireEvent.click(violatedButton);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/issues"));
+    expect(router.state.location.search).toContain("abtTeam=Atlas");
+    expect(router.state.location.search).toContain("bucket=violated");
   });
 });

@@ -43,7 +43,7 @@ describe("request", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await request("/issues/titles", { method: "POST", body: JSON.stringify({ ids: [1] }) });
+    await request("/sync/runs", { method: "POST", body: JSON.stringify({ ids: [1] }) });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");

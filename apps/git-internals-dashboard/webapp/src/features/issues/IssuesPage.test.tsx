@@ -27,7 +27,8 @@ function jsonResponse(body: unknown): Response {
 
 const EMPTY_OVERVIEW = {
   refreshedAt: "2026-01-01T00:00:00Z",
-  filters: { repo: null, priority: null },
+  filters: { repo: null, priority: null, abtTeam: null },
+  abtTeams: [],
   hero: {
     violated: { n: 0, delta: 0, spark: [] },
     atRisk: { n: 0, delta: 0, spark: [] },
@@ -39,6 +40,46 @@ const EMPTY_OVERVIEW = {
   matrix: { rows: [], totals: { violated: 0, atRisk: 0, onTrack: 0, cs: 0 }, grandTotal: 0 },
   volume: [],
   unknownStatuses: [],
+};
+
+/** Two issues with title/abtTeam/openedBy set (one with openedBy: null), as the /issues envelope shape. */
+const ISSUES_WITH_TITLES = {
+  issues: [
+    {
+      id: 1,
+      number: 101,
+      state: "OPEN",
+      url: "https://github.com/example/repo/issues/101",
+      repo: "org/alpha",
+      priority: "High(P2)",
+      currentStatus: "Open",
+      githubCreatedAt: "2026-01-01T00:00:00Z",
+      githubUpdatedAt: "2026-01-01T00:00:00Z",
+      sla: { budgetHours: 48, consumedHours: 10, remainingHours: 38, pctConsumed: 0.2, slaState: "OK", slaRunning: true },
+      title: "Fix the widget",
+      abtTeam: "Atlas",
+      openedBy: "person@wso2.com",
+    },
+    {
+      id: 2,
+      number: 102,
+      state: "OPEN",
+      url: "https://github.com/example/repo/issues/102",
+      repo: "org/alpha",
+      priority: "High(P2)",
+      currentStatus: "Open",
+      githubCreatedAt: "2026-01-01T00:00:00Z",
+      githubUpdatedAt: "2026-01-01T00:00:00Z",
+      sla: { budgetHours: 48, consumedHours: 20, remainingHours: 28, pctConsumed: 0.42, slaState: "OK", slaRunning: true },
+      title: "Untitled thing",
+      abtTeam: null,
+      openedBy: null,
+    },
+  ],
+  total: 2,
+  limit: 20,
+  offset: 0,
+  hasMore: false,
 };
 
 /** Renders IssuesPage under a fresh QueryClient and a memory router at /issues. */
@@ -151,5 +192,58 @@ describe("IssuesPage", () => {
     expect(search).toContain("bucket=cs");
     expect(search).toContain("status=Pending+Patch+Queue");
     expect(screen.getByText("Pending Patch Queue issues")).toBeTruthy();
+  });
+
+  it("renders titles inline and the Opened by column without a separate titles request", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
+      if (url.includes("/issues")) return Promise.resolve(jsonResponse(ISSUES_WITH_TITLES));
+      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderIssuesPage();
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    // The title renders directly from the /issues response, with no round trip
+    // to a titles endpoint.
+    expect(screen.getByText("Fix the widget")).toBeTruthy();
+    expect(screen.getByText("Untitled thing")).toBeTruthy();
+    expect(screen.getByText("person@wso2.com")).toBeTruthy();
+    // The other issue's openedBy is null; both rows' sla is non-null so this
+    // "—" can only be the empty Opened by cell.
+    expect(screen.getByText("—")).toBeTruthy();
+
+    const calledUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(calledUrls.some((u) => u.includes("/issues/titles"))).toBe(false);
+  });
+
+  it("does not render its own Project/Priority filter selects", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
+      if (url.includes("/issues")) return Promise.resolve(jsonResponse({ issues: [], total: 0, limit: 20, offset: 0, hasMore: false }));
+      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderIssuesPage();
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    // IssuesPage renders only its own sort control — the Project/Priority
+    // selects shown alongside it in the app header live in AppShell, which
+    // this standalone render doesn't include.
+    const comboboxes = screen.getAllByRole("combobox");
+    expect(comboboxes).toHaveLength(1);
+    expect(comboboxes[0]).toHaveTextContent("Sort:");
   });
 });
