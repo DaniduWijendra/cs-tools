@@ -19,6 +19,8 @@ package metrics
 import (
 	"context"
 	"os"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -208,6 +210,116 @@ func findProject(projects []Project, repo string) *Project {
 	return nil
 }
 
+const (
+	abtFixtureRepo      = "test-owner/test-metrics-abt"
+	abtTeamAlpha        = "ABT-Test-Alpha"
+	abtTeamBeta         = "ABT-Test-Beta"
+	abtTeamClosedOnly   = "ABT-Test-Closed"
+	abtTeamDisabledOnly = "ABT-Test-Disabled"
+)
+
+// seedAbtTeamFixture creates an enabled repository holding four open issues
+// across two ABT teams plus one team-less issue, and two issues that must
+// never reach the overview: one on a CLOSED issue and one in a disabled
+// repository. Every open issue in the enabled repo also gets a matching
+// sla_snapshots row dated today, so the spark and timeseries sections have
+// data to narrow.
+//
+// The ABT teams are deliberately named so they sort alphabetically in the
+// order Alpha, Beta, Closed, Disabled, and distinctively enough not to
+// collide with anything else sharing the test database.
+func seedAbtTeamFixture(t *testing.T, pool *pgxpool.Pool) (repositoryID int32) {
+	t.Helper()
+	ctx := context.Background()
+
+	var projectID int32
+	if err := pool.QueryRow(ctx, `INSERT INTO projects (github_project_id, title, enabled) VALUES ($1,$2,true) RETURNING id`,
+		"PVT_metrics_abt_test", "Metrics ABT Test").Scan(&projectID); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repositories (owner, name, issue_query, sla_project_id, enabled)
+		VALUES ($1,$2,$3,$4,true) RETURNING id
+	`, "test-owner", "test-metrics-abt", `label:"Origin/CS"`, projectID).Scan(&repositoryID); err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	var disabledRepoID int32
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repositories (owner, name, issue_query, sla_project_id, enabled)
+		VALUES ($1,$2,$3,$4,false) RETURNING id
+	`, "test-owner", "test-metrics-abt-disabled", `label:"Origin/CS"`, projectID).Scan(&disabledRepoID); err != nil {
+		t.Fatalf("create disabled repository: %v", err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, id := range []int32{repositoryID, disabledRepoID} {
+			pool.Exec(bg, `DELETE FROM sla_snapshots WHERE repository_id = $1`, id)
+			pool.Exec(bg, `DELETE FROM issue_sla WHERE issue_id IN (SELECT id FROM issues WHERE repository_id = $1)`, id)
+			pool.Exec(bg, `DELETE FROM issues WHERE repository_id = $1`, id)
+			pool.Exec(bg, `DELETE FROM repositories WHERE id = $1`, id)
+		}
+		pool.Exec(bg, `DELETE FROM projects WHERE id = $1`, projectID)
+	})
+
+	fixtures := []struct {
+		repositoryID  int32
+		number        int
+		state         string
+		priority      string
+		currentStatus string
+		slaState      string
+		abtTeam       *string
+	}{
+		{repositoryID, 201, "OPEN", "Critical(P1)", "In Progress", "VIOLATED", ptr(abtTeamAlpha)},
+		{repositoryID, 202, "OPEN", "High(P2)", "WOC", "AT_RISK", ptr(abtTeamAlpha)},
+		{repositoryID, 203, "OPEN", "Medium(P3)", "Open", "OK", ptr(abtTeamBeta)},
+		{repositoryID, 204, "OPEN", "Critical(P1)", "Open", "VIOLATED", nil},
+		{repositoryID, 205, "CLOSED", "Critical(P1)", "Open", "VIOLATED", ptr(abtTeamClosedOnly)},
+		{disabledRepoID, 206, "OPEN", "Critical(P1)", "Open", "VIOLATED", ptr(abtTeamDisabledOnly)},
+	}
+
+	for _, f := range fixtures {
+		var issueID int32
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO issues (repository_id, github_number, state, priority, current_status, abt_team, github_created_at, github_updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,now(),now()) RETURNING id
+		`, f.repositoryID, f.number, f.state, f.priority, f.currentStatus, f.abtTeam).Scan(&issueID); err != nil {
+			t.Fatalf("insert issue %d: %v", f.number, err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO issue_sla (issue_id, priority, budget_hours, consumed_hours, sla_state, sla_running, computed_at, computed_through)
+			VALUES ($1,$2,24,0,$3,false,now(),now())
+		`, issueID, f.priority, f.slaState); err != nil {
+			t.Fatalf("insert issue_sla %d: %v", f.number, err)
+		}
+		if f.state != "OPEN" || f.repositoryID != repositoryID {
+			continue
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sla_snapshots (snapshot_date, issue_id, repository_id, priority, current_status, sla_state)
+			VALUES (CURRENT_DATE, $1, $2, $3, $4, $5)
+		`, issueID, f.repositoryID, f.priority, f.currentStatus, f.slaState); err != nil {
+			t.Fatalf("insert sla_snapshot %d: %v", f.number, err)
+		}
+	}
+
+	return repositoryID
+}
+
+// ptr returns a pointer to v — the filter fields and nullable fixture
+// columns are all pointer-typed.
+func ptr[T any](v T) *T { return &v }
+
+// indexOf returns the position of want in values, or -1 if absent.
+func indexOf(values []string, want string) int {
+	for i, v := range values {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestBuildOverviewHeroCountsAndSpark verifies the hero section's
 // violated/atRisk/cs/productSide counts match the seeded fixture when
 // scoped to one repo, and pins all three spark columns across two
@@ -219,7 +331,7 @@ func TestBuildOverviewHeroCountsAndSpark(t *testing.T) {
 	seedMetricsYesterdaySnapshots(t, pool, repositoryID)
 	repoFilter := metricsFixtureRepo
 
-	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, &repoFilter, nil)
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, Filter{Repo: &repoFilter})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -278,7 +390,7 @@ func TestBuildOverviewProjectsCard(t *testing.T) {
 	seedMetricsFixture(t, pool)
 	repoFilter := metricsFixtureRepo
 
-	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, &repoFilter, nil)
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, Filter{Repo: &repoFilter})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -309,7 +421,7 @@ func TestBuildOverviewProjectsIncludesRepoWithNoOpenIssues(t *testing.T) {
 	seedMetricsFixture(t, pool)
 	seedQuietRepoFixture(t, pool)
 
-	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, nil, nil)
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, Filter{})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -346,7 +458,7 @@ func TestBuildOverviewPrioritiesAndMatrix(t *testing.T) {
 	seedMetricsFixture(t, pool)
 	repoFilter := metricsFixtureRepo
 
-	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, &repoFilter, nil)
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, Filter{Repo: &repoFilter})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -387,7 +499,7 @@ func TestBuildOverviewPriorityFilterNarrowsHero(t *testing.T) {
 	repoFilter := metricsFixtureRepo
 	priorityFilter := "Critical(P1)"
 
-	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, &repoFilter, &priorityFilter)
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, Filter{Repo: &repoFilter, Priority: &priorityFilter})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -419,7 +531,7 @@ func TestBuildOverviewSurfacesUnknownStatuses(t *testing.T) {
 		t.Fatalf("seed unknown_statuses: %v", err)
 	}
 
-	overview, err := BuildOverview(ctx, pool, metricsTestConfig, nil, nil)
+	overview, err := BuildOverview(ctx, pool, metricsTestConfig, Filter{})
 	if err != nil {
 		t.Fatalf("BuildOverview: %v", err)
 	}
@@ -451,5 +563,230 @@ func TestBuildOverviewSurfacesUnknownStatuses(t *testing.T) {
 	}
 	if idxB > idxA {
 		t.Errorf("expected higher-occurrence status B before A, got order %+v", overview.UnknownStatuses)
+	}
+}
+
+// TestBuildOverviewAbtTeamsListsOpenEnabledTeams verifies the ABT Team
+// dropdown's option list: sorted, distinct, drawn only from open issues in
+// enabled repositories, and unchanged by whichever filters are active.
+func TestBuildOverviewAbtTeamsListsOpenEnabledTeams(t *testing.T) {
+	pool := testPool(t)
+	seedAbtTeamFixture(t, pool)
+	ctx := context.Background()
+
+	unfiltered, err := BuildOverview(ctx, pool, metricsTestConfig, Filter{})
+	if err != nil {
+		t.Fatalf("BuildOverview: %v", err)
+	}
+
+	// Other repositories share this database, so assert on the fixture's own
+	// distinctive team names and on the whole list's ordering, not on length.
+	alphaIdx := indexOf(unfiltered.AbtTeams, abtTeamAlpha)
+	betaIdx := indexOf(unfiltered.AbtTeams, abtTeamBeta)
+	if alphaIdx < 0 || betaIdx < 0 {
+		t.Fatalf("expected %s and %s in abtTeams, got %+v", abtTeamAlpha, abtTeamBeta, unfiltered.AbtTeams)
+	}
+	if alphaIdx >= betaIdx {
+		t.Errorf("expected %s before %s, got %+v", abtTeamAlpha, abtTeamBeta, unfiltered.AbtTeams)
+	}
+	if indexOf(unfiltered.AbtTeams, abtTeamClosedOnly) >= 0 {
+		t.Errorf("expected a CLOSED issue's team to be excluded, got %+v", unfiltered.AbtTeams)
+	}
+	if indexOf(unfiltered.AbtTeams, abtTeamDisabledOnly) >= 0 {
+		t.Errorf("expected a disabled repo's team to be excluded, got %+v", unfiltered.AbtTeams)
+	}
+	if !sort.StringsAreSorted(unfiltered.AbtTeams) {
+		t.Errorf("expected abtTeams sorted, got %+v", unfiltered.AbtTeams)
+	}
+	for i := 1; i < len(unfiltered.AbtTeams); i++ {
+		if unfiltered.AbtTeams[i] == unfiltered.AbtTeams[i-1] {
+			t.Errorf("expected distinct abtTeams, got a repeat of %q", unfiltered.AbtTeams[i])
+		}
+	}
+
+	// The dropdown must keep offering every team whichever filters narrow
+	// the rest of the response — including the team filter itself.
+	narrowing := []struct {
+		name   string
+		filter Filter
+	}{
+		{name: "priority", filter: Filter{Priority: ptr("Critical(P1)")}},
+		{name: "repo", filter: Filter{Repo: ptr(abtFixtureRepo)}},
+		{name: "abtTeam", filter: Filter{AbtTeam: ptr(abtTeamBeta)}},
+	}
+	for _, tc := range narrowing {
+		t.Run(tc.name, func(t *testing.T) {
+			filtered, err := BuildOverview(ctx, pool, metricsTestConfig, tc.filter)
+			if err != nil {
+				t.Fatalf("BuildOverview: %v", err)
+			}
+			if !slices.Equal(filtered.AbtTeams, unfiltered.AbtTeams) {
+				t.Errorf("expected abtTeams unchanged by the %s filter, got %+v want %+v",
+					tc.name, filtered.AbtTeams, unfiltered.AbtTeams)
+			}
+		})
+	}
+}
+
+// TestBuildOverviewAbtTeamFilterNarrowsEverySection verifies an abtTeam
+// filter narrows the hero, spark, projects, priorities, matrix and volume
+// sections to that team's issues, and is echoed back on filters.
+func TestBuildOverviewAbtTeamFilterNarrowsEverySection(t *testing.T) {
+	pool := testPool(t)
+	seedAbtTeamFixture(t, pool)
+	repoFilter := abtFixtureRepo
+	team := abtTeamAlpha
+
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig,
+		Filter{Repo: &repoFilter, AbtTeam: &team})
+	if err != nil {
+		t.Fatalf("BuildOverview: %v", err)
+	}
+
+	if overview.Filters.AbtTeam == nil || *overview.Filters.AbtTeam != team {
+		t.Errorf("expected filters.abtTeam=%q, got %+v", team, overview.Filters.AbtTeam)
+	}
+
+	// Alpha owns the VIOLATED P1 ("In Progress") and the AT_RISK P2 ("WOC")
+	// issue; the team-less VIOLATED P1 issue must not be counted.
+	if overview.Hero.Violated.N != 1 {
+		t.Errorf("expected hero.violated.n=1, got %d", overview.Hero.Violated.N)
+	}
+	if overview.Hero.AtRisk.N != 1 {
+		t.Errorf("expected hero.atRisk.n=1, got %d", overview.Hero.AtRisk.N)
+	}
+	if overview.Hero.Cs.N != 1 {
+		t.Errorf("expected hero.cs.n=1, got %d", overview.Hero.Cs.N)
+	}
+	if overview.Hero.ProductSide.N != 1 {
+		t.Errorf("expected hero.productSide.n=1, got %d", overview.Hero.ProductSide.N)
+	}
+
+	if overview.Hero.Violated.Spark[15] != 1 {
+		t.Errorf("expected today's violated spark=1, got %d", overview.Hero.Violated.Spark[15])
+	}
+	if overview.Hero.AtRisk.Spark[15] != 1 {
+		t.Errorf("expected today's at_risk spark=1, got %d", overview.Hero.AtRisk.Spark[15])
+	}
+	if overview.Hero.ProductSide.Spark[15] != 1 {
+		t.Errorf("expected today's product-side spark=1, got %d", overview.Hero.ProductSide.Spark[15])
+	}
+
+	p := findProject(overview.Projects, abtFixtureRepo)
+	if p == nil {
+		t.Fatalf("expected a project entry for %s, got %+v", abtFixtureRepo, overview.Projects)
+	}
+	if p.Violated != 1 || p.AtRisk != 1 || p.Cs != 1 || p.OnTrack != 0 {
+		t.Errorf("expected project violated=1 atRisk=1 cs=1 onTrack=0, got %+v", p)
+	}
+	if p.OpenTracked != 2 || p.Untracked != 0 {
+		t.Errorf("expected project openTracked=2 untracked=0, got %+v", p)
+	}
+
+	if overview.Priorities[0].Violated != 1 || overview.Priorities[0].Total != 1 {
+		t.Errorf("expected P1 violated=1 total=1, got %+v", overview.Priorities[0])
+	}
+	if overview.Priorities[1].AtRisk != 1 || overview.Priorities[1].Total != 1 {
+		t.Errorf("expected P2 atRisk=1 total=1, got %+v", overview.Priorities[1])
+	}
+	if overview.Priorities[2].Total != 0 {
+		t.Errorf("expected P3 total=0 (it belongs to another team), got %+v", overview.Priorities[2])
+	}
+
+	if overview.Matrix.GrandTotal != 2 {
+		t.Errorf("expected matrix grandTotal=2, got %d", overview.Matrix.GrandTotal)
+	}
+	if overview.Matrix.Totals.Violated != 1 || overview.Matrix.Totals.AtRisk != 1 || overview.Matrix.Totals.Cs != 1 || overview.Matrix.Totals.OnTrack != 0 {
+		t.Errorf("expected matrix totals violated=1 atRisk=1 cs=1 onTrack=0, got %+v", overview.Matrix.Totals)
+	}
+
+	// Volume counts issue creation, so the fixture's issues all land in the
+	// current (last) week: 2 for Alpha, against 4 tracked issues in the repo.
+	var volumeTotal int
+	for _, v := range overview.Volume {
+		if v.RepoID == p.RepoID {
+			volumeTotal = v.Total
+			if last := v.Weeks[len(v.Weeks)-1]; last.ByPriority.P1 != 1 || last.ByPriority.P2 != 1 {
+				t.Errorf("expected the current week to hold P1=1 P2=1, got %+v", last)
+			}
+		}
+	}
+	if volumeTotal != 2 {
+		t.Errorf("expected volume total=2 for %s, got %d", team, volumeTotal)
+	}
+}
+
+// TestBuildOverviewAllFiltersTogether verifies repo, priority and abtTeam
+// applied simultaneously, so the argument ordering every filtered query
+// builds is exercised with all three placeholders bound at once.
+func TestBuildOverviewAllFiltersTogether(t *testing.T) {
+	pool := testPool(t)
+	seedAbtTeamFixture(t, pool)
+	f := Filter{Repo: ptr(abtFixtureRepo), Priority: ptr("Critical(P1)"), AbtTeam: ptr(abtTeamAlpha)}
+
+	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, f)
+	if err != nil {
+		t.Fatalf("BuildOverview: %v", err)
+	}
+
+	// Only issue 201 is in this repo, at P1, on Alpha.
+	if overview.Hero.Violated.N != 1 {
+		t.Errorf("expected hero.violated.n=1, got %d", overview.Hero.Violated.N)
+	}
+	if overview.Hero.AtRisk.N != 0 {
+		t.Errorf("expected hero.atRisk.n=0 (its issue is P2), got %d", overview.Hero.AtRisk.N)
+	}
+	if overview.Hero.Violated.Spark[15] != 1 {
+		t.Errorf("expected today's violated spark=1, got %d", overview.Hero.Violated.Spark[15])
+	}
+	if overview.Hero.AtRisk.Spark[15] != 0 {
+		t.Errorf("expected today's at_risk spark=0, got %d", overview.Hero.AtRisk.Spark[15])
+	}
+	if overview.Hero.ProductSide.Spark[15] != 1 {
+		t.Errorf("expected today's product-side spark=1, got %d", overview.Hero.ProductSide.Spark[15])
+	}
+
+	if overview.Filters.Repo == nil || overview.Filters.Priority == nil || overview.Filters.AbtTeam == nil {
+		t.Errorf("expected all three filters echoed back, got %+v", overview.Filters)
+	}
+}
+
+// TestBuildOverviewEmptyProductSideCategory verifies a taxonomy with no
+// PRODUCT_SIDE status — a valid configuration — yields zero product-side
+// counts across the whole spark window rather than an error.
+func TestBuildOverviewEmptyProductSideCategory(t *testing.T) {
+	pool := testPool(t)
+	repositoryID := seedMetricsFixture(t, pool)
+	seedMetricsYesterdaySnapshots(t, pool, repositoryID)
+	repoFilter := metricsFixtureRepo
+
+	cfg := &config.AppConfig{
+		Taxonomy: config.Taxonomy{
+			Statuses: []config.StatusEntry{
+				{Name: "WOC", Category: config.CategoryCSSide, AccruesSla: false},
+				{Name: "Resolved", Category: config.CategoryOther, AccruesSla: false, IsTerminal: true},
+			},
+		},
+		Budgets: metricsTestConfig.Budgets,
+	}
+
+	overview, err := BuildOverview(context.Background(), pool, cfg, Filter{Repo: &repoFilter})
+	if err != nil {
+		t.Fatalf("BuildOverview: %v", err)
+	}
+	if overview.Hero.ProductSide.N != 0 {
+		t.Errorf("expected hero.productSide.n=0, got %d", overview.Hero.ProductSide.N)
+	}
+	if overview.Hero.ProductSide.Delta != 0 {
+		t.Errorf("expected hero.productSide.delta=0, got %d", overview.Hero.ProductSide.Delta)
+	}
+	for i, n := range overview.Hero.ProductSide.Spark {
+		if n != 0 {
+			t.Errorf("expected an all-zero product-side spark, got %d at index %d", n, i)
+		}
+	}
+	// The other spark columns still report the fixture's counts.
+	if overview.Hero.Violated.Spark[15] != 1 || overview.Hero.Violated.Spark[14] != 2 {
+		t.Errorf("expected the violated spark unaffected (today=1 yesterday=2), got %+v", overview.Hero.Violated.Spark)
 	}
 }
