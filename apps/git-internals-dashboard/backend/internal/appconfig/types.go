@@ -75,23 +75,20 @@ type CacheEntry struct {
 	MaxEntries int
 }
 
-// Cache holds the three in-process TTL caches the handlers keep.
+// Cache holds the two in-process TTL caches the handlers keep.
 type Cache struct {
 	Overview   CacheEntry
 	Timeseries CacheEntry
-	Titles     CacheEntry
 }
 
 // GitHub holds the GraphQL client's timeouts, retry policy, and pacing.
 type GitHub struct {
-	RequestTimeoutSeconds       int
-	TitlesRequestTimeoutSeconds int
-	MaxRetries                  int
-	RetryBackoffUnitSeconds     int
-	RetryAfterCapSeconds        int
-	SearchPageDelayMs           int
-	DetailPageDelayMs           int
-	TitlesBatchSize             int
+	RequestTimeoutSeconds   int
+	MaxRetries              int
+	RetryBackoffUnitSeconds int
+	RetryAfterCapSeconds    int
+	SearchPageDelayMs       int
+	DetailPageDelayMs       int
 }
 
 // Jobs holds the background recompute/sync job knobs.
@@ -110,8 +107,6 @@ type Seed struct {
 type API struct {
 	IssuesDefaultLimit     int
 	IssuesMaxLimit         int
-	TitlesMaxIDs           int
-	TitlesMaxBodyBytes     int
 	TimeseriesDefaultDays  int
 	TimeseriesMinDays      int
 	TimeseriesMaxDays      int
@@ -150,17 +145,14 @@ func Default() Config {
 		Cache: Cache{
 			Overview:   CacheEntry{TTLSeconds: 30, MaxEntries: 100},
 			Timeseries: CacheEntry{TTLSeconds: 60, MaxEntries: 100},
-			Titles:     CacheEntry{TTLSeconds: 900, MaxEntries: 5000},
 		},
 		GitHub: GitHub{
-			RequestTimeoutSeconds:       60,
-			TitlesRequestTimeoutSeconds: 15,
-			MaxRetries:                  3,
-			RetryBackoffUnitSeconds:     2,
-			RetryAfterCapSeconds:        60,
-			SearchPageDelayMs:           250,
-			DetailPageDelayMs:           200,
-			TitlesBatchSize:             100,
+			RequestTimeoutSeconds:   60,
+			MaxRetries:              3,
+			RetryBackoffUnitSeconds: 2,
+			RetryAfterCapSeconds:    60,
+			SearchPageDelayMs:       250,
+			DetailPageDelayMs:       200,
 		},
 		Jobs: Jobs{
 			SyncRunDeadlineMinutes:    15,
@@ -173,8 +165,6 @@ func Default() Config {
 		API: API{
 			IssuesDefaultLimit:     200,
 			IssuesMaxLimit:         500,
-			TitlesMaxIDs:           200,
-			TitlesMaxBodyBytes:     65536,
 			TimeseriesDefaultDays:  30,
 			TimeseriesMinDays:      7,
 			TimeseriesMaxDays:      365,
