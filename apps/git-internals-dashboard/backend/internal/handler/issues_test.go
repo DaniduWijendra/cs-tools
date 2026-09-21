@@ -83,8 +83,10 @@ func TestListIssuesValidation400s(t *testing.T) {
 		{"bad q (not numeric)", "q=abc"},
 		{"limit too low", "limit=0"},
 		{"limit too high", "limit=501"},
+		{"offset negative", "offset=-1"},
+		{"offset not numeric", "offset=abc"},
 		{"bad bucket", "bucket=nonexistent"},
-		{"bad order", "order=nonexistent"},
+		{"bad sort", "sort=nonexistent"},
 		{"priority too long", "priority=" + strings.Repeat("x", 51)},
 	}
 	for _, tc := range cases {
@@ -149,6 +151,7 @@ type issueFixture struct {
 	slaState      string
 	budgetHours   *float64
 	pctConsumed   *float64
+	createdAt     time.Time // zero value defaults to seedIssuesFixture's `base`
 	updatedAt     time.Time
 }
 
@@ -188,22 +191,30 @@ func seedIssuesFixture(t *testing.T, pool *pgxpool.Pool) (repoID int32) {
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	fixtures := []issueFixture{
-		{number: 101, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "OPEN", slaState: "VIOLATED", budgetHours: f64p(24), pctConsumed: f64p(1.5), updatedAt: base.Add(5 * time.Hour)},
-		{number: 102, priority: strp("High(P2)"), currentStatus: strp("WOC"), state: "OPEN", slaState: "AT_RISK", budgetHours: f64p(24), pctConsumed: f64p(0.8), updatedAt: base.Add(4 * time.Hour)},
-		{number: 103, priority: strp("Medium(P3)"), currentStatus: strp("Open"), state: "OPEN", slaState: "OK", budgetHours: f64p(48), pctConsumed: f64p(0.2), updatedAt: base.Add(3 * time.Hour)},
-		{number: 104, priority: nil, currentStatus: strp("In Progress"), state: "OPEN", slaState: "NO_SLA", updatedAt: base.Add(2 * time.Hour)},
+		// createdAt deliberately doesn't track pctConsumed's or updatedAt's own
+		// ranking among these five (101-104,107 are the base-scope set), so a
+		// sort=age test can't pass by accident of sharing another field's order:
+		// oldest -> newest is 103, 107, 104, 101, 102.
+		{number: 101, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "OPEN", slaState: "VIOLATED", budgetHours: f64p(24), pctConsumed: f64p(1.5), createdAt: base.Add(-1 * time.Hour), updatedAt: base.Add(5 * time.Hour)},
+		{number: 102, priority: strp("High(P2)"), currentStatus: strp("WOC"), state: "OPEN", slaState: "AT_RISK", budgetHours: f64p(24), pctConsumed: f64p(0.8), createdAt: base, updatedAt: base.Add(4 * time.Hour)},
+		{number: 103, priority: strp("Medium(P3)"), currentStatus: strp("Open"), state: "OPEN", slaState: "OK", budgetHours: f64p(48), pctConsumed: f64p(0.2), createdAt: base.Add(-4 * time.Hour), updatedAt: base.Add(3 * time.Hour)},
+		{number: 104, priority: nil, currentStatus: strp("In Progress"), state: "OPEN", slaState: "NO_SLA", createdAt: base.Add(-2 * time.Hour), updatedAt: base.Add(2 * time.Hour)},
 		{number: 105, priority: strp("Critical(P1)"), currentStatus: strp("Resolved"), state: "OPEN", slaState: "TERMINAL", updatedAt: base.Add(1 * time.Hour)},
 		{number: 106, priority: strp("Medium(P3)"), currentStatus: strp("Resolved"), state: "CLOSED", slaState: "TERMINAL", updatedAt: base},
-		{number: 107, priority: strp("High(P2)"), currentStatus: strp("Pending Patch Queue"), state: "OPEN", slaState: "NO_SLA", updatedAt: base.Add(6 * time.Hour)},
+		{number: 107, priority: strp("High(P2)"), currentStatus: strp("Pending Patch Queue"), state: "OPEN", slaState: "NO_SLA", createdAt: base.Add(-3 * time.Hour), updatedAt: base.Add(6 * time.Hour)},
 		{number: 108, priority: strp("Critical(P1)"), currentStatus: strp("In Progress"), state: "CLOSED", slaState: "OK", budgetHours: f64p(24), pctConsumed: f64p(0.1), updatedAt: base.Add(7 * time.Hour)},
 	}
 
 	for _, f := range fixtures {
+		createdAt := base
+		if !f.createdAt.IsZero() {
+			createdAt = f.createdAt
+		}
 		var issueID int32
 		if err := pool.QueryRow(ctx, `
 			INSERT INTO issues (repository_id, github_number, state, html_url, priority, current_status, github_created_at, github_updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id
-		`, repoID, f.number, f.state, "https://github.com/test-owner/test-issues/issues/"+strconv.Itoa(f.number), f.priority, f.currentStatus, base, f.updatedAt).Scan(&issueID); err != nil {
+		`, repoID, f.number, f.state, "https://github.com/test-owner/test-issues/issues/"+strconv.Itoa(f.number), f.priority, f.currentStatus, createdAt, f.updatedAt).Scan(&issueID); err != nil {
 			t.Fatalf("insert issue %d: %v", f.number, err)
 		}
 		if _, err := pool.Exec(ctx, `
@@ -217,18 +228,25 @@ func seedIssuesFixture(t *testing.T, pool *pgxpool.Pool) (repoID int32) {
 	return repoID
 }
 
-// decodeIssueList asserts rec is a 200 and decodes its body as a ListIssues
-// response.
-func decodeIssueList(t *testing.T, rec *httptest.ResponseRecorder) []issueWire {
+// decodeIssueListEnvelope asserts rec is a 200 and decodes its body as a
+// ListIssues response envelope ({issues, total, limit, offset, hasMore}).
+func decodeIssueListEnvelope(t *testing.T, rec *httptest.ResponseRecorder) issueListWire {
 	t.Helper()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
-	var result []issueWire
+	var result issueListWire
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 	return result
+}
+
+// decodeIssueList is decodeIssueListEnvelope for callers that only care
+// about the issues themselves, not total/limit/offset/hasMore.
+func decodeIssueList(t *testing.T, rec *httptest.ResponseRecorder) []issueWire {
+	t.Helper()
+	return decodeIssueListEnvelope(t, rec).Issues
 }
 
 // numbersOf extracts each issue's GitHub number, in response order.
@@ -467,14 +485,14 @@ func TestListIssuesQNumberFilter(t *testing.T) {
 	assertSameSet(t, numbersOf(decodeIssueList(t, rec)), []int{103})
 }
 
-// TestListIssuesOrderBudgetDescNullsLast verifies order=budget_desc sorts by
-// pct_consumed descending, with null-budget issues sorted last.
-func TestListIssuesOrderBudgetDescNullsLast(t *testing.T) {
+// TestListIssuesSortSLAConsumptionNullsLast verifies sort=sla_consumption
+// sorts by pct_consumed descending, with null-budget issues sorted last.
+func TestListIssuesSortSLAConsumptionNullsLast(t *testing.T) {
 	pool := testPool(t)
 	seedIssuesFixture(t, pool)
 	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
 
-	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&order=budget_desc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&sort=sla_consumption", nil)
 	rec := httptest.NewRecorder()
 	h.ListIssues(rec, req)
 
@@ -485,9 +503,9 @@ func TestListIssuesOrderBudgetDescNullsLast(t *testing.T) {
 	}
 }
 
-// TestListIssuesOrderUpdatedDescIsDefault verifies the default (no order
-// param) sort is githubUpdatedAt descending.
-func TestListIssuesOrderUpdatedDescIsDefault(t *testing.T) {
+// TestListIssuesSortDefaultsToSLAConsumption verifies the default (no sort
+// param) is the same ordering as an explicit sort=sla_consumption.
+func TestListIssuesSortDefaultsToSLAConsumption(t *testing.T) {
 	pool := testPool(t)
 	seedIssuesFixture(t, pool)
 	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
@@ -497,9 +515,81 @@ func TestListIssuesOrderUpdatedDescIsDefault(t *testing.T) {
 	h.ListIssues(rec, req)
 
 	got := numbersOf(decodeIssueList(t, rec))
-	want := []int{107, 101, 102, 103, 104} // descending githubUpdatedAt among the base-scope set
+	if len(got) != 5 || got[0] != 101 || got[1] != 102 || got[2] != 103 {
+		t.Fatalf("expected [101 102 103 <104,107 in any order>], got %v", got)
+	}
+}
+
+// TestListIssuesSortAgeAscendingOldestFirst verifies sort=age orders by
+// githubCreatedAt ascending (oldest issue first), independent of both
+// pct_consumed and githubUpdatedAt's own ranking among the same issues.
+func TestListIssuesSortAgeAscendingOldestFirst(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&sort=age", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+
+	got := numbersOf(decodeIssueList(t, rec))
+	want := []int{103, 107, 104, 101, 102} // ascending githubCreatedAt among the base-scope set
 	if !sliceEqual(got, want) {
 		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+// TestListIssuesOffsetWindowsThroughSortOrder verifies limit+offset page
+// through the same sort=sla_consumption ordering already proven above,
+// rather than returning an arbitrary/unstable subset.
+func TestListIssuesOffsetWindowsThroughSortOrder(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&sort=sla_consumption&limit=2&offset=2", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+
+	env := decodeIssueListEnvelope(t, rec)
+	// Full sla_consumption order is [101 102 103 <104,107>]; offset=2,limit=2
+	// lands on index 2 (103) and index 3 (104 or 107, whichever sorts there).
+	if len(env.Issues) != 2 || env.Issues[0].Number != 103 {
+		t.Fatalf("expected page [103 <104 or 107>], got %v", numbersOf(env.Issues))
+	}
+	if env.Total != 5 {
+		t.Errorf("expected total=5, got %d", env.Total)
+	}
+	if env.Limit != 2 || env.Offset != 2 {
+		t.Errorf("expected limit=2 offset=2 echoed back, got limit=%d offset=%d", env.Limit, env.Offset)
+	}
+	if !env.HasMore {
+		t.Error("expected hasMore=true (2 more issues follow this page)")
+	}
+}
+
+// TestListIssuesHasMoreFalseOnLastPage verifies hasMore is false once
+// offset+len(issues) reaches total, including when offset lands past the
+// end (empty page).
+func TestListIssuesHasMoreFalseOnLastPage(t *testing.T) {
+	pool := testPool(t)
+	seedIssuesFixture(t, pool)
+	h := NewIssuesHandler(pool, handlerTestConfig, appconfig.Default().API)
+
+	req := httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&limit=10&offset=0", nil)
+	rec := httptest.NewRecorder()
+	h.ListIssues(rec, req)
+	env := decodeIssueListEnvelope(t, rec)
+	if len(env.Issues) != 5 || env.Total != 5 || env.HasMore {
+		t.Fatalf("expected all 5 issues on one page with hasMore=false, got %d issues total=%d hasMore=%v", len(env.Issues), env.Total, env.HasMore)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/issues?repo=test-owner/test-issues&limit=10&offset=50", nil)
+	rec = httptest.NewRecorder()
+	h.ListIssues(rec, req)
+	env = decodeIssueListEnvelope(t, rec)
+	if len(env.Issues) != 0 || env.Total != 5 || env.HasMore {
+		t.Fatalf("expected an empty page past the end with hasMore=false, got %d issues total=%d hasMore=%v", len(env.Issues), env.Total, env.HasMore)
 	}
 }
 

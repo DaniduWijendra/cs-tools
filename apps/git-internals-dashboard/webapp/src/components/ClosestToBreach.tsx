@@ -41,7 +41,8 @@ interface ClosestToBreachProps {
 
 /** Top-9 tracked issues by budget consumed, shown only once one is AT_RISK or VIOLATED per the API's own SLA verdict. */
 export function ClosestToBreach({ repo, priority, projects }: ClosestToBreachProps) {
-  const { data: issues } = useIssues({ bucket: "tracked", order: "budget_desc", limit: 9, repo, priority });
+  const { data } = useIssues({ bucket: "tracked", sort: "sla_consumption", limit: 9, repo, priority });
+  const issues = data?.issues;
 
   // Friendly project name for "owner/name", falling back to the repo's own name part.
   const nameForRepo = (r: string | null) => projects.find((p) => p.repo === r)?.name ?? r?.split("/")[1] ?? "—";

@@ -157,6 +157,16 @@ func toIssueWire(r issueRow) issueWire {
 	return w
 }
 
+// issueListWire is GET /issues's response envelope: the page of issues plus
+// enough to know whether there's more (total/offset+len(Issues) vs. total).
+type issueListWire struct {
+	Issues  []issueWire `json:"issues"`
+	Total   int         `json:"total"`
+	Limit   int         `json:"limit"`
+	Offset  int         `json:"offset"`
+	HasMore bool        `json:"hasMore"`
+}
+
 // ListIssues handles GET /issues.
 func (h *IssuesHandler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	q, errMsg := parseIssuesQuery(r.URL.Query(), h.api)
@@ -166,18 +176,15 @@ func (h *IssuesHandler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	whereSQL, args := buildIssuesWhere(taxonomy.CsStatuses(h.cfg), taxonomy.ProductSideStatuses(h.cfg), q)
+	orderSQL := issueSortColumns[q.Sort]
 
-	orderSQL := "i.github_updated_at DESC"
-	if q.Order == "budget_desc" {
-		// Uses the issue_sla.pct_consumed index.
-		orderSQL = "s.pct_consumed DESC NULLS LAST"
-	}
+	pageArgs := &sqlArgs{values: args}
+	limitPlaceholder := pageArgs.add(q.Limit)
+	offsetPlaceholder := pageArgs.add(q.Offset)
 
-	limitArgs := &sqlArgs{values: args}
-	limitPlaceholder := limitArgs.add(q.Limit)
-
-	query := fmt.Sprintf("SELECT %s %s WHERE %s ORDER BY %s LIMIT %s", issueListSelect, issueListFrom, whereSQL, orderSQL, limitPlaceholder)
-	rows, err := h.pool.Query(r.Context(), query, limitArgs.values...)
+	query := fmt.Sprintf("SELECT %s %s WHERE %s ORDER BY %s LIMIT %s OFFSET %s",
+		issueListSelect, issueListFrom, whereSQL, orderSQL, limitPlaceholder, offsetPlaceholder)
+	rows, err := h.pool.Query(r.Context(), query, pageArgs.values...)
 	if err != nil {
 		apierror.Internal(w, r, "list issues query failed", err)
 		return
@@ -198,7 +205,24 @@ func (h *IssuesHandler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// Separate query (same WHERE, no LIMIT/OFFSET) rather than a COUNT(*)
+	// OVER() window column on the page query above — this stays correct on
+	// an empty page (offset past the end) without extra scanning logic, and
+	// the result set is small enough that the extra round trip is cheap.
+	countQuery := fmt.Sprintf("SELECT count(*) %s WHERE %s", issueListFrom, whereSQL)
+	var total int
+	if err := h.pool.QueryRow(r.Context(), countQuery, args...).Scan(&total); err != nil {
+		apierror.Internal(w, r, "count issues query failed", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, issueListWire{
+		Issues:  result,
+		Total:   total,
+		Limit:   q.Limit,
+		Offset:  q.Offset,
+		HasMore: q.Offset+len(result) < total,
+	})
 }
 
 type eventWire struct {

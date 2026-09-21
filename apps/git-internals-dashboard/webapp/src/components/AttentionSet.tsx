@@ -44,7 +44,11 @@ interface AttentionSetProps {
 export function AttentionSet({ hero, projects, repo, priority, isCsStatus }: AttentionSetProps) {
   const [active, setActive] = useState<Set<Category>>(new Set(["violated", "at_risk", "cs"]));
 
-  const { data: issues } = useIssues({ bucket: "attention", order: "budget_desc", repo, priority });
+  // Capped summary, not a browse view: no pagination/sort controls of its
+  // own, just a bounded top-N by SLA consumption. The full, paginated list
+  // lives on the Issues page (bucket=attention).
+  const { data } = useIssues({ bucket: "attention", sort: "sla_consumption", limit: 50, repo, priority });
+  const issues = data?.issues;
 
   const issueIds = (issues ?? []).map((i) => i.id);
   const { data: titles, isPending: titlesPending } = useIssueTitles(issueIds);

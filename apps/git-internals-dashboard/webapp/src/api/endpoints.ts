@@ -20,7 +20,7 @@ import { qs, request } from "./client";
 import type {
   IssueDetail,
   IssueFilters,
-  IssueRow,
+  IssueListResponse,
   Overview,
   SyncStatus,
   SyncSummary,
@@ -31,7 +31,7 @@ import type {
 
 export const api = {
   listIssues: (filters: IssueFilters = {}) =>
-    request<IssueRow[]>(`/issues${qs(filters as Record<string, string | number | undefined>)}`),
+    request<IssueListResponse>(`/issues${qs(filters as Record<string, string | number | undefined>)}`),
 
   getIssue: (id: number) => request<IssueDetail>(`/issues/${id}`),
 

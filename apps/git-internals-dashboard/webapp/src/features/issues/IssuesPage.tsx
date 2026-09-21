@@ -16,9 +16,10 @@
 
 import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Box, MenuItem, Select, Skeleton, type SelectChangeEvent } from "@mui/material";
+import { Box, MenuItem, Select, Skeleton, TablePagination, type SelectChangeEvent } from "@mui/material";
 import { useOverview, useIssues, useIssueTitles, useTaxonomy, makeIsCsStatus } from "@api/hooks";
 import type { BucketKey } from "@api/types";
+import { DEFAULT_ISSUE_SORT, ISSUE_SORT_OPTIONS, type IssueSortField } from "@api/issueSort";
 import { BackButton } from "@components/BackButton";
 import { ErrorState } from "@components/ErrorState";
 import { StaleDataAlert } from "@components/StaleDataAlert";
@@ -27,6 +28,9 @@ import { useReportFetchProgress } from "@lib/fetchProgress";
 import { IssueTimelineRow } from "@components/IssueTimelineRow";
 import { gridTemplate } from "@lib/grid";
 import { acrylicSurfaceSx } from "@lib/surfaces";
+
+const ROWS_PER_PAGE_OPTIONS = [20, 50, 100];
+const DEFAULT_ROWS_PER_PAGE = 20;
 
 const KIND_CHIPS: { key: BucketKey; status?: string; label: string }[] = [
   { key: "all", label: "All Open" },
@@ -99,29 +103,38 @@ export default function IssuesPage() {
   const priority = params.get("priority") ?? undefined;
   const status = params.get("status") ?? undefined;
   const bucket = (params.get("bucket") ?? "all") as BucketKey;
+  const sort = (params.get("sort") as IssueSortField | null) ?? DEFAULT_ISSUE_SORT;
+  const rowsPerPage = Number(params.get("pageSize")) || DEFAULT_ROWS_PER_PAGE;
+  const page = Number(params.get("page")) || 0;
 
   useEffect(() => {
     const t = setTimeout(() => {
+      // This effect re-runs on every params change (e.g. clicking to page 2
+      // sets ?page=1, which re-fires it) since it's re-based on the current
+      // `params` every time so a repo/priority change applied while this
+      // timer is pending is never clobbered by a stale snapshot when it
+      // finally fires — see below. But that means it must bail out here
+      // whenever qInput isn't actually introducing a new search, or it would
+      // unconditionally strip `page` on every unrelated param change (e.g.
+      // pagination), bouncing the page back to 1 a moment after any click.
+      if ((params.get("q") ?? "") === qInput) return;
       const next = new URLSearchParams(params);
       if (qInput) next.set("q", qInput);
       else next.delete("q");
-      // Re-based on the current `params` every time this effect (re)runs, so
-      // a repo/priority change applied while this timer is pending is never
-      // clobbered by a stale `params` snapshot when it finally fires. Once
-      // the query string already matches (e.g. this same effect re-armed
-      // itself after its own earlier navigate), skip navigating again.
-      if (next.toString() !== params.toString()) {
-        void navigate(`/issues?${next.toString()}`.replace(/\?$/, ""), { replace: true });
-      }
+      next.delete("page"); // a new search always starts back at page 1
+      void navigate(`/issues?${next.toString()}`.replace(/\?$/, ""), { replace: true });
     }, 300);
     return () => clearTimeout(t);
   }, [qInput, navigate, params]);
 
-  // Sets or clears (empty value) one URL search param, replacing history.
+  // Sets or clears (empty value) one URL search param, replacing history, and
+  // resets back to page 1 — a filter/sort/page-size change invalidates
+  // whatever page the user was on.
   const setParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);
+    next.delete("page");
     setParams(next, { replace: true });
   };
 
@@ -134,6 +147,24 @@ export default function IssuesPage() {
     else next.set("bucket", key);
     if (chipStatus) next.set("status", chipStatus);
     else next.delete("status");
+    next.delete("page");
+    setParams(next, { replace: true });
+  };
+
+  // TablePagination's page is 0-indexed; the URL stores it 1-indexed-minus-1
+  // implicitly (0 = unset = page 1) so a bare /issues URL has no ?page=0 noise.
+  const setPage = (newPage: number) => {
+    const next = new URLSearchParams(params);
+    if (newPage > 0) next.set("page", String(newPage));
+    else next.delete("page");
+    setParams(next, { replace: true });
+  };
+
+  const setRowsPerPage = (newRowsPerPage: number) => {
+    const next = new URLSearchParams(params);
+    if (newRowsPerPage !== DEFAULT_ROWS_PER_PAGE) next.set("pageSize", String(newRowsPerPage));
+    else next.delete("pageSize");
+    next.delete("page");
     setParams(next, { replace: true });
   };
 
@@ -141,7 +172,7 @@ export default function IssuesPage() {
   const { data: taxonomy } = useTaxonomy();
   const isCsStatus = makeIsCsStatus(taxonomy?.csStatuses);
   const {
-    data: issues,
+    data,
     isLoading,
     isPlaceholderData,
     isError,
@@ -154,11 +185,14 @@ export default function IssuesPage() {
     priority,
     status,
     q: params.get("q") ?? undefined,
-    order: "budget_desc",
-    limit: 200,
+    sort,
+    limit: rowsPerPage,
+    offset: page * rowsPerPage,
   });
   useReportFetchProgress(isPlaceholderData);
 
+  const issues = data?.issues;
+  const total = data?.total ?? 0;
   const issueIds = (issues ?? []).map((i) => i.id);
   const { data: titles, isPending: titlesPending } = useIssueTitles(issueIds);
 
@@ -186,7 +220,7 @@ export default function IssuesPage() {
           <Box sx={{ mt: 0.75, fontSize: 13, color: "var(--sla-fg3)" }}>
             {projName} ·{" "}
             <Box component="b" sx={{ fontWeight: 600, color: "var(--sla-fg2)", fontFamily: "var(--font-mono)" }}>
-              {issues?.length ?? 0}
+              {total}
             </Box>{" "}
             matching open issues · click any row to open it on GitHub
           </Box>
@@ -215,6 +249,13 @@ export default function IssuesPage() {
             {PRIORITY_OPTIONS.map((p) => (
               <MenuItem key={p.value} value={p.value}>
                 {p.label}
+              </MenuItem>
+            ))}
+          </FilterSelect>
+          <FilterSelect value={sort} onChange={(v) => setParam("sort", v === DEFAULT_ISSUE_SORT ? "" : v)}>
+            {ISSUE_SORT_OPTIONS.map((o) => (
+              <MenuItem key={o.value} value={o.value}>
+                Sort: {o.label}
               </MenuItem>
             ))}
           </FilterSelect>
@@ -266,7 +307,7 @@ export default function IssuesPage() {
           <ErrorState message={errorMessage(error, "Failed to load issues")} onRetry={() => void refetch()} />
         ) : isLoading ? (
           <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 2 }}>
-            {Array.from({ length: 8 }).map((_, i) => (
+            {Array.from({ length: rowsPerPage }).map((_, i) => (
               <Skeleton key={i} variant="rounded" sx={{ height: 36, width: "100%" }} />
             ))}
           </Box>
@@ -288,6 +329,21 @@ export default function IssuesPage() {
               isCsStatus={isCsStatus}
             />
           ))
+        )}
+
+        {total > 0 && (
+          <TablePagination
+            component="div"
+            count={total}
+            page={page}
+            onPageChange={(_, newPage) => setPage(newPage)}
+            rowsPerPage={rowsPerPage}
+            onRowsPerPageChange={(e) => setRowsPerPage(Number(e.target.value))}
+            rowsPerPageOptions={ROWS_PER_PAGE_OPTIONS}
+            showFirstButton
+            showLastButton
+            sx={{ borderTop: "1px solid var(--sla-border-soft)" }}
+          />
         )}
       </Box>
 

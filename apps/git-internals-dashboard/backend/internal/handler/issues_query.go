@@ -45,15 +45,16 @@ type issuesQuery struct {
 	Status   string
 	Q        string
 	Limit    int
+	Offset   int
 	Bucket   string
-	Order    string
+	Sort     issueSortField
 }
 
 // parseIssuesQuery validates v against lim and returns a non-empty error
 // message on the first violation found. Unknown query parameter names are
 // intentionally ignored rather than rejected.
 func parseIssuesQuery(v url.Values, lim appconfig.API) (issuesQuery, string) {
-	q := issuesQuery{Limit: lim.IssuesDefaultLimit, Order: "updated_desc"}
+	q := issuesQuery{Limit: lim.IssuesDefaultLimit, Sort: defaultIssueSort}
 
 	if repo := v.Get("repo"); repo != "" {
 		if !repoParamRe.MatchString(repo) {
@@ -100,6 +101,13 @@ func parseIssuesQuery(v url.Values, lim appconfig.API) (issuesQuery, string) {
 		}
 		q.Limit = n
 	}
+	if offsetStr := v.Get("offset"); offsetStr != "" {
+		n, err := strconv.Atoi(offsetStr)
+		if err != nil || n < 0 {
+			return q, "offset must be a non-negative integer"
+		}
+		q.Offset = n
+	}
 	if bucket := v.Get("bucket"); bucket != "" {
 		switch bucket {
 		case "all", "violated", "at_risk", "on_track", "cs", "product_side", "tracked", "untracked", "attention":
@@ -108,13 +116,12 @@ func parseIssuesQuery(v url.Values, lim appconfig.API) (issuesQuery, string) {
 			return q, "bucket must be one of all, violated, at_risk, on_track, cs, product_side, tracked, untracked, attention"
 		}
 	}
-	if order := v.Get("order"); order != "" {
-		switch order {
-		case "budget_desc", "updated_desc":
-			q.Order = order
-		default:
-			return q, "order must be budget_desc or updated_desc"
+	if sort := v.Get("sort"); sort != "" {
+		field := issueSortField(sort)
+		if _, ok := issueSortColumns[field]; !ok {
+			return q, "sort must be one of " + strings.Join(validIssueSortValues(), ", ")
 		}
+		q.Sort = field
 	}
 	return q, ""
 }

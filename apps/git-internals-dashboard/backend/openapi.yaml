@@ -100,26 +100,34 @@ paths:
             minimum: 1
             maximum: 500
             default: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
         - name: bucket
           in: query
           schema:
             type: string
             enum: [all, violated, at_risk, on_track, cs, product_side, tracked, untracked, attention]
-        - name: order
+        - name: sort
           in: query
+          description: >-
+            Whitelisted server-side sort. sla_consumption (default) orders by
+            issue_sla.pct_consumed descending, nulls last; age orders by
+            githubCreatedAt ascending (oldest first).
           schema:
             type: string
-            enum: [budget_desc, updated_desc]
-            default: updated_desc
+            enum: [sla_consumption, age]
+            default: sla_consumption
       responses:
         "200":
           description: Ok
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Issue'
+                $ref: '#/components/schemas/IssueList'
         "400":
           $ref: '#/components/responses/BadRequest'
         "500":
@@ -454,6 +462,24 @@ components:
           nullable: true
         sla:
           $ref: '#/components/schemas/IssueSla'
+
+    IssueList:
+      type: object
+      properties:
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/Issue'
+        total:
+          type: integer
+          description: Total issues matching the filters, independent of limit/offset.
+        limit:
+          type: integer
+        offset:
+          type: integer
+        hasMore:
+          type: boolean
+          description: 'True when offset + issues.length < total.'
 
     IssueEvent:
       type: object
