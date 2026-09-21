@@ -23,7 +23,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/appconfig"
+	"github.com/binara-sachin/git-internals-dashboard/backend/internal/cliutil"
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/config"
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/db"
 	"github.com/binara-sachin/git-internals-dashboard/backend/internal/github"
@@ -76,7 +76,7 @@ func rateLimitSuffix(client github.Client) string {
 // configured repo's issues (real GitHub data if GITHUB_TOKEN is set,
 // synthetic fixtures otherwise), backfilling daily sla_snapshots as it goes.
 func main() {
-	loadDotEnv(".env")
+	cliutil.LoadDotEnv(".env")
 
 	token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	strictTaxonomy := strings.TrimSpace(os.Getenv("SEED_STRICT_TAXONOMY")) == "1"
@@ -98,7 +98,7 @@ func main() {
 	}
 	runtime := ingest.BuildRuntimeConfig(app)
 
-	pool, err := db.NewPoolWithConfig(ctx, mustEnv("DATABASE_URL"), appCfg.Database)
+	pool, err := db.NewPoolWithConfig(ctx, cliutil.MustEnv("DATABASE_URL"), appCfg.Database)
 	if err != nil {
 		fatal("failed to connect to postgres", err)
 	}
@@ -274,49 +274,10 @@ func endOfUTCDay(t time.Time) time.Time {
 	return time.Date(u.Year(), u.Month(), u.Day(), 23, 59, 59, 999_000_000, time.UTC)
 }
 
-// mustEnv returns the environment variable key's value, or calls fatal if it
-// is unset/empty.
-func mustEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		fatal("required environment variable is not set", fmt.Errorf("%s", key))
-	}
-	return v
-}
-
 // fatal logs msg and err to stderr and exits the process with status 1.
 func fatal(msg string, err error) {
 	fmt.Fprintf(os.Stderr, "[seed] FAILED: %s: %v\n", msg, err)
 	os.Exit(1)
-}
-
-// loadDotEnv reads a .env file and sets any unset environment variables from
-// it. Silently ignored if the file does not exist.
-func loadDotEnv(path string) {
-	f, err := os.Open(path) // #nosec G304 -- path is always the hardcoded literal ".env" at the only call site
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-			v = v[1 : len(v)-1]
-		}
-		if os.Getenv(k) == "" {
-			_ = os.Setenv(k, v)
-		}
-	}
 }
 
 // writeSnapshots reconstructs one issue's daily sla_snapshots rows by
