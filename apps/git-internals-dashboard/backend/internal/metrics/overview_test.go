@@ -130,6 +130,45 @@ func seedMetricsFixture(t *testing.T, pool *pgxpool.Pool) (repositoryID int32) {
 	return repositoryID
 }
 
+// seedMetricsYesterdaySnapshots adds a second sla_snapshots row per fixture
+// issue, dated yesterday (UTC, via Postgres's CURRENT_DATE - 1), with a
+// deliberately different state/status mix from the fixture's today rows:
+// yesterday counts violated=2 at_risk=0 productSide=1 against today's
+// violated=1 at_risk=1 productSide=2. Every spark column therefore differs
+// from every other column and from its own previous day, so an off-by-one
+// or a mixed-up date in the spark aggregation cannot go unnoticed.
+//
+// It is deliberately separate from seedMetricsFixture: the timeseries tests
+// assert gap-filled zeros on every day but today.
+func seedMetricsYesterdaySnapshots(t *testing.T, pool *pgxpool.Pool, repositoryID int32) {
+	t.Helper()
+	ctx := context.Background()
+
+	yesterday := []struct {
+		number        int
+		priority      string
+		currentStatus string
+		slaState      string
+	}{
+		{101, "Critical(P1)", "In Progress", "VIOLATED"},
+		{102, "High(P2)", "WOC", "VIOLATED"},
+		{103, "Medium(P3)", "WOC", "OK"},
+	}
+	for _, f := range yesterday {
+		var issueID int32
+		if err := pool.QueryRow(ctx, `SELECT id FROM issues WHERE repository_id = $1 AND github_number = $2`,
+			repositoryID, f.number).Scan(&issueID); err != nil {
+			t.Fatalf("look up issue %d: %v", f.number, err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sla_snapshots (snapshot_date, issue_id, repository_id, priority, current_status, sla_state)
+			VALUES (CURRENT_DATE - 1, $1, $2, $3, $4, $5)
+		`, issueID, repositoryID, f.priority, f.currentStatus, f.slaState); err != nil {
+			t.Fatalf("insert yesterday sla_snapshot %d: %v", f.number, err)
+		}
+	}
+}
+
 const metricsQuietFixtureRepo = "test-owner/test-metrics-quiet"
 
 // seedQuietRepoFixture creates an enabled repository with no issues at all —
@@ -171,10 +210,13 @@ func findProject(projects []Project, repo string) *Project {
 
 // TestBuildOverviewHeroCountsAndSpark verifies the hero section's
 // violated/atRisk/cs/productSide counts match the seeded fixture when
-// scoped to one repo.
+// scoped to one repo, and pins all three spark columns across two
+// snapshot dates: each column's today (index 15) and yesterday (index 14)
+// value, plus the delta derived from them.
 func TestBuildOverviewHeroCountsAndSpark(t *testing.T) {
 	pool := testPool(t)
-	seedMetricsFixture(t, pool)
+	repositoryID := seedMetricsFixture(t, pool)
+	seedMetricsYesterdaySnapshots(t, pool, repositoryID)
 	repoFilter := metricsFixtureRepo
 
 	overview, err := BuildOverview(context.Background(), pool, metricsTestConfig, &repoFilter, nil)
@@ -195,14 +237,37 @@ func TestBuildOverviewHeroCountsAndSpark(t *testing.T) {
 		t.Errorf("expected hero.productSide.n=2, got %d", overview.Hero.ProductSide.N)
 	}
 
-	if len(overview.Hero.Violated.Spark) != 16 {
-		t.Fatalf("expected a 16-element spark array, got %d", len(overview.Hero.Violated.Spark))
+	// Spark columns, pinned per day: index 15 is today, index 14 yesterday.
+	sparkCases := []struct {
+		name          string
+		spark         []int
+		delta         int
+		today         int
+		yesterday     int
+		expectedDelta int
+	}{
+		{name: "violated", spark: overview.Hero.Violated.Spark, delta: overview.Hero.Violated.Delta, today: 1, yesterday: 2, expectedDelta: -1},
+		{name: "atRisk", spark: overview.Hero.AtRisk.Spark, delta: overview.Hero.AtRisk.Delta, today: 1, yesterday: 0, expectedDelta: 1},
+		{name: "productSide", spark: overview.Hero.ProductSide.Spark, delta: overview.Hero.ProductSide.Delta, today: 2, yesterday: 1, expectedDelta: 1},
 	}
-	if overview.Hero.Violated.Spark[15] != 1 {
-		t.Errorf("expected today's (index 15) violated spark count=1, got %d", overview.Hero.Violated.Spark[15])
-	}
-	if overview.Hero.AtRisk.Spark[15] != 1 {
-		t.Errorf("expected today's at_risk spark count=1, got %d", overview.Hero.AtRisk.Spark[15])
+	for _, tc := range sparkCases {
+		if len(tc.spark) != 16 {
+			t.Fatalf("%s: expected a 16-element spark array, got %d", tc.name, len(tc.spark))
+		}
+		if tc.spark[15] != tc.today {
+			t.Errorf("%s: expected today's (index 15) spark count=%d, got %d", tc.name, tc.today, tc.spark[15])
+		}
+		if tc.spark[14] != tc.yesterday {
+			t.Errorf("%s: expected yesterday's (index 14) spark count=%d, got %d", tc.name, tc.yesterday, tc.spark[14])
+		}
+		if tc.delta != tc.expectedDelta {
+			t.Errorf("%s: expected delta=%d, got %d", tc.name, tc.expectedDelta, tc.delta)
+		}
+		for i := 0; i < 14; i++ {
+			if tc.spark[i] != 0 {
+				t.Errorf("%s: expected gap-filled zero at spark[%d], got %d", tc.name, i, tc.spark[i])
+			}
+		}
 	}
 }
 
