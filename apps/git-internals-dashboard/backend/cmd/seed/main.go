@@ -18,7 +18,8 @@
 // GitHub data (if GITHUB_TOKEN is set) or synthetic fixtures (if not). Run
 // via `make seed`.
 //
-// PRIVACY: persists no titles, assignees, openers, labels, or actors.
+// PRIVACY: persists the issue title, ABT team, and a @wso2.com opened-by
+// address. Assignees, labels, and other actors are not persisted.
 package main
 
 import (
