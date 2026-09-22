@@ -464,7 +464,7 @@ func main() {
 // loadOnboardingConfig wires the project_contact.invited handler (the
 // customer onboarding flow's identity + invitation-email steps — see
 // dispatch.OnboardingConfig). Both steps are behind their own opt-in flag,
-// ONBOARD_IDENTITY_ENABLED / ONBOARD_EMAIL_ENABLED (`== "true"`, default
+// CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED / CSM_MIGRATION_ONBOARD_EMAIL_ENABLED (`== "true"`, default
 // off — the opt-in convention EMAIL_DEBUG_MODE uses, since shipping this
 // dark is the point), so a deployment without them records both steps as
 // SKIPPED on entity-service's ledger and does nothing else.
@@ -488,12 +488,12 @@ func main() {
 // requires this service's OAuth2 client id to be in its
 // AUTH_INTERNAL_CLIENT_IDS for that endpoint.
 func loadOnboardingConfig(steps *entity.CustomerEntityClient) dispatch.OnboardingConfig {
-	identityEnabled := os.Getenv("ONBOARD_IDENTITY_ENABLED") == "true"
-	emailEnabled := os.Getenv("ONBOARD_EMAIL_ENABLED") == "true"
+	identityEnabled := os.Getenv("CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED") == "true"
+	emailEnabled := os.Getenv("CSM_MIGRATION_ONBOARD_EMAIL_ENABLED") == "true"
 
 	scimBaseURL := os.Getenv("SCIM_BASE_URL")
 	if identityEnabled && scimBaseURL == "" {
-		slog.Warn("ONBOARD_IDENTITY_ENABLED=true but SCIM_BASE_URL is not set; project_contact.invited identity steps will fail until it is configured")
+		slog.Warn("CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED=true but SCIM_BASE_URL is not set; project_contact.invited identity steps will fail until it is configured")
 	}
 	scimClient := scim.NewClient(scim.Config{
 		BaseURL:      scimBaseURL,

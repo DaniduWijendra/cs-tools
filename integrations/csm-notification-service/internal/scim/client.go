@@ -68,7 +68,7 @@ type Config struct {
 // automatically; callers need not manage them.
 //
 // NewClient never fails and never contacts the token endpoint, so it is safe
-// to construct with a zero-value Config (e.g. when ONBOARD_IDENTITY_ENABLED
+// to construct with a zero-value Config (e.g. when CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED
 // is off for a given deployment) — a missing or invalid configuration only
 // surfaces as an error the first time EnsureExternalUser is called.
 type Client struct {

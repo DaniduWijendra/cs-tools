@@ -94,8 +94,8 @@ type onboardingStepRecorder interface {
 // every other event type is untouched by it.
 //
 // Identity (satisfied by *scim.Client) creates the invitee's Asgardeo user
-// when IdentityEnabled (ONBOARD_IDENTITY_ENABLED); Email sends the
-// invitation when EmailEnabled (ONBOARD_EMAIL_ENABLED) — a separate
+// when IdentityEnabled (CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED); Email sends the
+// invitation when EmailEnabled (CSM_MIGRATION_ONBOARD_EMAIL_ENABLED) — a separate
 // emailSender from the Dispatcher's own, because the invitation may go out
 // from a different sender address (ONBOARD_EMAIL_FROM) than the case.*
 // emails, and notifications.EmailClient binds its From at construction.
@@ -1423,7 +1423,7 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 	switch {
 	case !d.onboarding.IdentityEnabled:
 		d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepSkipped, nil)
-		slog.InfoContext(ctx, "dispatch: identity provisioning disabled (ONBOARD_IDENTITY_ENABLED != true); skipping", logAttrs...)
+		slog.InfoContext(ctx, "dispatch: identity provisioning disabled (CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED != true); skipping", logAttrs...)
 	default:
 		if remembered, ok := d.rememberedIdentityExisted(identityKey); ok {
 			// A previous attempt at this same record already provisioned
@@ -1456,7 +1456,7 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 	switch {
 	case !d.onboarding.EmailEnabled:
 		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSkipped, nil)
-		slog.InfoContext(ctx, "dispatch: invitation email disabled (ONBOARD_EMAIL_ENABLED != true); skipping", logAttrs...)
+		slog.InfoContext(ctx, "dispatch: invitation email disabled (CSM_MIGRATION_ONBOARD_EMAIL_ENABLED != true); skipping", logAttrs...)
 	case !d.emailSendingEnabled:
 		// The service-wide killswitch silences this email the same way it
 		// silences every other one here — recorded SKIPPED, not FAILED,
