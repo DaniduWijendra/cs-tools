@@ -203,7 +203,7 @@ created for it, that application's OAuth2 credentials, and the two subscription 
 deployment's license is built from — is stored on the **`project` table**, mirroring the ServiceNow
 `customer_project` record field for field (`choreo_application_status`, `choreo_application_id`,
 `client_id`, `client_secret`, and `primary_secret_key`/`secondary_secret_key` from migration
-`000067`). Exposed at `GET /projects/{id}/consumption` and `PATCH /projects/{id}/consumption`.
+`000075`). Exposed at `GET /projects/{id}/consumption` and `PATCH /projects/{id}/consumption`.
 
 These two routes are gated on a database being configured, **not** on the data source: the flow
 mirrors its state into Postgres alongside ServiceNow, and the deployments that need it run

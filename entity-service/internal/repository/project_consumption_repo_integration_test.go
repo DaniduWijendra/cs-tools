@@ -26,7 +26,7 @@
 // Apply every migration in order rather than picking files by hand — these
 // tests read columns and enum types spread across several of them (the
 // choreo_application_status_enum and the project table from 000009, the two
-// secret-key columns from 000067), and a hand-picked subset fails on the first
+// secret-key columns from 000075), and a hand-picked subset fails on the first
 // query rather than at setup:
 //
 //	createdb entity_test
@@ -380,7 +380,7 @@ func TestIntegration_FullProvisioningWalk(t *testing.T) {
 	// Every earlier step's output must have survived every later step — and
 	// every step's own output must have been stored at all. The secret keys
 	// are the ones with no home in the ServiceNow-mirrored project table until
-	// migration 000067 gave them one; without it the write silently succeeded
+	// migration 000075 gave them one; without it the write silently succeeded
 	// and these came back nil.
 	for label, got := range map[string]*string{
 		"choreoApplicationId": state.ChoreoApplicationID,
