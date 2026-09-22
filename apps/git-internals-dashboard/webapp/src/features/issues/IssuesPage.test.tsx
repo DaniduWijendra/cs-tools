@@ -219,8 +219,13 @@ describe("IssuesPage", () => {
     // "—" can only be the empty Opened by cell.
     expect(screen.getByText("—")).toBeTruthy();
 
-    const calledUrls = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(calledUrls.some((u) => u.includes("/issues/titles"))).toBe(false);
+    // Only these three endpoints back the page; any other endpoint being
+    // hit (including a round trip to fetch titles separately) would fail
+    // this assertion.
+    const calledEndpoints = new Set(
+      fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname),
+    );
+    expect(calledEndpoints).toEqual(new Set(["/issues", "/metrics/overview", "/taxonomy"]));
   });
 
   it("does not render its own Project/Priority filter selects", async () => {

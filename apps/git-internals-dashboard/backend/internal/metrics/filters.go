@@ -16,6 +16,8 @@
 
 package metrics
 
+import "fmt"
+
 // Filter is the set of optional population filters BuildOverview and
 // BuildTimeseries accept: "owner/name" repo, priority label, and ABT team.
 // A nil field means "unfiltered on that dimension".
@@ -26,9 +28,11 @@ type Filter struct {
 }
 
 // CacheKey renders f as a stable string for use in a TTLCache key, one
-// field per "|"-separated segment, empty string for a nil field.
+// field per "|"-separated segment, empty string for a nil field. Each segment
+// is rendered with %q so a literal "|" or `"` inside a free-text field (e.g.
+// Priority or AbtTeam) can never be mistaken for the segment delimiter.
 func (f Filter) CacheKey() string {
-	return derefOr(f.Repo, "") + "|" + derefOr(f.Priority, "") + "|" + derefOr(f.AbtTeam, "")
+	return fmt.Sprintf("%q|%q|%q", derefOr(f.Repo, ""), derefOr(f.Priority, ""), derefOr(f.AbtTeam, ""))
 }
 
 // derefOr returns *s, or fallback if s is nil.

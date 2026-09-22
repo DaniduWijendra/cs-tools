@@ -30,6 +30,9 @@ type IssueMeta struct {
 }
 
 const (
+	// maxABTTeamLen should stay at least as large as appconfig.API's
+	// AbtTeamParamMaxLength: a stored team name longer than that config
+	// value could never be matched by the abtTeam filter param.
 	maxABTTeamLen       = 100
 	allowedOpenerDomain = "@wso2.com"
 )

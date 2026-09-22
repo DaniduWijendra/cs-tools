@@ -43,7 +43,8 @@ describe("request", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await request("/sync/runs", { method: "POST", body: JSON.stringify({ ids: [1] }) });
+    // Body content is irrelevant here; this only checks the Content-Type header.
+    await request("/sync/runs", { method: "POST", body: JSON.stringify({}) });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");

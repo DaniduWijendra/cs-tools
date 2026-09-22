@@ -267,3 +267,8 @@ GITHUB_TOKEN=... DATABASE_URL=... make backfill-meta
 
 It only updates existing rows (never inserts, never touches SLA history) and is safe to
 re-run.
+
+The backfill only reaches issues within the search lookback window
+(`settings.seedClosedLookbackDays`); issues closed longer ago than that keep `NULL`
+title/abt_team/opened_by permanently unless the lookback setting is widened, but since
+they're closed, the default open-only views never show them anyway.

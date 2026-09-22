@@ -112,7 +112,10 @@ type API struct {
 	TimeseriesMaxDays      int
 	PriorityParamMaxLength int
 	StatusParamMaxLength   int
-	AbtTeamParamMaxLength  int
+	// AbtTeamParamMaxLength should stay at least as large as
+	// ingest.maxABTTeamLen: lowering it below that cap makes stored team
+	// names longer than the new limit permanently unfilterable.
+	AbtTeamParamMaxLength int
 }
 
 // Readiness holds GET /readyz's tuning: the DB ping deadline, how long a
