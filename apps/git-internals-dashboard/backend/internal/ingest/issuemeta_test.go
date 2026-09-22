@@ -36,8 +36,8 @@ func TestExtractIssueMeta(t *testing.T) {
 			body: strings.Join([]string{
 				"Product : wso2is-5.11.0",
 				"Update level : undefined",
-				"WSO2 case id : SCBSINGAPORESUB-516",
-				"Case number : CS0274557",
+				"WSO2 case id : EXAMPLECASE-001",
+				"Case number : CS0000001",
 				"Public Git Issue : undefined",
 				"ABT Team : Atlas",
 				"Opened by : xxx@wso2.com",
