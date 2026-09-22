@@ -18,6 +18,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -265,6 +266,79 @@ func (s *announcementRequestService) ListUpdates(ctx context.Context, id string)
 		return domain.SearchAnnouncementRequestUpdatesResponse{}, err
 	}
 	return domain.SearchAnnouncementRequestUpdatesResponse{Updates: updates}, nil
+}
+
+var validAnnouncementRequestDeliveryStatus = map[domain.AnnouncementRequestDeliveryStatus]bool{
+	domain.AnnouncementRequestDeliveryStatusSucceeded: true,
+	domain.AnnouncementRequestDeliveryStatusTagFailed: true,
+	domain.AnnouncementRequestDeliveryStatusFailed:    true,
+}
+
+// RecordDeliveries implements AnnouncementRequestService. Rejects unless the
+// current state is approved -- the state Publish's own fan-out runs in,
+// before the request reaches published. Every delivery's projectId must be
+// one this request actually resolved to (current.ResolvedProjectIDs); a
+// caller recording a delivery for any other project is a bug in the caller,
+// not a legitimate partial-batch case.
+func (s *announcementRequestService) RecordDeliveries(ctx context.Context, id, actorID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) (domain.SearchAnnouncementRequestDeliveriesResponse, error) {
+	if strings.TrimSpace(actorID) == "" {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: "actorId is required"}
+	}
+	if len(deliveries) == 0 {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: "deliveries must not be empty"}
+	}
+
+	current, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, err
+	}
+	if current.State != domain.AnnouncementRequestStateApproved {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ConflictError{Msg: "deliveries can only be recorded while the request is approved, not " + string(current.State)}
+	}
+	if current.CreatedBy != actorID {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ForbiddenError{Msg: "only the request's creator can record deliveries"}
+	}
+
+	resolved := make(map[string]bool, len(current.ResolvedProjectIDs))
+	for _, p := range current.ResolvedProjectIDs {
+		resolved[p] = true
+	}
+	for i, d := range deliveries {
+		if strings.TrimSpace(d.ProjectID) == "" {
+			return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("deliveries[%d].projectId is required", i)}
+		}
+		if !resolved[d.ProjectID] {
+			return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("deliveries[%d].projectId %q is not part of this request's resolved audience", i, d.ProjectID)}
+		}
+		if !validAnnouncementRequestDeliveryStatus[d.Status] {
+			return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("deliveries[%d].status must be one of: succeeded, tag_failed, failed", i)}
+		}
+		if (d.Status == domain.AnnouncementRequestDeliveryStatusSucceeded || d.Status == domain.AnnouncementRequestDeliveryStatusTagFailed) &&
+			(d.CaseID == nil || strings.TrimSpace(*d.CaseID) == "") {
+			return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("deliveries[%d].caseId is required for status %q", i, d.Status)}
+		}
+	}
+
+	saved, err := s.repo.UpsertDeliveries(ctx, id, deliveries)
+	if err != nil {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, err
+	}
+	return domain.SearchAnnouncementRequestDeliveriesResponse{Deliveries: saved}, nil
+}
+
+// ListDeliveries implements AnnouncementRequestService.
+func (s *announcementRequestService) ListDeliveries(ctx context.Context, id string) (domain.SearchAnnouncementRequestDeliveriesResponse, error) {
+	if strings.TrimSpace(id) == "" {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, &apierror.ValidationError{Msg: "id is required"}
+	}
+	if _, err := s.repo.Get(ctx, id); err != nil {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, err
+	}
+	deliveries, err := s.repo.ListDeliveries(ctx, id)
+	if err != nil {
+		return domain.SearchAnnouncementRequestDeliveriesResponse{}, err
+	}
+	return domain.SearchAnnouncementRequestDeliveriesResponse{Deliveries: deliveries}, nil
 }
 
 func isValidAnnouncementRequestState(s domain.AnnouncementRequestState) bool {

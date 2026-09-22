@@ -132,3 +132,54 @@ export interface CreateAnnouncementRequestUpdatePayload {
 export interface SearchAnnouncementRequestUpdatesResponse {
   updates: AnnouncementRequestUpdate[];
 }
+
+/**
+ * The outcome of one project's attempt within an announcement request's own
+ * Publish fan-out. "tag_failed" (not just succeeded/failed) exists because a
+ * security announcement's case-create and its mandatory security-tag attach
+ * are two separate calls that can fail independently — a case that exists
+ * but is missing its tag must not be treated as "not sent" (a retry would
+ * create a duplicate case) or as "fully sent" (the tag is mandatory).
+ */
+export type AnnouncementRequestDeliveryStatus = "succeeded" | "tag_failed" | "failed";
+
+/**
+ * The durable record of one project's outcome within an announcement
+ * request's own Publish fan-out — see usePublishAnnouncementRequest's own
+ * doc comment for why this exists (replacing purely in-memory retry
+ * tracking that was lost if the dialog closed mid-retry).
+ */
+export interface AnnouncementRequestDelivery {
+  id: string;
+  announcementRequestId: string;
+  projectId: string;
+  /** Set for succeeded/tag_failed (the case is real either way). Null for failed. */
+  caseId?: string | null;
+  status: AnnouncementRequestDeliveryStatus;
+  errorMessage?: string | null;
+  createdOn: string;
+  updatedOn: string;
+}
+
+/** One project's outcome within a RecordAnnouncementRequestDeliveriesPayload batch. */
+export interface RecordAnnouncementRequestDeliveryEntry {
+  projectId: string;
+  /** Required for status succeeded/tag_failed. */
+  caseId?: string;
+  status: AnnouncementRequestDeliveryStatus;
+  errorMessage?: string;
+}
+
+/**
+ * One Publish fan-out pass's worth of per-project outcomes — one entry per
+ * project attempted in that pass, not the full resolved audience (a pass
+ * that only retried failures need not resend every already-succeeded
+ * project's own unchanged row).
+ */
+export interface RecordAnnouncementRequestDeliveriesPayload {
+  deliveries: RecordAnnouncementRequestDeliveryEntry[];
+}
+
+export interface SearchAnnouncementRequestDeliveriesResponse {
+  deliveries: AnnouncementRequestDelivery[];
+}

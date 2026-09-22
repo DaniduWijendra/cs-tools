@@ -43,11 +43,14 @@ type mockEntityAnnouncementRequestClient struct {
 	publishFn                 func(ctx context.Context, id string, body []byte) ([]byte, error)
 	createUpdateFn            func(ctx context.Context, id string, body []byte) ([]byte, error)
 	listUpdatesFn             func(ctx context.Context, id string) ([]byte, error)
+	recordDeliveriesFn        func(ctx context.Context, id string, body []byte) ([]byte, error)
+	listDeliveriesFn          func(ctx context.Context, id string) ([]byte, error)
 
 	gotApproveBody               []byte
 	gotPublishBody               []byte
 	gotSubmitBody                []byte
 	gotCreateUpdateBody          []byte
+	gotRecordDeliveriesBody      []byte
 	searchProjectsCalls          int
 	searchProjectsByVersionCalls int
 }
@@ -142,6 +145,21 @@ func (m *mockEntityAnnouncementRequestClient) ListAnnouncementRequestUpdates(ctx
 	return []byte(`{"updates":[]}`), nil
 }
 
+func (m *mockEntityAnnouncementRequestClient) RecordAnnouncementRequestDeliveries(ctx context.Context, id string, body []byte) ([]byte, error) {
+	m.gotRecordDeliveriesBody = body
+	if m.recordDeliveriesFn != nil {
+		return m.recordDeliveriesFn(ctx, id, body)
+	}
+	return body, nil
+}
+
+func (m *mockEntityAnnouncementRequestClient) ListAnnouncementRequestDeliveries(ctx context.Context, id string) ([]byte, error) {
+	if m.listDeliveriesFn != nil {
+		return m.listDeliveriesFn(ctx, id)
+	}
+	return []byte(`{"deliveries":[]}`), nil
+}
+
 const testAnnouncementRequestID = "11111111-1111-1111-1111-111111111111"
 
 // ----- auth required -----
@@ -166,6 +184,8 @@ func TestAnnouncementRequestHandler_RequiresAuth(t *testing.T) {
 		{"publish", http.MethodPost, "/announcement-requests/" + testAnnouncementRequestID + "/publish", "", h.PublishAnnouncementRequest},
 		{"create-update", http.MethodPost, "/announcement-requests/" + testAnnouncementRequestID + "/updates", `{"content":"x"}`, h.CreateAnnouncementRequestUpdate},
 		{"list-updates", http.MethodGet, "/announcement-requests/" + testAnnouncementRequestID + "/updates", "", h.ListAnnouncementRequestUpdates},
+		{"record-deliveries", http.MethodPost, "/announcement-requests/" + testAnnouncementRequestID + "/deliveries", `{"deliveries":[{"projectId":"p-1","status":"succeeded","caseId":"case-1"}]}`, h.RecordAnnouncementRequestDeliveries},
+		{"list-deliveries", http.MethodGet, "/announcement-requests/" + testAnnouncementRequestID + "/deliveries", "", h.ListAnnouncementRequestDeliveries},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -487,6 +507,90 @@ func TestListAnnouncementRequestUpdates_Passthrough(t *testing.T) {
 	h.ListAnnouncementRequestUpdates(w, r)
 	assertStatus(t, w, http.StatusOK)
 	if !strings.Contains(w.Body.String(), `"first"`) {
+		t.Fatalf("expected the upstream response forwarded, got %s", w.Body.String())
+	}
+}
+
+// ----- RecordAnnouncementRequestDeliveries / ListAnnouncementRequestDeliveries -----
+
+func TestRecordAnnouncementRequestDeliveries_ForwardsDeliveriesAndForcesActorID(t *testing.T) {
+	client := &mockEntityAnnouncementRequestClient{}
+	h := NewAnnouncementRequestHandler(client, nil)
+	r := withUser(httptest.NewRequest(http.MethodPost, "/announcement-requests/"+testAnnouncementRequestID+"/deliveries",
+		strings.NewReader(`{"deliveries":[{"projectId":"p-1","status":"succeeded","caseId":"case-1"}],"actorId":"someone-else"}`)))
+	r.SetPathValue("id", testAnnouncementRequestID)
+	w := httptest.NewRecorder()
+	h.RecordAnnouncementRequestDeliveries(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	var got struct {
+		ActorID    string `json:"actorId"`
+		Deliveries []struct {
+			ProjectID string `json:"projectId"`
+			Status    string `json:"status"`
+			CaseID    string `json:"caseId"`
+		} `json:"deliveries"`
+	}
+	if err := json.Unmarshal(client.gotRecordDeliveriesBody, &got); err != nil {
+		t.Fatalf("decode forwarded body: %v", err)
+	}
+	if got.ActorID != testUser.UserID {
+		t.Fatalf("actorId = %q, want the authenticated caller %q, not the client-supplied value", got.ActorID, testUser.UserID)
+	}
+	if len(got.Deliveries) != 1 || got.Deliveries[0].ProjectID != "p-1" || got.Deliveries[0].Status != "succeeded" || got.Deliveries[0].CaseID != "case-1" {
+		t.Fatalf("expected deliveries forwarded unchanged, got %+v", got.Deliveries)
+	}
+}
+
+func TestRecordAnnouncementRequestDeliveries_RejectsEmptyDeliveries(t *testing.T) {
+	client := &mockEntityAnnouncementRequestClient{}
+	h := NewAnnouncementRequestHandler(client, nil)
+	r := withUser(httptest.NewRequest(http.MethodPost, "/announcement-requests/"+testAnnouncementRequestID+"/deliveries", strings.NewReader(`{"deliveries":[]}`)))
+	r.SetPathValue("id", testAnnouncementRequestID)
+	w := httptest.NewRecorder()
+	h.RecordAnnouncementRequestDeliveries(w, r)
+	assertStatus(t, w, http.StatusBadRequest)
+	if client.gotRecordDeliveriesBody != nil {
+		t.Fatal("expected the entity client never to be called for empty deliveries")
+	}
+}
+
+func TestRecordAnnouncementRequestDeliveries_RejectsMissingProjectIdOrStatus(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing projectId": `{"deliveries":[{"status":"failed"}]}`,
+		"missing status":    `{"deliveries":[{"projectId":"p-1"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &mockEntityAnnouncementRequestClient{}
+			h := NewAnnouncementRequestHandler(client, nil)
+			r := withUser(httptest.NewRequest(http.MethodPost, "/announcement-requests/"+testAnnouncementRequestID+"/deliveries", strings.NewReader(body)))
+			r.SetPathValue("id", testAnnouncementRequestID)
+			w := httptest.NewRecorder()
+			h.RecordAnnouncementRequestDeliveries(w, r)
+			assertStatus(t, w, http.StatusBadRequest)
+			if client.gotRecordDeliveriesBody != nil {
+				t.Fatal("expected the entity client never to be called for an incomplete delivery")
+			}
+		})
+	}
+}
+
+func TestListAnnouncementRequestDeliveries_Passthrough(t *testing.T) {
+	client := &mockEntityAnnouncementRequestClient{
+		listDeliveriesFn: func(ctx context.Context, id string) ([]byte, error) {
+			if id != testAnnouncementRequestID {
+				t.Fatalf("id = %q, want %q", id, testAnnouncementRequestID)
+			}
+			return []byte(`{"deliveries":[{"id":"d-1","projectId":"p-1","status":"succeeded"}]}`), nil
+		},
+	}
+	h := NewAnnouncementRequestHandler(client, nil)
+	r := withUser(httptest.NewRequest(http.MethodGet, "/announcement-requests/"+testAnnouncementRequestID+"/deliveries", nil))
+	r.SetPathValue("id", testAnnouncementRequestID)
+	w := httptest.NewRecorder()
+	h.ListAnnouncementRequestDeliveries(w, r)
+	assertStatus(t, w, http.StatusOK)
+	if !strings.Contains(w.Body.String(), `"d-1"`) {
 		t.Fatalf("expected the upstream response forwarded, got %s", w.Body.String())
 	}
 }

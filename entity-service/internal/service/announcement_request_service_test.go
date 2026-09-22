@@ -65,6 +65,14 @@ type fakeAnnouncementRequestRepo struct {
 
 	gotListUpdatesID  string
 	listUpdatesResult []domain.AnnouncementRequestUpdate
+
+	gotUpsertDeliveriesID  string
+	gotUpsertDeliveriesReq []domain.RecordAnnouncementRequestDeliveryInput
+	upsertDeliveriesResult []domain.AnnouncementRequestDelivery
+	upsertDeliveriesErr    error
+
+	gotListDeliveriesID  string
+	listDeliveriesResult []domain.AnnouncementRequestDelivery
 }
 
 func (f *fakeAnnouncementRequestRepo) Create(_ context.Context, req domain.CreateAnnouncementRequestRequest) (domain.AnnouncementRequest, error) {
@@ -133,6 +141,33 @@ func (f *fakeAnnouncementRequestRepo) CreateUpdate(_ context.Context, announceme
 func (f *fakeAnnouncementRequestRepo) ListUpdates(_ context.Context, announcementRequestID string) ([]domain.AnnouncementRequestUpdate, error) {
 	f.gotListUpdatesID = announcementRequestID
 	return f.listUpdatesResult, nil
+}
+
+func (f *fakeAnnouncementRequestRepo) UpsertDeliveries(_ context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error) {
+	f.gotUpsertDeliveriesID = announcementRequestID
+	f.gotUpsertDeliveriesReq = deliveries
+	if f.upsertDeliveriesErr != nil {
+		return nil, f.upsertDeliveriesErr
+	}
+	if f.upsertDeliveriesResult != nil {
+		return f.upsertDeliveriesResult, nil
+	}
+	result := make([]domain.AnnouncementRequestDelivery, len(deliveries))
+	for i, d := range deliveries {
+		result[i] = domain.AnnouncementRequestDelivery{
+			AnnouncementRequestID: announcementRequestID,
+			ProjectID:             d.ProjectID,
+			CaseID:                d.CaseID,
+			Status:                d.Status,
+			ErrorMessage:          d.ErrorMessage,
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeAnnouncementRequestRepo) ListDeliveries(_ context.Context, announcementRequestID string) ([]domain.AnnouncementRequestDelivery, error) {
+	f.gotListDeliveriesID = announcementRequestID
+	return f.listDeliveriesResult, nil
 }
 
 func TestAnnouncementRequestService_CreateDraft(t *testing.T) {
@@ -638,6 +673,177 @@ func TestAnnouncementRequestService_Search(t *testing.T) {
 		}
 		if resp.Total != 5 {
 			t.Fatalf("expected total forwarded unchanged, got %d", resp.Total)
+		}
+	})
+}
+
+func TestAnnouncementRequestService_RecordDeliveries(t *testing.T) {
+	t.Run("accepts from approved when the actor is the creator", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+			State:              domain.AnnouncementRequestStateApproved,
+			CreatedBy:          "user-3",
+			ResolvedProjectIDs: []string{"proj-1", "proj-2"},
+		}}
+		svc := NewAnnouncementRequestService(repo)
+		caseID := "case-1"
+		resp, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+			{ProjectID: "proj-1", CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if repo.gotUpsertDeliveriesID != "req-1" {
+			t.Fatalf("expected the id forwarded to the repo, got %q", repo.gotUpsertDeliveriesID)
+		}
+		if len(repo.gotUpsertDeliveriesReq) != 1 || repo.gotUpsertDeliveriesReq[0].ProjectID != "proj-1" {
+			t.Fatalf("expected the deliveries forwarded to the repo, got %+v", repo.gotUpsertDeliveriesReq)
+		}
+		if len(resp.Deliveries) != 1 {
+			t.Fatalf("expected the saved deliveries on the result, got %+v", resp)
+		}
+	})
+
+	t.Run("rejects an empty deliveries list", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+			State: domain.AnnouncementRequestStateApproved, CreatedBy: "user-3",
+		}}
+		svc := NewAnnouncementRequestService(repo)
+		_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", nil)
+		var ve *apierror.ValidationError
+		if !isValidationError(err, &ve) {
+			t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("rejects a delivery for a project outside the resolved audience", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+			State:              domain.AnnouncementRequestStateApproved,
+			CreatedBy:          "user-3",
+			ResolvedProjectIDs: []string{"proj-1"},
+		}}
+		svc := NewAnnouncementRequestService(repo)
+		caseID := "case-1"
+		_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+			{ProjectID: "proj-not-resolved", CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded},
+		})
+		var ve *apierror.ValidationError
+		if !isValidationError(err, &ve) {
+			t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("rejects succeeded/tag_failed with no caseId", func(t *testing.T) {
+		for _, status := range []domain.AnnouncementRequestDeliveryStatus{
+			domain.AnnouncementRequestDeliveryStatusSucceeded,
+			domain.AnnouncementRequestDeliveryStatusTagFailed,
+		} {
+			t.Run(string(status), func(t *testing.T) {
+				repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+					State:              domain.AnnouncementRequestStateApproved,
+					CreatedBy:          "user-3",
+					ResolvedProjectIDs: []string{"proj-1"},
+				}}
+				svc := NewAnnouncementRequestService(repo)
+				_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+					{ProjectID: "proj-1", Status: status},
+				})
+				var ve *apierror.ValidationError
+				if !isValidationError(err, &ve) {
+					t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+				}
+			})
+		}
+	})
+
+	// A delivery with status "failed" and no caseId is the normal shape for a
+	// case-create that never succeeded — must not be rejected the way
+	// succeeded/tag_failed are above.
+	t.Run("accepts failed with no caseId", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+			State:              domain.AnnouncementRequestStateApproved,
+			CreatedBy:          "user-3",
+			ResolvedProjectIDs: []string{"proj-1"},
+		}}
+		svc := NewAnnouncementRequestService(repo)
+		errMsg := "downstream timeout"
+		_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+			{ProjectID: "proj-1", Status: domain.AnnouncementRequestDeliveryStatusFailed, ErrorMessage: &errMsg},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects a non-creator actor", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+			State:              domain.AnnouncementRequestStateApproved,
+			CreatedBy:          "user-1",
+			ResolvedProjectIDs: []string{"proj-1"},
+		}}
+		svc := NewAnnouncementRequestService(repo)
+		caseID := "case-1"
+		_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+			{ProjectID: "proj-1", CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded},
+		})
+		if _, ok := err.(*apierror.ForbiddenError); !ok {
+			t.Fatalf("expected *apierror.ForbiddenError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("rejects from any state other than approved", func(t *testing.T) {
+		for _, state := range []domain.AnnouncementRequestState{
+			domain.AnnouncementRequestStateDraft,
+			domain.AnnouncementRequestStatePendingApproval,
+			domain.AnnouncementRequestStatePublished,
+		} {
+			t.Run(string(state), func(t *testing.T) {
+				repo := &fakeAnnouncementRequestRepo{getResult: domain.AnnouncementRequest{
+					State: state, CreatedBy: "user-3", ResolvedProjectIDs: []string{"proj-1"},
+				}}
+				svc := NewAnnouncementRequestService(repo)
+				caseID := "case-1"
+				_, err := svc.RecordDeliveries(context.Background(), "req-1", "user-3", []domain.RecordAnnouncementRequestDeliveryInput{
+					{ProjectID: "proj-1", CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded},
+				})
+				if err == nil {
+					t.Fatalf("expected a conflict error recording deliveries from state %q, got nil", state)
+				}
+			})
+		}
+	})
+}
+
+func TestAnnouncementRequestService_ListDeliveries(t *testing.T) {
+	t.Run("returns the repo's deliveries for an existing request", func(t *testing.T) {
+		want := []domain.AnnouncementRequestDelivery{
+			{ID: "d-1", ProjectID: "proj-1", Status: domain.AnnouncementRequestDeliveryStatusSucceeded},
+		}
+		repo := &fakeAnnouncementRequestRepo{
+			getResult:            domain.AnnouncementRequest{ID: "req-1", State: domain.AnnouncementRequestStateApproved},
+			listDeliveriesResult: want,
+		}
+		svc := NewAnnouncementRequestService(repo)
+		resp, err := svc.ListDeliveries(context.Background(), "req-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if repo.gotListDeliveriesID != "req-1" {
+			t.Fatalf("expected the id forwarded to the repo, got %q", repo.gotListDeliveriesID)
+		}
+		if len(resp.Deliveries) != 1 || resp.Deliveries[0].ID != "d-1" {
+			t.Fatalf("expected the repo's deliveries on the result, got %+v", resp.Deliveries)
+		}
+	})
+
+	t.Run("returns NotFoundError for a nonexistent request without calling ListDeliveries", func(t *testing.T) {
+		repo := &fakeAnnouncementRequestRepo{getErr: &apierror.NotFoundError{Msg: "announcement request not found: req-1"}}
+		svc := NewAnnouncementRequestService(repo)
+		_, err := svc.ListDeliveries(context.Background(), "req-1")
+		if _, ok := err.(*apierror.NotFoundError); !ok {
+			t.Fatalf("expected *apierror.NotFoundError, got %T: %v", err, err)
+		}
+		if repo.gotListDeliveriesID != "" {
+			t.Fatal("expected ListDeliveries not to be called for a nonexistent request")
 		}
 	})
 }

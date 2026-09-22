@@ -67,6 +67,13 @@ type AnnouncementRequestRepository interface {
 	CreateUpdate(ctx context.Context, announcementRequestID, content, createdBy string) (domain.AnnouncementRequestUpdate, error)
 	// ListUpdates returns every update for announcementRequestID, newest first.
 	ListUpdates(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestUpdate, error)
+	// UpsertDeliveries records (inserts or overwrites) one delivery row per
+	// input, keyed on (announcementRequestID, projectID) — see
+	// announcement_request_deliveries' own migration doc comment for why
+	// this is an upsert rather than a plain insert.
+	UpsertDeliveries(ctx context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error)
+	// ListDeliveries returns every delivery recorded for announcementRequestID.
+	ListDeliveries(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestDelivery, error)
 }
 
 type announcementRequestRepo struct {
@@ -427,4 +434,91 @@ func (r *announcementRequestRepo) ListUpdates(ctx context.Context, announcementR
 		return nil, fmt.Errorf("iterate announcement_request_updates: %w", err)
 	}
 	return updates, nil
+}
+
+// announcementRequestDeliveryColumns is the column list shared by every
+// query returning a full delivery row, kept in one place so it can't drift
+// out of sync with scanAnnouncementRequestDelivery's field order.
+const announcementRequestDeliveryColumns = `
+	id, announcement_request_id, project_id, case_id, status, error_message, created_on, updated_on`
+
+func scanAnnouncementRequestDelivery(row pgx.Row) (domain.AnnouncementRequestDelivery, error) {
+	var d domain.AnnouncementRequestDelivery
+	if err := row.Scan(
+		&d.ID, &d.AnnouncementRequestID, &d.ProjectID, &d.CaseID, &d.Status, &d.ErrorMessage,
+		&d.CreatedOn, &d.UpdatedOn,
+	); err != nil {
+		return domain.AnnouncementRequestDelivery{}, err
+	}
+	return d, nil
+}
+
+// UpsertDeliveries implements AnnouncementRequestRepository. Runs every
+// input's upsert inside one transaction — a Publish fan-out pass either
+// records completely or not at all, never a partial batch that could leave
+// this table disagreeing with what the caller's own in-memory tally says
+// happened for that same pass.
+func (r *announcementRequestRepo) UpsertDeliveries(ctx context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error) {
+	if len(deliveries) == 0 {
+		return nil, nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("upsert announcement_request_deliveries: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		INSERT INTO announcement_request_deliveries
+			(announcement_request_id, project_id, case_id, status, error_message)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (announcement_request_id, project_id) DO UPDATE SET
+			case_id = EXCLUDED.case_id,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message,
+			updated_on = NOW()
+		RETURNING ` + announcementRequestDeliveryColumns
+
+	results := make([]domain.AnnouncementRequestDelivery, 0, len(deliveries))
+	for _, d := range deliveries {
+		row, err := scanAnnouncementRequestDelivery(tx.QueryRow(ctx, query,
+			announcementRequestID, d.ProjectID, d.CaseID, d.Status, d.ErrorMessage,
+		))
+		if err != nil {
+			return nil, fmt.Errorf("upsert announcement_request_delivery for project %s: %w", d.ProjectID, err)
+		}
+		results = append(results, row)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("upsert announcement_request_deliveries: commit: %w", err)
+	}
+	return results, nil
+}
+
+// ListDeliveries implements AnnouncementRequestRepository.
+func (r *announcementRequestRepo) ListDeliveries(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestDelivery, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT `+announcementRequestDeliveryColumns+`
+		 FROM announcement_request_deliveries
+		 WHERE announcement_request_id = $1
+		 ORDER BY created_on`, announcementRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("list announcement_request_deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	deliveries := []domain.AnnouncementRequestDelivery{}
+	for rows.Next() {
+		d, err := scanAnnouncementRequestDelivery(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan announcement_request_delivery: %w", err)
+		}
+		deliveries = append(deliveries, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate announcement_request_deliveries: %w", err)
+	}
+	return deliveries, nil
 }

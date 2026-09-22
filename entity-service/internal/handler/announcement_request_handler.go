@@ -180,3 +180,29 @@ func (h *AnnouncementRequestHandler) ListAnnouncementRequestUpdates(w http.Respo
 	}
 	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
 }
+
+// RecordAnnouncementRequestDeliveries handles
+// POST /announcement-requests/{id}/deliveries.
+func (h *AnnouncementRequestHandler) RecordAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	var req domain.RecordAnnouncementRequestDeliveriesRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	resp, err := h.svc.RecordDeliveries(r.Context(), r.PathValue("id"), req.ActorID, req.Deliveries)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
+
+// ListAnnouncementRequestDeliveries handles
+// GET /announcement-requests/{id}/deliveries.
+func (h *AnnouncementRequestHandler) ListAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.ListDeliveries(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
