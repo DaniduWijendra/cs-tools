@@ -51,14 +51,14 @@ import {
   type ColumnOption,
 } from "@hooks/useColumnPreferences";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
-import { useSearchAnnouncements } from "@features/csm-announcements/api/useSearchAnnouncements";
+import { useSearchAnnouncementRegistry } from "@features/csm-announcements/api/useSearchAnnouncementRegistry";
 import { useSearchAnnouncementRequests } from "@features/csm-announcements/api/useSearchAnnouncementRequests";
 import AnnouncementRequestDialog from "@features/csm-announcements/components/AnnouncementRequestDialog";
 import {
   DEFAULT_ANNOUNCEMENT_FILTERS,
   type AnnouncementFilters,
-  type CsmAnnouncementRow,
 } from "@features/csm-announcements/types/csmAnnouncements";
+import type { AnnouncementRegistryRow } from "@features/csm-announcements/types/announcementRegistry";
 import type { AnnouncementRequestState } from "@features/csm-announcements/types/announcementRequests";
 import { announcementStateRole } from "@features/csm-announcements/utils/announcementState";
 import { STATE_LABEL } from "@features/csm-dashboard/utils/abtDashboard";
@@ -160,17 +160,23 @@ function formatDate(value?: string | null): string {
   );
 }
 
-function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow): ReactNode {
+// row.kind decides what each column actually shows: a "case" row is exactly
+// what CsmAnnouncementRow used to render (one case, one project, one state);
+// a "batch" row represents every case a published announcement created
+// collapsed into one row, so columns with no single-value meaning across a
+// batch (Number, Reference, State) show "—", and Project shows the count
+// instead of a single project name.
+function renderRegistryCell(id: AnnouncementColumnId, row: AnnouncementRegistryRow): ReactNode {
   switch (id) {
     case "number":
-      return a.number || "—";
+      return row.kind === "case" ? row.caseNumber || "—" : "—";
     case "wso2CaseId":
-      return a.wso2CaseId || "—";
+      return row.kind === "case" ? row.wso2CaseId || "—" : "—";
     case "subject":
       return (
         <Typography
           variant="body2"
-          title={a.subject}
+          title={row.subject}
           sx={{
             display: "-webkit-box",
             WebkitLineClamp: 2,
@@ -178,27 +184,32 @@ function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow)
             overflow: "hidden",
           }}
         >
-          {a.subject}
+          {row.subject}
         </Typography>
       );
     case "project":
-      return a.projectName;
+      return row.kind === "batch"
+        ? `${row.projectCount ?? 0} project${row.projectCount === 1 ? "" : "s"}`
+        : row.projectName;
     case "state":
-      return a.state ? (
+      if (row.kind === "batch") {
+        return <SemanticChip role="success" label="Published" variant="outlined" />;
+      }
+      return row.state ? (
         <SemanticChip
-          role={announcementStateRole(a.state)}
-          label={STATE_LABEL[a.state] ?? a.state}
+          role={announcementStateRole(row.state as CaseState)}
+          label={STATE_LABEL[row.state as CaseState] ?? row.state}
           variant="outlined"
         />
       ) : (
         "—"
       );
     case "createdBy":
-      return a.createdBy || "—";
+      return row.createdBy || "—";
     case "createdAt":
-      return formatDate(a.createdAt);
+      return formatDate(row.createdOn);
     case "updatedAt":
-      return formatDate(a.updatedAt);
+      return formatDate(row.updatedOn);
   }
 }
 
@@ -226,9 +237,9 @@ export default function CsmAnnouncementsPage(): JSX.Element {
   const debouncedSearch = useDebouncedValue(filters.search.trim(), 300);
 
   const { data, isLoading, isFetching, isError, error, refetch, dataUpdatedAt } =
-    useSearchAnnouncements({ ...filters, search: debouncedSearch }, page, rowsPerPage);
+    useSearchAnnouncementRegistry({ ...filters, search: debouncedSearch }, page, rowsPerPage);
 
-  const announcements = data?.announcements ?? [];
+  const registryRows = data?.rows ?? [];
   const total = data?.total ?? 0;
 
   const [pendingState, setPendingState] = useState<AnnouncementRequestState>("pending_approval");
@@ -413,7 +424,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                     />
                   </TableCell>
                 </TableRow>
-              ) : announcements.length === 0 ? (
+              ) : registryRows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={visibleColumnIds.length} align="center" sx={{ py: 4 }}>
                     <Typography variant="body2" color="text.secondary">
@@ -422,41 +433,86 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                   </TableCell>
                 </TableRow>
               ) : (
-                announcements.map((a) => (
-                  // A real anchor (not a click-handler row) so it supports
-                  // cmd/middle-click "open in new tab" and exposes a copyable
-                  // URL — same rationale as CasesList's row links (ISSU-031).
-                  <TableRow
-                    key={a.id}
-                    hover
-                    component={RouterLink}
-                    to={`/announcements/${a.id}`}
-                    sx={{
-                      cursor: "pointer",
-                      textDecoration: "none",
-                      color: "inherit",
-                      "&:focus-visible": {
-                        outline: (t) => `2px solid ${t.palette.primary.main}`,
-                        outlineOffset: -2,
-                      },
-                    }}
-                  >
-                    {visibleColumnIds.map((id) => (
-                      <TableCell
-                        key={id}
-                        sx={
-                          id === "subject"
-                            ? { width: "28%", maxWidth: 360 }
-                            : id === "updatedAt" || id === "createdAt"
-                              ? { whiteSpace: "nowrap" }
-                              : undefined
+                registryRows.map((row) =>
+                  // A "case" row is an individual case with no owning
+                  // announcement request — a real anchor (not a click-handler
+                  // row) so it supports cmd/middle-click "open in new tab" and
+                  // exposes a copyable URL, same rationale as CasesList's row
+                  // links (ISSU-031). A "batch" row represents every case a
+                  // published announcement request created collapsed into
+                  // one row — clicking it opens that request's own dialog
+                  // (the same one the Pending tab already uses) rather than
+                  // navigating to any single case.
+                  row.kind === "case" ? (
+                    <TableRow
+                      key={`case-${row.caseId}`}
+                      hover
+                      component={RouterLink}
+                      to={`/announcements/${row.caseId}`}
+                      sx={{
+                        cursor: "pointer",
+                        textDecoration: "none",
+                        color: "inherit",
+                        "&:focus-visible": {
+                          outline: (t) => `2px solid ${t.palette.primary.main}`,
+                          outlineOffset: -2,
+                        },
+                      }}
+                    >
+                      {visibleColumnIds.map((id) => (
+                        <TableCell
+                          key={id}
+                          sx={
+                            id === "subject"
+                              ? { width: "28%", maxWidth: 360 }
+                              : id === "updatedAt" || id === "createdAt"
+                                ? { whiteSpace: "nowrap" }
+                                : undefined
+                          }
+                        >
+                          {renderRegistryCell(id, row)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ) : (
+                    <TableRow
+                      key={`batch-${row.announcementRequestId}`}
+                      hover
+                      onClick={() => setSelectedRequestId(row.announcementRequestId ?? null)}
+                      onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelectedRequestId(row.announcementRequestId ?? null);
                         }
-                      >
-                        {renderAnnouncementCell(id, a)}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))
+                      }}
+                      tabIndex={0}
+                      aria-label={`View announcement request: ${row.subject || "(no subject)"}`}
+                      sx={{
+                        cursor: "pointer",
+                        "&:focus-visible": {
+                          outline: "2px solid",
+                          outlineColor: "primary.main",
+                          outlineOffset: -2,
+                        },
+                      }}
+                    >
+                      {visibleColumnIds.map((id) => (
+                        <TableCell
+                          key={id}
+                          sx={
+                            id === "subject"
+                              ? { width: "28%", maxWidth: 360 }
+                              : id === "updatedAt" || id === "createdAt"
+                                ? { whiteSpace: "nowrap" }
+                                : undefined
+                          }
+                        >
+                          {renderRegistryCell(id, row)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ),
+                )
               )}
             </TableBody>
           </Table>

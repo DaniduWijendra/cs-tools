@@ -114,6 +114,7 @@ export const ApiQueryKeys = {
   CSM_ABT_DASHBOARD: "csm-abt-dashboard",
   CSM_CASES: "csm-cases",
   CSM_ANNOUNCEMENTS: "csm-announcements",
+  CSM_ANNOUNCEMENT_REGISTRY: "csm-announcement-registry",
   CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS: "csm-announcement-excluded-project-keys",
   ANNOUNCEMENT_REQUEST_DETAIL: "announcement-request-detail",
   ANNOUNCEMENT_REQUESTS_SEARCH: "announcement-requests-search",

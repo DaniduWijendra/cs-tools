@@ -2089,6 +2089,49 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /announcements/registry/search:
+    post:
+      summary: The Announcements tab's own grouped registry list (Phase 3 "registry groups by batch").
+      description: >-
+        Returns one row per announcement (a "batch" row, for a published
+        announcement request — every case it created collapses into this one
+        row) or one row per case with no known owning request (anything
+        sent before this workflow existed, or via any other path — shown
+        individually, not dropped). Pagination applies to this grouped row
+        list, not the raw per-case list underneath it.
+      operationId: searchAnnouncementRegistry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchAnnouncementRegistryPayload'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRegistryResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError — including when the underlying case or announcement-request set is too large to group safely.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /announcement-requests/{id}:
     get:
       summary: Get one announcement request by id.
@@ -13195,6 +13238,80 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AnnouncementRequest'
+
+    SearchAnnouncementRegistryPayload:
+      type: object
+      required: [pagination]
+      additionalProperties: false
+      properties:
+        search:
+          type: string
+        states:
+          type: array
+          items:
+            type: string
+        projectIds:
+          type: array
+          items:
+            type: string
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    AnnouncementRegistryRow:
+      type: object
+      description: One row of the grouped registry — see kind for which other fields are populated.
+      properties:
+        kind:
+          type: string
+          enum: [batch, case]
+        subject:
+          type: string
+        createdBy:
+          type: string
+        createdOn:
+          type: string
+          format: date-time
+        updatedOn:
+          type: string
+          format: date-time
+        announcementRequestId:
+          type: string
+          format: uuid
+          description: Set for kind=batch only.
+        projectCount:
+          type: integer
+          description: Set for kind=batch only.
+        caseId:
+          type: string
+          description: Set for kind=case only.
+        caseNumber:
+          type: string
+          description: Set for kind=case only.
+        wso2CaseId:
+          type: string
+          description: Project-scoped WSO2 case reference (case internalId). Set for kind=case only.
+        state:
+          type: string
+          description: The underlying case's own state. Set for kind=case only.
+        projectName:
+          type: string
+          description: Set for kind=case only.
+
+    SearchAnnouncementRegistryResponse:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnnouncementRegistryRow'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        hasMore:
+          type: boolean
         total:
           type: integer
         limit:

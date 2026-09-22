@@ -25,9 +25,9 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router";
 import "@testing-library/jest-dom/vitest";
 import CsmAnnouncementsPage from "@features/csm-announcements/pages/CsmAnnouncementsPage";
-import { useSearchAnnouncements } from "@features/csm-announcements/api/useSearchAnnouncements";
+import { useSearchAnnouncementRegistry } from "@features/csm-announcements/api/useSearchAnnouncementRegistry";
 import { useSearchAnnouncementRequests } from "@features/csm-announcements/api/useSearchAnnouncementRequests";
-import type { CsmAnnouncementRow } from "@features/csm-announcements/types/csmAnnouncements";
+import type { AnnouncementRegistryRow } from "@features/csm-announcements/types/announcementRegistry";
 import type { AnnouncementRequest } from "@features/csm-announcements/types/announcementRequests";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
 
@@ -40,8 +40,8 @@ vi.mock("@api/backend/client", () => ({
   useBackendApi: () => ({ post: vi.fn() }),
 }));
 
-vi.mock("@features/csm-announcements/api/useSearchAnnouncements", () => ({
-  useSearchAnnouncements: vi.fn(),
+vi.mock("@features/csm-announcements/api/useSearchAnnouncementRegistry", () => ({
+  useSearchAnnouncementRegistry: vi.fn(),
 }));
 
 vi.mock("@features/csm-announcements/api/useSearchAnnouncementRequests", () => ({
@@ -76,31 +76,47 @@ vi.mock("@hooks/useIdTokenClaims", () => ({
   useIdTokenClaims: () => ({ email: "user@example.test" }),
 }));
 
-const mockedUseSearch = vi.mocked(useSearchAnnouncements);
+const mockedUseSearch = vi.mocked(useSearchAnnouncementRegistry);
 const mockedUseSearchRequests = vi.mocked(useSearchAnnouncementRequests);
 // Number, Reference, Subject, Project, State, Created by, Created, Updated.
 const ANNOUNCEMENT_COLUMN_COUNT = 8;
 
-/** `CsmAnnouncementsPage` renders a `RouterLink` per row, so every render
- * here needs router context. `initialPath` lets a test land on a specific
- * URL (e.g. `?tab=pending`, the create form's post-save redirect target). */
+/** `CsmAnnouncementsPage` renders a `RouterLink` per "case" row, so every
+ * render here needs router context. `initialPath` lets a test land on a
+ * specific URL (e.g. `?tab=pending`, the create form's post-save redirect
+ * target). */
 function render(ui: ReactElement, initialPath = "/"): ReturnType<typeof rtlRender> {
   return rtlRender(<MemoryRouter initialEntries={[initialPath]}>{ui}</MemoryRouter>);
 }
 
-const ROW: CsmAnnouncementRow = {
-  id: "a-1",
-  number: "ANN-1001",
+// kind="case" — an announcement-type case with no owning request, rendered
+// individually exactly like the old flat `CsmAnnouncementRow` list did.
+const ROW: AnnouncementRegistryRow = {
+  kind: "case",
+  caseId: "a-1",
+  caseNumber: "ANN-1001",
   subject: "Scheduled maintenance on Choreo",
   projectName: "IAM Production",
   state: "open",
   createdBy: "jane@example.com",
-  createdAt: "2026-07-01T10:00:00Z",
-  updatedAt: "2026-07-02T10:00:00Z",
+  createdOn: "2026-07-01T10:00:00Z",
+  updatedOn: "2026-07-02T10:00:00Z",
+};
+
+// kind="batch" — a published announcement request; every case it created
+// collapses into this one row.
+const BATCH_ROW: AnnouncementRegistryRow = {
+  kind: "batch",
+  announcementRequestId: "req-batch-1",
+  subject: "Upcoming maintenance window",
+  projectCount: 3,
+  createdBy: "jane@example.com",
+  createdOn: "2026-07-01T10:00:00Z",
+  updatedOn: "2026-07-01T10:00:00Z",
 };
 
 function mockResult(
-  overrides: Partial<ReturnType<typeof useSearchAnnouncements>>,
+  overrides: Partial<ReturnType<typeof useSearchAnnouncementRegistry>>,
 ): void {
   mockedUseSearch.mockReturnValue({
     data: undefined,
@@ -109,7 +125,7 @@ function mockResult(
     isError: false,
     error: null,
     ...overrides,
-  } as unknown as ReturnType<typeof useSearchAnnouncements>);
+  } as unknown as ReturnType<typeof useSearchAnnouncementRegistry>);
 }
 
 const PENDING_REQUEST: AnnouncementRequest = {
@@ -141,7 +157,7 @@ beforeEach(() => {
 describe("CsmAnnouncementsPage — list states", () => {
   it("renders a row from the search result", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
     expect(screen.getByText("Scheduled maintenance on Choreo")).toBeInTheDocument();
@@ -151,7 +167,7 @@ describe("CsmAnnouncementsPage — list states", () => {
 
   it("shows the empty state when there are no announcements", () => {
     mockResult({
-      data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [], total: 0, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
     expect(screen.getByText(/no announcements found/i)).toBeInTheDocument();
@@ -164,10 +180,33 @@ describe("CsmAnnouncementsPage — list states", () => {
   });
 });
 
+describe("CsmAnnouncementsPage — batch rows (grouped registry)", () => {
+  it("renders a batch row's project count instead of a single project, and a Published state", () => {
+    mockResult({
+      data: { rows: [BATCH_ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+    });
+    render(<CsmAnnouncementsPage />);
+    expect(screen.getByText("Upcoming maintenance window")).toBeInTheDocument();
+    expect(screen.getByText("3 projects")).toBeInTheDocument();
+    expect(screen.getByText("Published")).toBeInTheDocument();
+  });
+
+  it("opens the request dialog (not a case route) when a batch row is clicked", () => {
+    mockResult({
+      data: { rows: [BATCH_ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+    });
+    render(<CsmAnnouncementsPage />);
+
+    fireEvent.click(screen.getByText("Upcoming maintenance window"));
+
+    expect(screen.getByText(`request dialog: ${BATCH_ROW.announcementRequestId}`)).toBeInTheDocument();
+  });
+});
+
 describe("CsmAnnouncementsPage — filters default to show-all", () => {
   it("calls the search with no state/project filters on first render", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
     const [filters] = mockedUseSearch.mock.calls[0];
@@ -178,7 +217,7 @@ describe("CsmAnnouncementsPage — filters default to show-all", () => {
 
   it("pushes a picked state into the search filters", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
 
@@ -195,7 +234,7 @@ describe("CsmAnnouncementsPage — filters default to show-all", () => {
 describe("CsmAnnouncementsPage — customise columns", () => {
   it("shows the default columns and hides Created until the user adds it", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
 
@@ -206,7 +245,7 @@ describe("CsmAnnouncementsPage — customise columns", () => {
 
   it("adds the Created column when checked in the picker, and it renders the row's createdAt", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
 
@@ -222,8 +261,8 @@ describe("CsmAnnouncementsPage — customise columns", () => {
     expect(
       screen.getByRole("columnheader", { name: "Created", hidden: true }),
     ).toBeInTheDocument();
-    // Same format the component's own formatDate() uses for createdAt/updatedAt.
-    const expectedCreatedAt = formatBackendTimestampForDisplay(ROW.createdAt, {
+    // Same format the component's own formatDate() uses for createdOn/updatedOn.
+    const expectedCreatedAt = formatBackendTimestampForDisplay(ROW.createdOn, {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -234,7 +273,7 @@ describe("CsmAnnouncementsPage — customise columns", () => {
   it("adds the Reference column when checked in the picker, and it renders the row's wso2CaseId", () => {
     mockResult({
       data: {
-        announcements: [{ ...ROW, wso2CaseId: "ACMESUB-42" }],
+        rows: [{ ...ROW, wso2CaseId: "ACMESUB-42" }],
         total: 1,
         limit: 20,
         offset: 0,
@@ -256,7 +295,7 @@ describe("CsmAnnouncementsPage — customise columns", () => {
 
   it("never lets every column be unchecked", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
 
@@ -280,7 +319,7 @@ describe("CsmAnnouncementsPage — customise columns", () => {
 describe("CsmAnnouncementsPage — Pending tab", () => {
   it("stays on the Announcements tab (and its table) by default", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     render(<CsmAnnouncementsPage />);
     expect(screen.getByText("Scheduled maintenance on Choreo")).toBeInTheDocument();
@@ -289,7 +328,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
 
   it("switches to the pending table and defaults to the Pending approval state filter", () => {
     mockResult({
-      data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
     });
     mockedUseSearchRequests.mockReturnValue({
       data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
@@ -309,7 +348,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
   });
 
   it("opens the request dialog with the clicked row's id", () => {
-    mockResult({ data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false } });
+    mockResult({ data: { rows: [], total: 0, limit: 20, offset: 0, hasMore: false } });
     mockedUseSearchRequests.mockReturnValue({
       data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
       isLoading: false,
@@ -328,7 +367,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
   });
 
   it("shows the empty state text for the selected pending state", () => {
-    mockResult({ data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false } });
+    mockResult({ data: { rows: [], total: 0, limit: 20, offset: 0, hasMore: false } });
     render(<CsmAnnouncementsPage />);
     fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
     expect(screen.getByText(/no pending approval requests/i)).toBeInTheDocument();
@@ -339,7 +378,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
   // only opens the underlying case, never this dialog) — see
   // PENDING_STATE_OPTIONS' own doc comment for the full story.
   it("can filter to Published and still open the request dialog", () => {
-    mockResult({ data: { announcements: [], total: 0, limit: 20, offset: 0, hasMore: false } });
+    mockResult({ data: { rows: [], total: 0, limit: 20, offset: 0, hasMore: false } });
     const publishedRequest: AnnouncementRequest = {
       ...PENDING_REQUEST,
       id: "req-published-1",
@@ -369,7 +408,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
   });
 
   it("lands directly on the Pending tab when opened with ?tab=pending", () => {
-    mockResult({ data: { announcements: [ROW], total: 1, limit: 20, offset: 0, hasMore: false } });
+    mockResult({ data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false } });
     mockedUseSearchRequests.mockReturnValue({
       data: { requests: [PENDING_REQUEST], total: 1, limit: 10, offset: 0, hasMore: false },
       isLoading: false,
@@ -396,7 +435,7 @@ describe("CsmAnnouncementsPage — loading and pagination", () => {
 
   it("advances the page when the next-page control is clicked", () => {
     mockResult({
-      data: { announcements: [ROW], total: 50, limit: 20, offset: 0, hasMore: true },
+      data: { rows: [ROW], total: 50, limit: 20, offset: 0, hasMore: true },
     });
     render(<CsmAnnouncementsPage />);
     fireEvent.click(screen.getByRole("button", { name: /go to next page/i }));
@@ -407,7 +446,7 @@ describe("CsmAnnouncementsPage — loading and pagination", () => {
 
   it("passes an updated page size when rows-per-page changes", () => {
     mockResult({
-      data: { announcements: [ROW], total: 50, limit: 20, offset: 0, hasMore: true },
+      data: { rows: [ROW], total: 50, limit: 20, offset: 0, hasMore: true },
     });
     render(<CsmAnnouncementsPage />);
     fireEvent.mouseDown(screen.getByRole("combobox", { name: /rows per page/i }));
