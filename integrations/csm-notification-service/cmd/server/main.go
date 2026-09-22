@@ -40,6 +40,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/recipientlinks"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/slaengine"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/timecardengine"
 )
@@ -239,7 +240,8 @@ func main() {
 	defaultChatProduct := os.Getenv("DEFAULT_CHAT_PRODUCT")
 	defaultOnCallNumber := os.Getenv("INCIDENT_DEFAULT_CALL_TO")
 
-	dispatcher := dispatch.NewDispatcher(emailClient, googleChatClient, twilioClient, linkResolver, emailSendingEnabled, emailDebugMode, emailDebugRecipients, callSendingEnabled, defaultChatProduct, defaultOnCallNumber)
+	dispatcher := dispatch.NewDispatcher(emailClient, googleChatClient, twilioClient, linkResolver, emailSendingEnabled, emailDebugMode, emailDebugRecipients, callSendingEnabled, defaultChatProduct, defaultOnCallNumber).
+		WithOnboarding(loadOnboardingConfig(customerEntityClient))
 
 	// The main consumer's OnExhausted: publish the exhausted record to the
 	// dead-letter topic instead of just logging and dropping it. The DLQ's
@@ -457,6 +459,72 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("CSM Notification Service stopped")
+}
+
+// loadOnboardingConfig wires the project_contact.invited handler (the
+// customer onboarding flow's identity + invitation-email steps — see
+// dispatch.OnboardingConfig). Both steps are behind their own opt-in flag,
+// ONBOARD_IDENTITY_ENABLED / ONBOARD_EMAIL_ENABLED (`== "true"`, default
+// off — the opt-in convention EMAIL_DEBUG_MODE uses, since shipping this
+// dark is the point), so a deployment without them records both steps as
+// SKIPPED on entity-service's ledger and does nothing else.
+//
+// The SCIM operations service client authenticates with the same shared
+// OAUTH2_* app as the email and entity clients above (the deployment it
+// points at goes through the same gateway app, scoped via SCIM_SCOPES) —
+// mirroring apps/csm-portal/backend's own SCIM client — so only
+// SCIM_BASE_URL/SCIM_SCOPES are its own. os.Getenv, not mustEnv, like every
+// other optional client here; a missing SCIM_BASE_URL with the identity
+// flag on is warned about at startup rather than discovered on the first
+// invitation.
+//
+// The invitation goes out through its own notifications.EmailClient —
+// same email service and credentials as emailClient, but bound to
+// ONBOARD_EMAIL_FROM (falling back to EMAIL_FROM_ADDRESS), since
+// EmailClient fixes its From at construction and the invitation may need a
+// different sender than the case.* emails. Step recording reuses
+// customerEntityClient (entity.CustomerEntityClient.RecordOnboardingStep)
+// — the same entity-service, same shared app; entity-service additionally
+// requires this service's OAuth2 client id to be in its
+// AUTH_INTERNAL_CLIENT_IDS for that endpoint.
+func loadOnboardingConfig(steps *entity.CustomerEntityClient) dispatch.OnboardingConfig {
+	identityEnabled := os.Getenv("ONBOARD_IDENTITY_ENABLED") == "true"
+	emailEnabled := os.Getenv("ONBOARD_EMAIL_ENABLED") == "true"
+
+	scimBaseURL := os.Getenv("SCIM_BASE_URL")
+	if identityEnabled && scimBaseURL == "" {
+		slog.Warn("ONBOARD_IDENTITY_ENABLED=true but SCIM_BASE_URL is not set; project_contact.invited identity steps will fail until it is configured")
+	}
+	scimClient := scim.NewClient(scim.Config{
+		BaseURL:      scimBaseURL,
+		TokenURL:     os.Getenv("OAUTH2_TOKEN_URL"),
+		ClientID:     os.Getenv("OAUTH2_CLIENT_ID"),
+		ClientSecret: os.Getenv("OAUTH2_CLIENT_SECRET"),
+		Scopes:       splitComma(os.Getenv("SCIM_SCOPES")),
+	})
+
+	onboardEmailClient := notifications.NewEmailClient(notifications.EmailConfig{
+		BaseURL:      os.Getenv("EMAIL_BASE_URL"),
+		TokenURL:     os.Getenv("OAUTH2_TOKEN_URL"),
+		ClientID:     os.Getenv("OAUTH2_CLIENT_ID"),
+		ClientSecret: os.Getenv("OAUTH2_CLIENT_SECRET"),
+		Scopes:       splitComma(os.Getenv("EMAIL_SCOPES")),
+		FromAddress:  envOrDefault("ONBOARD_EMAIL_FROM", os.Getenv("EMAIL_FROM_ADDRESS")),
+	})
+
+	portalURL := strings.TrimRight(envOrDefault("ONBOARD_PORTAL_URL", "https://support.wso2.com"), "/")
+
+	if identityEnabled || emailEnabled {
+		slog.Info("customer onboarding steps enabled for project_contact.invited", "identity", identityEnabled, "email", emailEnabled, "portalUrl", portalURL)
+	}
+	return dispatch.OnboardingConfig{
+		Identity:        scimClient,
+		Email:           onboardEmailClient,
+		Steps:           steps,
+		IdentityEnabled: identityEnabled,
+		EmailEnabled:    emailEnabled,
+		PortalURL:       portalURL,
+	}
 }
 
 // startConsumers starts count independent eventbus.Consumer instances, all

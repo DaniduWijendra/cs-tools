@@ -14,16 +14,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package entity is a minimal, read-only client for this repo's own
-// entity-service, used only by internal/recipientlinks to look up a
-// notification recipient's role/userType by email. Unlike
-// apps/csm-portal/backend's own entity client (a ~60-method passthrough
-// surface for that backend's own handlers), this one deliberately implements
-// exactly one endpoint — POST /users/search — since that's all a Kafka
-// consumer deciding which portal link to send needs. It also carries no
-// x-user-id-token or correlation-ID forwarding: those exist on the
-// csm-portal-backend client to propagate an end-user's identity/request
-// tracing through a real HTTP request, neither of which exists here.
+// Package entity is a minimal client for this repo's own entity-service.
+// Unlike apps/csm-portal/backend's own entity client (a ~60-method
+// passthrough surface for that backend's own handlers), this one
+// deliberately implements exactly two endpoints: POST /users/search
+// (customer.go — the read internal/recipientlinks needs to decide which
+// portal link a notification recipient gets) and PUT
+// /onboarding-steps/{membershipSfId}/{step} (onboarding.go — the one write,
+// internal/dispatch's project_contact.invited handler recording each
+// onboarding step's outcome). It carries no x-user-id-token or
+// correlation-ID forwarding: those exist on the csm-portal-backend client
+// to propagate an end-user's identity/request tracing through a real HTTP
+// request, neither of which exists in a Kafka consumer.
 package entity
 
 import (

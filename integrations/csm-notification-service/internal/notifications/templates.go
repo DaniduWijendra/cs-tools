@@ -48,6 +48,12 @@ var crApprovalRequestedTemplateRaw string
 //go:embed templates/cr_plan_date_notice.html
 var crPlanDateNoticeTemplateRaw string
 
+//go:embed templates/project_contact_invited_new.html
+var projectContactInvitedNewTemplateRaw string
+
+//go:embed templates/project_contact_invited_existing.html
+var projectContactInvitedExistingTemplateRaw string
+
 // wso2LogoURL is WSO2's own official logo asset, served from wso2.cachefly.net
 // (WSO2's public CDN for site assets — not third-party hosting). An earlier
 // version embedded the logo as an inline base64 data: URI instead, avoiding
@@ -79,6 +85,9 @@ var (
 	caseCreatedTemplate         = bakeLogo(caseCreatedTemplateRaw)
 	internalNoteTemplate        = bakeLogo(internalNoteTemplateRaw)
 	severityChangedTemplate     = bakeLogo(severityChangedTemplateRaw)
+
+	projectContactInvitedNewTemplate      = bakeLogo(projectContactInvitedNewTemplateRaw)
+	projectContactInvitedExistingTemplate = bakeLogo(projectContactInvitedExistingTemplateRaw)
 )
 
 // htmlBlockBoundary matches the tags plainTextFromHTML treats as line
@@ -432,4 +441,53 @@ func RenderCRPlanDateNoticeEmail(d CRPlanDateEmailData) string {
 		"<!-- [CR_LINK] -->", escapeHTML(d.Link),
 	)
 	return replacer.Replace(crPlanDateNoticeTemplate)
+}
+
+// ProjectContactInvitedEmailData holds every value substituted into the two
+// project-invitation templates (RenderProjectContactInvitedNewEmail /
+// RenderProjectContactInvitedExistingEmail). DisplayName is already
+// resolved by the caller (given + family name, or the email's local part
+// when Salesforce has neither — dispatch.inviteeDisplayName's concern, not
+// this package's). Roles are the raw Salesforce project roles; when empty
+// the whole "Your role" line is omitted rather than rendered blank.
+// PortalURL is the sign-in link target (ONBOARD_PORTAL_URL).
+type ProjectContactInvitedEmailData struct {
+	DisplayName string
+	Email       string
+	ProjectName string
+	ProjectKey  string
+	Roles       []string
+	PortalURL   string
+}
+
+// RenderProjectContactInvitedNewEmail fills in the invitation for a contact
+// whose WSO2 account was just created (internal/scim reported existed=false,
+// or identity provisioning was disabled and so nothing could say
+// otherwise): welcome, you've been given access to the project, sign in
+// with your email, first sign-in asks for an email code.
+func RenderProjectContactInvitedNewEmail(d ProjectContactInvitedEmailData) string {
+	return renderProjectContactInvited(projectContactInvitedNewTemplate, d)
+}
+
+// RenderProjectContactInvitedExistingEmail fills in the invitation for a
+// contact who already had a WSO2 account (internal/scim reported
+// existed=true): the project has been added, sign in as usual.
+func RenderProjectContactInvitedExistingEmail(d ProjectContactInvitedEmailData) string {
+	return renderProjectContactInvited(projectContactInvitedExistingTemplate, d)
+}
+
+// renderProjectContactInvited is the shared substitution both invitation
+// variants use — they differ only in wording, not in placeholders.
+func renderProjectContactInvited(tmpl string, d ProjectContactInvitedEmailData) string {
+	roles := strings.Join(d.Roles, ", ")
+	tmpl = applyOptionalBlock(tmpl, "ROLES", roles)
+	replacer := strings.NewReplacer(
+		"<!-- [DISPLAY_NAME] -->", escapeHTML(d.DisplayName),
+		"<!-- [EMAIL] -->", escapeHTML(d.Email),
+		"<!-- [PROJECT_NAME] -->", escapeHTML(d.ProjectName),
+		"<!-- [PROJECT_KEY] -->", escapeHTML(d.ProjectKey),
+		"<!-- [ROLES] -->", escapeHTML(roles),
+		"<!-- [PORTAL_URL] -->", escapeHTML(d.PortalURL),
+	)
+	return replacer.Replace(tmpl)
 }

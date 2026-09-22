@@ -138,6 +138,27 @@ func render(env events.Envelope, links *recipientlinks.Resolver) (subject string
 			Description:      p.Description,
 			Link:             links.ChangeRequestLink(p.Audience, p.ChangeRequestID, p.ProjectID),
 		}), nil
+	case events.TypeProjectContactInvited:
+		// Renders the "new account" variant — the one a first-time invitee
+		// gets, and the only one sent when identity provisioning is off.
+		// The "existing account" variant differs in wording only; see
+		// notifications.RenderProjectContactInvitedExistingEmail.
+		var p events.ProjectContactInvitedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return "", nil, "", fmt.Errorf("decode project contact invited payload: %w", err)
+		}
+		displayName := strings.TrimSpace(p.GivenName + " " + p.FamilyName)
+		if displayName == "" {
+			displayName, _, _ = strings.Cut(p.Email, "@")
+		}
+		return "[WSO2 Support] Welcome: you now have access to " + p.ProjectName, []string{p.Email}, notifications.RenderProjectContactInvitedNewEmail(notifications.ProjectContactInvitedEmailData{
+			DisplayName: displayName,
+			Email:       p.Email,
+			ProjectName: p.ProjectName,
+			ProjectKey:  p.ProjectKey,
+			Roles:       p.Roles,
+			PortalURL:   envOr("ONBOARD_PORTAL_URL", "https://support.wso2.com"),
+		}), nil
 	default:
 		return "", nil, "", fmt.Errorf("no preview for %q yet — add a case in cmd/preview", env.Type)
 	}

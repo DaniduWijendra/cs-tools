@@ -253,6 +253,23 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		if !validRecipients(p.Recipients) {
 			return fmt.Errorf("events: invalid recipients for %s", t)
 		}
+	case TypeProjectContactInvited:
+		var p ProjectContactInvitedPayload
+		if err := decodeStrict(raw, &p); err != nil {
+			return err
+		}
+		// Only the two values no step can proceed without are required:
+		// MembershipSfID keys every onboarding-step write, and Email is
+		// both the Asgardeo userName and the invitation's recipient.
+		// GivenName/FamilyName are optional (Salesforce doesn't require a
+		// first name; dispatch falls back to the email's local part), and
+		// ProjectName/ProjectKey/Roles/Type are display-only.
+		if p.MembershipSfID == "" || !emailPattern.MatchString(p.Email) {
+			return fmt.Errorf("events: missing or invalid required field for %s", t)
+		}
+		if p.MembershipSfID != entityID {
+			return fmt.Errorf("events: payload membershipSfId %q does not match entityId %q", p.MembershipSfID, entityID)
+		}
 	default:
 		return fmt.Errorf("events: unknown event type %q", t)
 	}

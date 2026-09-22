@@ -33,11 +33,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/notifications"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/recipientlinks"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/scim"
 )
 
 // emailSender abstracts notifications.EmailClient for testability.
@@ -69,6 +72,44 @@ type linkResolver interface {
 	CSMLink(caseID string) string
 	IncidentLink(incidentID string) string
 	ChangeRequestLink(audience, changeRequestID, projectID string) string
+}
+
+// identityProvisioner abstracts scim.Client for testability — the one
+// operation project_contact.invited's identity step needs.
+type identityProvisioner interface {
+	EnsureExternalUser(ctx context.Context, email, givenName, familyName string) (scim.ExternalUser, error)
+}
+
+// onboardingStepRecorder abstracts entity.CustomerEntityClient's
+// RecordOnboardingStep for testability — the one write this dispatcher
+// makes back to entity-service.
+type onboardingStepRecorder interface {
+	RecordOnboardingStep(ctx context.Context, req entity.OnboardingStepRequest) error
+}
+
+// OnboardingConfig is everything handleProjectContactInvited needs beyond
+// what NewDispatcher already takes — supplied via Dispatcher.WithOnboarding
+// rather than as yet more positional NewDispatcher parameters, since the
+// whole feature is optional per deployment (both flags default off) and
+// every other event type is untouched by it.
+//
+// Identity (satisfied by *scim.Client) creates the invitee's Asgardeo user
+// when IdentityEnabled (ONBOARD_IDENTITY_ENABLED); Email sends the
+// invitation when EmailEnabled (ONBOARD_EMAIL_ENABLED) — a separate
+// emailSender from the Dispatcher's own, because the invitation may go out
+// from a different sender address (ONBOARD_EMAIL_FROM) than the case.*
+// emails, and notifications.EmailClient binds its From at construction.
+// Steps (satisfied by *entity.CustomerEntityClient) records each step's
+// outcome on entity-service's onboarding-step ledger, best-effort — see
+// recordOnboardingStep. PortalURL is the sign-in link the invitation
+// points at (ONBOARD_PORTAL_URL).
+type OnboardingConfig struct {
+	Identity        identityProvisioner
+	Email           emailSender
+	Steps           onboardingStepRecorder
+	IdentityEnabled bool
+	EmailEnabled    bool
+	PortalURL       string
 }
 
 // Dispatcher turns a published events.Envelope into an actual notification
@@ -153,6 +194,24 @@ type Dispatcher struct {
 	// bug this closed.
 	recordsMu sync.Mutex
 	records   map[string]*recordState
+
+	// onboarding is handleProjectContactInvited's configuration — see
+	// OnboardingConfig and WithOnboarding. Its zero value (never configured)
+	// behaves as both flags off with nowhere to record steps, so a
+	// project_contact.invited record is logged and acknowledged rather than
+	// retried; cmd/server/main.go always sets it.
+	onboarding OnboardingConfig
+
+	// identityExisted (guarded by doneMu, like done) remembers, per baseKey,
+	// the Existed result of an identity step that already succeeded on an
+	// earlier attempt at the same record — so a retry caused by a later
+	// step's failure (the invitation email) doesn't re-run
+	// EnsureExternalUser, which would now answer existed=true for a user
+	// the previous attempt itself created, and send the "you already have
+	// an account" wording to someone who has never been told they have
+	// one. Released once the whole record succeeds or record.NoMoreRetries
+	// is true — same lifecycle as done; see handleProjectContactInvited.
+	identityExisted map[string]bool
 }
 
 // recordState is recordsMu/records' per-baseKey bookkeeping — see
@@ -181,7 +240,17 @@ func NewDispatcher(email emailSender, googleChat googleChatSender, call callSend
 		defaultOnCallNumber:  defaultOnCallNumber,
 		done:                 make(map[string]bool),
 		records:              make(map[string]*recordState),
+		identityExisted:      make(map[string]bool),
 	}
+}
+
+// WithOnboarding configures handleProjectContactInvited (see
+// OnboardingConfig) and returns d for chaining. Not part of NewDispatcher's
+// parameter list deliberately: the feature is optional per deployment and
+// orthogonal to every other event type.
+func (d *Dispatcher) WithOnboarding(cfg OnboardingConfig) *Dispatcher {
+	d.onboarding = cfg
+	return d
 }
 
 // beginRecord registers that a call is starting work on baseKey and returns
@@ -330,6 +399,8 @@ func (d *Dispatcher) Handle(ctx context.Context, record eventbus.Record) error {
 		return d.handleCRApprovalRequested(ctx, record, env.Payload)
 	case events.TypeCRPlanDateNotice:
 		return d.handleCRPlanDateNotice(ctx, record, env.Payload)
+	case events.TypeProjectContactInvited:
+		return d.handleProjectContactInvited(ctx, record, env.Payload)
 	case events.TypeSLATierReached:
 		// Published by internal/slaengine's own Engine.Tick (a poller, not
 		// a consumer of this topic) — nothing here reacts to it yet; it
@@ -1280,4 +1351,259 @@ func (d *Dispatcher) handleCRPlanDateNotice(ctx context.Context, record eventbus
 		"changeRequestId", p.ChangeRequestID, "number", p.Number,
 		"kind", p.Kind, "audience", p.Audience, "recipients", len(recipients))
 	return nil
+}
+
+// handleProjectContactInvited is the consumer side of the customer
+// onboarding flow (Salesforce membership → entity-service's Postgres →
+// Asgardeo identity → invitation email → first-access registration): two
+// sequential steps, IDENTITY then EMAIL, each recorded on entity-service's
+// onboarding-step ledger (recordOnboardingStep) and each behind its own
+// deployment flag (OnboardingConfig.IdentityEnabled/EmailEnabled, both
+// default off).
+//
+// Unlike every case.* handler, there is nothing to resolve: the invitee is
+// the payload's own single email address (no recipient list, no
+// groupByLink, no CC), and the sign-in link is one configured portal URL,
+// not a per-recipient case link. Sequential, not two independent
+// reactions like handleCaseCreated's email+Chat: the email's wording
+// depends on the identity step's answer (a just-created account gets the
+// "welcome" template, an account that already existed gets "the project
+// was added"), so a failed identity step returns before any email is
+// attempted — the invitee must not be told to sign in to an account that
+// doesn't exist.
+//
+// An integration user (IsIntegrationUser) never signs in and gets no
+// email: both steps are recorded SKIPPED and nothing else happens. A step
+// whose flag is off is likewise recorded SKIPPED. A step that fails records
+// FAILED with the error text and returns the error, so eventbus.Consumer's
+// usual retry/dead-letter path applies; a step that succeeds records
+// SUCCEEDED. Recording itself is best-effort and never changes the
+// handler's outcome — see recordOnboardingStep.
+//
+// Retry safety: EnsureExternalUser is idempotent upstream (a repeat is a
+// 200), so re-running the identity step is harmless in itself — but it
+// would answer existed=true for a user the previous attempt created, and
+// the retry's email would then use the wrong wording. Dispatcher.
+// identityExisted remembers the first successful answer per record for
+// exactly that case; it's released on full success or record.NoMoreRetries
+// (never IsFinalAttempt — see recordBaseKey for why a dead-lettered record
+// keeps the same key on the DLQ topic). No claim/forget tracking is needed
+// for the email itself: nothing after SendEmail can fail in a way that
+// triggers a retry (step recording is best-effort), so a sent invitation
+// is never re-sent by this handler's own retries.
+func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eventbus.Record, raw json.RawMessage) (retErr error) {
+	var p events.ProjectContactInvitedPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("dispatch: decode project_contact.invited payload: %w", err)
+	}
+	// Never the invitee's email address — this repo's own "no recipient
+	// emails in logs" convention; the membership id is enough to find the
+	// row (and its email) on entity-service's ledger.
+	logAttrs := []any{"membershipSfId", p.MembershipSfID, "contactSfId", p.ContactSfID, "projectKey", p.ProjectKey}
+
+	if p.IsIntegrationUser {
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepSkipped, nil)
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSkipped, nil)
+		slog.InfoContext(ctx, "dispatch: project_contact.invited for an integration user; identity and email skipped", logAttrs...)
+		return nil
+	}
+
+	identityKey := recordBaseKey(record) + "/identity"
+	defer func() {
+		// Drop the remembered identity answer once no retry can ever need
+		// it again: the whole record succeeded, or nothing will redeliver
+		// its content anywhere (NoMoreRetries — see its doc comment).
+		if retErr == nil || record.NoMoreRetries {
+			d.forgetIdentityExisted(identityKey)
+		}
+	}()
+
+	// Step 1 — IDENTITY.
+	var existed bool
+	switch {
+	case !d.onboarding.IdentityEnabled:
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepSkipped, nil)
+		slog.InfoContext(ctx, "dispatch: identity provisioning disabled (ONBOARD_IDENTITY_ENABLED != true); skipping", logAttrs...)
+	default:
+		if remembered, ok := d.rememberedIdentityExisted(identityKey); ok {
+			// A previous attempt at this same record already provisioned
+			// the identity (and recorded SUCCEEDED); this retry is here for
+			// a later step. Reuse its answer rather than asking again — see
+			// the doc comment above for why asking again gives the wrong
+			// email wording.
+			existed = remembered
+			slog.InfoContext(ctx, "dispatch: identity already provisioned by an earlier attempt at this record; not repeating", append(logAttrs, "existed", existed)...)
+			break
+		}
+		if d.onboarding.Identity == nil {
+			err := fmt.Errorf("dispatch: identity provisioning enabled but no SCIM client configured")
+			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
+			return err
+		}
+		user, err := d.onboarding.Identity.EnsureExternalUser(ctx, p.Email, p.GivenName, p.FamilyName)
+		if err != nil {
+			err = fmt.Errorf("dispatch: provision identity for membership %s: %w", p.MembershipSfID, err)
+			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
+			return err
+		}
+		existed = user.Existed
+		d.rememberIdentityExisted(identityKey, existed)
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepSucceeded, nil)
+		slog.InfoContext(ctx, "dispatch: identity provisioned", append(logAttrs, "asgardeoUserId", user.ID, "existed", existed)...)
+	}
+
+	// Step 2 — EMAIL.
+	switch {
+	case !d.onboarding.EmailEnabled:
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSkipped, nil)
+		slog.InfoContext(ctx, "dispatch: invitation email disabled (ONBOARD_EMAIL_ENABLED != true); skipping", logAttrs...)
+	case !d.emailSendingEnabled:
+		// The service-wide killswitch silences this email the same way it
+		// silences every other one here — recorded SKIPPED, not FAILED,
+		// since retrying won't change an operator's decision.
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSkipped, nil)
+		slog.InfoContext(ctx, "dispatch: email sending disabled (EMAIL_SENDING_ENABLED=false); not sending invitation", logAttrs...)
+	default:
+		to := []string{p.Email}
+		if d.emailDebugMode {
+			if len(d.emailDebugRecipients) == 0 {
+				d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSkipped, nil)
+				slog.WarnContext(ctx, "dispatch: EMAIL_DEBUG_MODE=true but EMAIL_DEBUG_RECIPIENTS is empty; not sending invitation", logAttrs...)
+				break
+			}
+			// Same redirect every other email here gets in debug mode: a
+			// real send, just to the configured test list instead of the
+			// invitee — so a staging deployment can't invite a real
+			// customer contact by accident.
+			slog.InfoContext(ctx, "dispatch: EMAIL_DEBUG_MODE=true; redirecting invitation to configured debug recipients", append(logAttrs, "debugRecipientCount", len(d.emailDebugRecipients))...)
+			to = d.emailDebugRecipients
+		}
+		if d.onboarding.Email == nil {
+			err := fmt.Errorf("dispatch: invitation email enabled but no email client configured")
+			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
+			return err
+		}
+
+		data := notifications.ProjectContactInvitedEmailData{
+			DisplayName: inviteeDisplayName(p.GivenName, p.FamilyName, p.Email),
+			Email:       p.Email,
+			ProjectName: displayProjectName(p.ProjectName, p.ProjectKey),
+			ProjectKey:  p.ProjectKey,
+			Roles:       p.Roles,
+			PortalURL:   d.onboarding.PortalURL,
+		}
+		// The "existing" wording only when the identity step actually ran
+		// this record and said so; with identity disabled, nothing here can
+		// know whether the account is new, and welcoming someone who already
+		// has an account is the cheaper mistake than telling a brand-new
+		// user they already have one.
+		var subject, body string
+		if d.onboarding.IdentityEnabled && existed {
+			subject = fmt.Sprintf("[WSO2 Support] %s has been added to your account", data.ProjectName)
+			body = notifications.RenderProjectContactInvitedExistingEmail(data)
+		} else {
+			subject = fmt.Sprintf("[WSO2 Support] Welcome: you now have access to %s", data.ProjectName)
+			body = notifications.RenderProjectContactInvitedNewEmail(data)
+		}
+		if err := d.onboarding.Email.SendEmail(ctx, to, nil, nil, nil, subject, body, nil); err != nil {
+			err = fmt.Errorf("dispatch: send invitation for membership %s: %w", p.MembershipSfID, err)
+			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
+			return err
+		}
+		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSucceeded, nil)
+		slog.InfoContext(ctx, "dispatch: invitation email sent", append(logAttrs, "existingAccount", d.onboarding.IdentityEnabled && existed)...)
+	}
+
+	return nil
+}
+
+// recordOnboardingStep writes one step's outcome to entity-service's
+// onboarding-step ledger (PUT /onboarding-steps/{membershipSfId}/{step}),
+// best-effort: a failure to record is logged at ERROR and otherwise
+// ignored. It must never mask the primary outcome — a step that genuinely
+// succeeded must not turn into a retried (and, for email, re-sent) record
+// because the ledger was briefly unreachable, and a step that failed must
+// return its own error, not the ledger's. lastErr, when non-nil, becomes
+// the row's lastError (entity-service keeps it only for a FAILED status).
+//
+// EventModifiedOn is this service's processing time, not a Salesforce
+// LastModifiedDate: the invited payload carries none (entity-service
+// publishes it after its own write, not from the raw Salesforce event).
+// entity-service only applies a step write whose eventModifiedOn is not
+// older than the row's stored one, so a monotonically-later timestamp per
+// attempt is exactly what's needed — every retry's write wins over the
+// attempt before it, and a stale attempt that lands late can't overwrite
+// a newer outcome.
+func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectContactInvitedPayload, step entity.OnboardingStep, status entity.OnboardingStepStatus, lastErr error) {
+	if d.onboarding.Steps == nil {
+		slog.WarnContext(ctx, "dispatch: no onboarding-step recorder configured; step outcome not recorded",
+			"membershipSfId", p.MembershipSfID, "step", step, "status", status)
+		return
+	}
+	req := entity.OnboardingStepRequest{
+		MembershipSfID:  p.MembershipSfID,
+		Step:            step,
+		Status:          status,
+		EventType:       string(events.TypeProjectContactInvited),
+		EventModifiedOn: time.Now().UTC(),
+		Email:           p.Email,
+		ContactSfID:     p.ContactSfID,
+	}
+	if lastErr != nil {
+		req.LastError = lastErr.Error()
+	}
+	if err := d.onboarding.Steps.RecordOnboardingStep(ctx, req); err != nil {
+		slog.ErrorContext(ctx, "dispatch: failed to record onboarding step; continuing",
+			"membershipSfId", p.MembershipSfID, "step", step, "status", status, "err", err)
+		return
+	}
+	slog.InfoContext(ctx, "dispatch: onboarding step recorded", "membershipSfId", p.MembershipSfID, "step", step, "status", status)
+}
+
+// rememberIdentityExisted/rememberedIdentityExisted/forgetIdentityExisted
+// are Dispatcher.identityExisted's accessors — see that field's doc comment.
+func (d *Dispatcher) rememberIdentityExisted(key string, existed bool) {
+	d.doneMu.Lock()
+	defer d.doneMu.Unlock()
+	d.identityExisted[key] = existed
+}
+
+func (d *Dispatcher) rememberedIdentityExisted(key string) (existed, ok bool) {
+	d.doneMu.Lock()
+	defer d.doneMu.Unlock()
+	existed, ok = d.identityExisted[key]
+	return existed, ok
+}
+
+func (d *Dispatcher) forgetIdentityExisted(key string) {
+	d.doneMu.Lock()
+	defer d.doneMu.Unlock()
+	delete(d.identityExisted, key)
+}
+
+// inviteeDisplayName is how the invitation addresses its reader: the
+// Salesforce given and family names joined, or — since Salesforce doesn't
+// require a first name and test data frequently has neither — the email's
+// local part (the part before "@"), which is at least recognisably theirs.
+func inviteeDisplayName(givenName, familyName, email string) string {
+	if name := strings.TrimSpace(strings.TrimSpace(givenName) + " " + strings.TrimSpace(familyName)); name != "" {
+		return name
+	}
+	if local, _, ok := strings.Cut(email, "@"); ok && local != "" {
+		return local
+	}
+	return email
+}
+
+// displayProjectName is the project as the invitation names it: the
+// Salesforce project name, falling back to its key, then to a generic
+// phrase, so neither the subject nor the body ever has an empty slot.
+func displayProjectName(projectName, projectKey string) string {
+	if projectName != "" {
+		return projectName
+	}
+	if projectKey != "" {
+		return projectKey
+	}
+	return "your project"
 }

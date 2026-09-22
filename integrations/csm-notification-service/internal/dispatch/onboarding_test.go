@@ -1,0 +1,435 @@
+// Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+//
+// WSO2 LLC. licenses this file to you under the Apache License,
+// Version 2.0 (the "License"); you may not use this file except
+// in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package dispatch
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/entity"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/scim"
+)
+
+type provisionedIdentity struct {
+	email, givenName, familyName string
+}
+
+// mockIdentityProvisioner stands in for scim.Client: it answers every
+// EnsureExternalUser with the configured existed flag or error.
+type mockIdentityProvisioner struct {
+	existed bool
+	err     error
+	mu      sync.Mutex
+	calls   []provisionedIdentity
+}
+
+func (m *mockIdentityProvisioner) EnsureExternalUser(ctx context.Context, email, givenName, familyName string) (scim.ExternalUser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, provisionedIdentity{email, givenName, familyName})
+	if m.err != nil {
+		return scim.ExternalUser{}, m.err
+	}
+	return scim.ExternalUser{ID: "asgardeo-user-1", UserName: email, Existed: m.existed}, nil
+}
+
+// mockStepRecorder stands in for entity.CustomerEntityClient's
+// RecordOnboardingStep, keeping every write in order.
+type mockStepRecorder struct {
+	err   error
+	mu    sync.Mutex
+	calls []entity.OnboardingStepRequest
+}
+
+func (m *mockStepRecorder) RecordOnboardingStep(ctx context.Context, req entity.OnboardingStepRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, req)
+	return m.err
+}
+
+// recordedSteps flattens the recorder's calls to "STEP=STATUS" for
+// one-line assertions.
+func recordedSteps(r *mockStepRecorder) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	for i, c := range r.calls {
+		out[i] = string(c.Step) + "=" + string(c.Status)
+	}
+	return out
+}
+
+func assertSteps(t *testing.T, r *mockStepRecorder, want ...string) {
+	t.Helper()
+	got := recordedSteps(r)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("recorded steps = %v, want %v", got, want)
+	}
+}
+
+const invitedMembership = "a0e000000000001AAA"
+
+// invitedRecord builds a project_contact.invited record for jane@acme.com
+// on project Acme Cloud; integration flips isIntegrationUser.
+func invitedRecord(integration bool) eventbus.Record {
+	isIntegration := "false"
+	if integration {
+		isIntegration = "true"
+	}
+	return eventbus.Record{Value: []byte(`{"type":"project_contact.invited","entityId":"` + invitedMembership + `","payload":{"membershipSfId":"` + invitedMembership + `","contactSfId":"003000000000001AAA","email":"jane@acme.com","givenName":"Jane","familyName":"Doe","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":["Admin","Portal user"],"isIntegrationUser":` + isIntegration + `,"type":"OWN CONTACT"}}`)}
+}
+
+// newOnboardingDispatcher wires a Dispatcher with every case.* channel
+// mocked away and the onboarding feature configured as given.
+func newOnboardingDispatcher(identity *mockIdentityProvisioner, email *mockEmailSender, steps *mockStepRecorder, identityEnabled, emailEnabled bool) *Dispatcher {
+	d := newTestDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{})
+	return d.WithOnboarding(OnboardingConfig{
+		Identity:        identity,
+		Email:           email,
+		Steps:           steps,
+		IdentityEnabled: identityEnabled,
+		EmailEnabled:    emailEnabled,
+		PortalURL:       "https://support.wso2.com",
+	})
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_IntegrationUser: a machine
+// account never signs in and gets no email — both steps SKIPPED, no SCIM
+// call, no SendEmail, and a nil return so the record is acknowledged.
+func TestDispatcher_Handle_ProjectContactInvited_IntegrationUser(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(true)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(identity.calls) != 0 || len(email.calls) != 0 {
+		t.Errorf("integration user reached an outbound client: scim=%d email=%d", len(identity.calls), len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SKIPPED", "EMAIL=SKIPPED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_NewUser is the happy path with
+// both flags on: SCIM is called with the payload's identity, the "welcome"
+// template goes to the invitee alone (no CC/BCC), and both steps are
+// SUCCEEDED, identity first.
+func TestDispatcher_Handle_ProjectContactInvited_NewUser(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{existed: false}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(identity.calls) != 1 || identity.calls[0] != (provisionedIdentity{"jane@acme.com", "Jane", "Doe"}) {
+		t.Errorf("EnsureExternalUser calls = %+v, want one call with the payload's email/givenName/familyName", identity.calls)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(email.calls))
+	}
+	sent := email.calls[0]
+	if len(sent.to) != 1 || sent.to[0] != "jane@acme.com" || len(sent.bcc) != 0 {
+		t.Errorf("to = %v, bcc = %v, want the invitee alone", sent.to, sent.bcc)
+	}
+	if !strings.Contains(sent.subject, "Welcome") || !strings.Contains(sent.subject, "Acme Cloud") {
+		t.Errorf("subject = %q, want the welcome wording naming the project", sent.subject)
+	}
+	for _, want := range []string{"A WSO2 account has been created for you", "Jane Doe", "Acme Cloud", "ACMECLOUD", "Admin, Portal user", `href="https://support.wso2.com"`} {
+		if !strings.Contains(sent.htmlBody, want) {
+			t.Errorf("body does not contain %q", want)
+		}
+	}
+	if strings.Contains(sent.htmlBody, "You already have a WSO2 account") {
+		t.Error("body uses the existing-account wording for a just-created user")
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
+
+	// Every step write carries what the ledger needs to place it.
+	for _, c := range steps.calls {
+		if c.MembershipSfID != invitedMembership || c.Email != "jane@acme.com" || c.ContactSfID != "003000000000001AAA" ||
+			c.EventType != "project_contact.invited" || c.EventModifiedOn.IsZero() || c.LastError != "" {
+			t.Errorf("step write = %+v, want membership/email/contact/eventType/eventModifiedOn set and no lastError", c)
+		}
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ExistingUser: SCIM says the
+// account already existed, so the "project added to your account" wording
+// goes out instead of the welcome.
+func TestDispatcher_Handle_ProjectContactInvited_ExistingUser(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(email.calls))
+	}
+	sent := email.calls[0]
+	if !strings.Contains(sent.subject, "has been added to your account") {
+		t.Errorf("subject = %q, want the existing-account wording", sent.subject)
+	}
+	if !strings.Contains(sent.htmlBody, "You already have a WSO2 account") || strings.Contains(sent.htmlBody, "A WSO2 account has been created for you") {
+		t.Error("body does not use the existing-account wording")
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_IdentityFailure: a SCIM
+// failure records IDENTITY=FAILED with the error text, returns the error
+// (so the consumer retries / dead-letters), and never reaches the email —
+// the invitee must not be told to sign in to an account that doesn't exist.
+func TestDispatcher_Handle_ProjectContactInvited_IdentityFailure(t *testing.T) {
+	identity := &mockIdentityProvisioner{err: errors.New("upstream returned 500: asgardeo unavailable")}
+	email, steps := &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil || !strings.Contains(err.Error(), "asgardeo unavailable") {
+		t.Fatalf("Handle() error = %v, want the SCIM failure propagated", err)
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails after a failed identity step, want 0", len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=FAILED")
+	if got := steps.calls[0].LastError; !strings.Contains(got, "asgardeo unavailable") {
+		t.Errorf("lastError = %q, want the SCIM error text", got)
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_EmailFailureThenRetry: the
+// email failing records EMAIL=FAILED and returns the error; the retry must
+// not re-provision the identity (SCIM would now say existed=true) and must
+// still send the "welcome" wording the invitee has never received.
+func TestDispatcher_Handle_ProjectContactInvited_EmailFailureThenRetry(t *testing.T) {
+	identity := &mockIdentityProvisioner{existed: false}
+	email := &mockEmailSender{err: errors.New("smtp down")}
+	steps := &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil || !strings.Contains(err.Error(), "smtp down") {
+		t.Fatalf("first Handle() error = %v, want the email failure propagated", err)
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=FAILED")
+	if got := steps.calls[1].LastError; !strings.Contains(got, "smtp down") {
+		t.Errorf("EMAIL lastError = %q, want the send error text", got)
+	}
+
+	// The retry: SCIM would now answer existed=true for the user the first
+	// attempt created — the handler must not ask it again.
+	identity.existed = true
+	email.err = nil
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("retry Handle() error = %v", err)
+	}
+	if len(identity.calls) != 1 {
+		t.Errorf("EnsureExternalUser called %d times across the retry, want 1", len(identity.calls))
+	}
+	if len(email.calls) != 2 {
+		t.Fatalf("sent %d emails across both attempts, want 2 (one failed, one succeeded)", len(email.calls))
+	}
+	if !strings.Contains(email.calls[1].htmlBody, "A WSO2 account has been created for you") {
+		t.Error("retry used the existing-account wording for a user the first attempt created")
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=FAILED", "EMAIL=SUCCEEDED")
+
+	// Full success releases the remembered answer.
+	if _, ok := d.rememberedIdentityExisted(recordBaseKey(invitedRecord(false)) + "/identity"); ok {
+		t.Error("identityExisted still holds the record's key after a full success")
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_NoMoreRetriesReleasesMemo: a
+// record that will never be redelivered must not leak its remembered
+// identity answer, even though it's still failing.
+func TestDispatcher_Handle_ProjectContactInvited_NoMoreRetriesReleasesMemo(t *testing.T) {
+	identity := &mockIdentityProvisioner{}
+	email := &mockEmailSender{err: errors.New("smtp down")}
+	d := newOnboardingDispatcher(identity, email, &mockStepRecorder{}, true, true)
+
+	record := invitedRecord(false)
+	record.NoMoreRetries = true
+	if err := d.Handle(context.Background(), record); err == nil {
+		t.Fatal("Handle() = nil, want the email failure")
+	}
+	if _, ok := d.rememberedIdentityExisted(recordBaseKey(record) + "/identity"); ok {
+		t.Error("identityExisted still holds the record's key after NoMoreRetries")
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_BothFlagsOff: the default
+// deployment shape — nothing outbound at all, both steps SKIPPED, nil.
+func TestDispatcher_Handle_ProjectContactInvited_BothFlagsOff(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, false, false)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(identity.calls) != 0 || len(email.calls) != 0 {
+		t.Errorf("flags off but an outbound client was called: scim=%d email=%d", len(identity.calls), len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SKIPPED", "EMAIL=SKIPPED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_IdentityOffUsesNewWording:
+// with identity disabled nothing can say whether the account exists, so
+// the email always uses the "new" template.
+func TestDispatcher_Handle_ProjectContactInvited_IdentityOffUsesNewWording(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, false, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(identity.calls) != 0 {
+		t.Errorf("SCIM called %d times with identity disabled", len(identity.calls))
+	}
+	if len(email.calls) != 1 || !strings.Contains(email.calls[0].htmlBody, "A WSO2 account has been created for you") {
+		t.Error("want exactly one email using the new-account wording")
+	}
+	assertSteps(t, steps, "IDENTITY=SKIPPED", "EMAIL=SUCCEEDED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_StepRecordingFailureIsBestEffort:
+// the ledger being down must not turn a successful onboarding into a
+// retried (and re-sent) record.
+func TestDispatcher_Handle_ProjectContactInvited_StepRecordingFailureIsBestEffort(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{}, &mockEmailSender{}
+	steps := &mockStepRecorder{err: errors.New("entity-service 503")}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v, want nil despite the recorder failing", err)
+	}
+	if len(identity.calls) != 1 || len(email.calls) != 1 {
+		t.Errorf("scim=%d email=%d, want both steps to have run once", len(identity.calls), len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_StepRecordingFailureDoesNotMaskPrimaryError:
+// when the step itself failed, the caller sees that error — not the
+// recorder's.
+func TestDispatcher_Handle_ProjectContactInvited_StepRecordingFailureDoesNotMaskPrimaryError(t *testing.T) {
+	identity := &mockIdentityProvisioner{err: errors.New("scim exploded")}
+	steps := &mockStepRecorder{err: errors.New("entity-service 503")}
+	d := newOnboardingDispatcher(identity, &mockEmailSender{}, steps, true, true)
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil || !strings.Contains(err.Error(), "scim exploded") || strings.Contains(err.Error(), "entity-service 503") {
+		t.Fatalf("Handle() error = %v, want the SCIM error alone", err)
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_NamelessInviteeUsesEmailLocalPart:
+// Salesforce doesn't require a first name; the email must still address
+// the reader by something recognisably theirs rather than a blank.
+func TestDispatcher_Handle_ProjectContactInvited_NamelessInviteeUsesEmailLocalPart(t *testing.T) {
+	email := &mockEmailSender{}
+	d := newOnboardingDispatcher(&mockIdentityProvisioner{}, email, &mockStepRecorder{}, true, true)
+
+	record := eventbus.Record{Value: []byte(`{"type":"project_contact.invited","entityId":"` + invitedMembership + `","payload":{"membershipSfId":"` + invitedMembership + `","contactSfId":"","email":"ops.team@acme.com","givenName":"","familyName":"","projectName":"","projectKey":"ACMECLOUD","roles":[],"isIntegrationUser":false,"type":"OWN CONTACT"}}`)}
+	if err := d.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(email.calls))
+	}
+	if !strings.Contains(email.calls[0].htmlBody, "ops.team") {
+		t.Error("body does not fall back to the email's local part as the display name")
+	}
+	if !strings.Contains(email.calls[0].subject, "ACMECLOUD") {
+		t.Errorf("subject = %q, want the project key when the name is empty", email.calls[0].subject)
+	}
+	if strings.Contains(email.calls[0].htmlBody, "Your role") {
+		t.Error("body renders a roles line for a membership with no roles")
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_Killswitch: EMAIL_SENDING_ENABLED
+// silences the invitation like every other email here — recorded SKIPPED,
+// not FAILED, and the identity step still runs.
+func TestDispatcher_Handle_ProjectContactInvited_Killswitch(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	d := NewDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}, &mockLinkResolver{}, false, false, nil, true, "", "").
+		WithOnboarding(OnboardingConfig{Identity: identity, Email: email, Steps: steps, IdentityEnabled: true, EmailEnabled: true, PortalURL: "https://support.wso2.com"})
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(identity.calls) != 1 || len(email.calls) != 0 {
+		t.Errorf("scim=%d email=%d, want identity provisioned and no email", len(identity.calls), len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SKIPPED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_DebugModeRedirects: debug
+// mode sends the invitation to the test list, never to the real contact.
+func TestDispatcher_Handle_ProjectContactInvited_DebugModeRedirects(t *testing.T) {
+	email, steps := &mockEmailSender{}, &mockStepRecorder{}
+	d := NewDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}, &mockLinkResolver{}, true, true, []string{"debug@wso2.com"}, true, "", "").
+		WithOnboarding(OnboardingConfig{Identity: &mockIdentityProvisioner{}, Email: email, Steps: steps, IdentityEnabled: true, EmailEnabled: true, PortalURL: "https://support.wso2.com"})
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 || len(email.calls[0].to) != 1 || email.calls[0].to[0] != "debug@wso2.com" {
+		t.Errorf("email calls = %+v, want one send redirected to the debug list", email.calls)
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_RejectsInvalidPayload: the
+// validation boundary applies here like everywhere else — a payload with
+// no email can't be onboarded and is an error, not a SKIPPED pair.
+func TestDispatcher_Handle_ProjectContactInvited_RejectsInvalidPayload(t *testing.T) {
+	steps := &mockStepRecorder{}
+	d := newOnboardingDispatcher(&mockIdentityProvisioner{}, &mockEmailSender{}, steps, true, true)
+
+	record := eventbus.Record{Value: []byte(`{"type":"project_contact.invited","entityId":"` + invitedMembership + `","payload":{"membershipSfId":"` + invitedMembership + `","email":"","projectName":"Acme Cloud"}}`)}
+	if err := d.Handle(context.Background(), record); err == nil {
+		t.Fatal("Handle() = nil, want a validation error")
+	}
+	if len(steps.calls) != 0 {
+		t.Errorf("recorded %d steps for an invalid payload, want 0", len(steps.calls))
+	}
+}
+
+func TestInviteeDisplayName(t *testing.T) {
+	tests := []struct {
+		given, family, email, want string
+	}{
+		{"Jane", "Doe", "jane@acme.com", "Jane Doe"},
+		{"Jane", "", "jane@acme.com", "Jane"},
+		{"", "Doe", "jane@acme.com", "Doe"},
+		{"", "", "jane.doe@acme.com", "jane.doe"},
+		{"  ", "  ", "jane@acme.com", "jane"},
+		{"", "", "no-at-sign", "no-at-sign"},
+	}
+	for _, tt := range tests {
+		if got := inviteeDisplayName(tt.given, tt.family, tt.email); got != tt.want {
+			t.Errorf("inviteeDisplayName(%q, %q, %q) = %q, want %q", tt.given, tt.family, tt.email, got, tt.want)
+		}
+	}
+}
