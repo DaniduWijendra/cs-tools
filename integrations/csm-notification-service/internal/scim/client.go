@@ -37,16 +37,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/oauthhttp"
 )
-
-// tokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
-// Overridden in tests to keep them fast.
-var tokenFetchTimeout = 10 * time.Second
 
 // Config holds the configuration for the SCIM operations client. Like
 // entity.CustomerEntityConfig, cmd/server/main.go fills TokenURL/ClientID/
@@ -79,17 +73,12 @@ type Client struct {
 // NewClient constructs a Client that authenticates against the SCIM
 // operations service using the OAuth2 client credentials grant type.
 func NewClient(cfg Config) *Client {
-	cc := clientcredentials.Config{
+	httpClient := oauthhttp.NewClient(oauthhttp.Config{
+		TokenURL:     cfg.TokenURL,
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
-	}
-
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: tokenFetchTimeout})
-	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 25 * time.Second
+	})
 
 	return &Client{
 		http:    httpClient,
@@ -126,9 +115,9 @@ type createExternalUserRequest struct {
 // Asgardeo user exists for email in the external (customer) organization,
 // returning it. Idempotent on the SCIM service's side: 201 means the user
 // was just created, 200 means one already existed for that userName — both
-// are successes, distinguished by ExternalUser.Existed. Any other status is
-// returned as an *apierror.Error carrying the status and a bounded excerpt
-// of the response body.
+// are successes, distinguished by ExternalUser.Existed, and both must carry
+// the user's id in the body. Any other status is returned as an
+// *apierror.Error carrying the status only.
 func (c *Client) EnsureExternalUser(ctx context.Context, email, givenName, familyName string) (ExternalUser, error) {
 	if email == "" {
 		return ExternalUser{}, fmt.Errorf("scim: email is required")
@@ -148,11 +137,19 @@ func (c *Client) EnsureExternalUser(ctx context.Context, email, givenName, famil
 		return ExternalUser{}, err
 	}
 
+	// A 200/201 without a body, or without the user's id, is not proof that
+	// an Asgardeo account exists — treat it as an upstream fault so the
+	// consumer retries instead of recording IDENTITY=SUCCEEDED and sending
+	// an invitation for an account nobody confirmed.
+	if len(respBody) == 0 {
+		return ExternalUser{}, fmt.Errorf("scim: create-user returned %d with an empty body", status)
+	}
 	var user ExternalUser
-	if len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, &user); err != nil {
-			return ExternalUser{}, fmt.Errorf("scim: decode create-user response: %w", err)
-		}
+	if err := json.Unmarshal(respBody, &user); err != nil {
+		return ExternalUser{}, fmt.Errorf("scim: decode create-user response: %w", err)
+	}
+	if user.ID == "" {
+		return ExternalUser{}, fmt.Errorf("scim: create-user returned %d without a user id", status)
 	}
 	// The status code is authoritative for Existed; the body's own
 	// "existed" flag is only a fallback for a response that omits it

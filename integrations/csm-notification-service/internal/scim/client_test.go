@@ -117,6 +117,25 @@ func TestEnsureExternalUser_AlreadyExisted(t *testing.T) {
 	}
 }
 
+// TestEnsureExternalUser_EmptySuccessBodyIsError: a 201 or 200 without a
+// body, or without an id, must not count as a provisioned identity.
+func TestEnsureExternalUser_EmptySuccessBodyIsError(t *testing.T) {
+	for name, body := range map[string]string{"empty body": "", "no id": `{"userName":"jane@acme.com","existed":false}`} {
+		t.Run(name, func(t *testing.T) {
+			apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer apiSrv.Close()
+			tokenSrv := newTokenServer(t)
+			defer tokenSrv.Close()
+			if _, err := newTestClient(t, tokenSrv, apiSrv).EnsureExternalUser(context.Background(), "jane@acme.com", "Jane", "Doe"); err == nil {
+				t.Fatal("EnsureExternalUser() = nil error, want an error for a success without a user id")
+			}
+		})
+	}
+}
+
 // TestEnsureExternalUser_UpstreamError: anything but 200/201 is an
 // *apierror.Error carrying the status and nothing from the body — the
 // caller persists this as the step's lastError, and a SCIM validation

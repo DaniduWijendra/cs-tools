@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/eventbus"
@@ -37,14 +38,22 @@ type provisionedIdentity struct {
 type mockIdentityProvisioner struct {
 	existed bool
 	err     error
-	mu      sync.Mutex
-	calls   []provisionedIdentity
+	// block, when non-nil, holds every call open until it is closed, so a
+	// test can have several Handle calls in flight on the same record.
+	block chan struct{}
+	mu    sync.Mutex
+	calls []provisionedIdentity
 }
 
 func (m *mockIdentityProvisioner) EnsureExternalUser(ctx context.Context, email, givenName, familyName string) (scim.ExternalUser, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.calls = append(m.calls, provisionedIdentity{email, givenName, familyName})
+	m.mu.Unlock()
+	if m.block != nil {
+		<-m.block
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return scim.ExternalUser{}, m.err
 	}
@@ -110,6 +119,73 @@ func newOnboardingDispatcher(identity *mockIdentityProvisioner, email *mockEmail
 		EmailEnabled:    emailEnabled,
 		PortalURL:       "https://support.wso2.com",
 	})
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ConcurrentHandlesProvisionOnce:
+// two Handle calls racing on the same record (a consumer-group rebalance,
+// or two of this process's consumers) must not both call SCIM. The claim
+// on the identity key lets exactly one through; the other fails and, on
+// its retry, reuses the winner's remembered answer. Exactly one email.
+func TestDispatcher_Handle_ProjectContactInvited_ConcurrentHandlesProvisionOnce(t *testing.T) {
+	identity := &mockIdentityProvisioner{block: make(chan struct{})}
+	email, steps := &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+	rec := invitedRecord(false)
+
+	// The first Handle to reach SCIM is held there; the others arrive while
+	// it holds the claim and must fail without provisioning.
+	const n = 8
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() { errs <- d.Handle(context.Background(), rec) }()
+	}
+	var failed int
+	timeout := time.After(5 * time.Second)
+	for failed < n-1 {
+		select {
+		case err := <-errs:
+			if err == nil {
+				t.Fatal("a Handle call succeeded while the identity step was still held by another")
+			}
+			failed++
+		case <-timeout:
+			t.Fatalf("only %d of %d contenders failed within the timeout", failed, n-1)
+		}
+	}
+	close(identity.block)
+	if err := <-errs; err != nil {
+		t.Fatalf("the winning Handle returned %v, want nil", err)
+	}
+
+	if len(identity.calls) != 1 {
+		t.Errorf("SCIM called %d times, want exactly 1", len(identity.calls))
+	}
+	if len(email.calls) != 1 {
+		t.Errorf("emails sent %d, want exactly 1", len(email.calls))
+	}
+	if len(steps.calls) != 2 {
+		t.Errorf("steps recorded %d, want IDENTITY and EMAIL once each (losers record nothing)", len(steps.calls))
+	}
+	// The winner's success released the claim and the memo; a later
+	// redelivery starts clean rather than being stuck behind a stale claim.
+	if d.rememberedIdentityExistedForTest(recordBaseKey(rec)+"/identity") || d.claimedForTest(recordBaseKey(rec)+"/identity") {
+		t.Error("identity claim/memo must be released after the record succeeded")
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_SenderOverride: EmailFrom is
+// passed through to the shared email client so the invitation can use its
+// own sender without a second client.
+func TestDispatcher_Handle_ProjectContactInvited_SenderOverride(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+	d.onboarding.EmailFrom = "invitations@wso2.com"
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 || email.calls[0].from != "invitations@wso2.com" {
+		t.Errorf("email from = %q, want the configured onboarding sender", email.calls[0].from)
+	}
 }
 
 // TestDispatcher_Handle_ProjectContactInvited_IntegrationUser: a machine
@@ -442,4 +518,17 @@ func TestInviteeDisplayName(t *testing.T) {
 			t.Errorf("inviteeDisplayName(%q, %q, %q) = %q, want %q", tt.given, tt.family, tt.email, got, tt.want)
 		}
 	}
+}
+
+// rememberedIdentityExistedForTest / claimedForTest peek at the
+// dispatcher's idempotency state for the concurrency test above.
+func (d *Dispatcher) rememberedIdentityExistedForTest(key string) bool {
+	_, ok := d.rememberedIdentityExisted(key)
+	return ok
+}
+
+func (d *Dispatcher) claimedForTest(key string) bool {
+	d.doneMu.Lock()
+	defer d.doneMu.Unlock()
+	return d.done[key]
 }

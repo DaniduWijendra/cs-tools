@@ -119,7 +119,7 @@ Both flags default off, so a deployment without them records both steps as SKIPP
 | `CSM_MIGRATION_ONBOARD_EMAIL_ENABLED` | Set to `true` to send the invitation email; unset/anything else records EMAIL as SKIPPED (default off). Still subject to `EMAIL_SENDING_ENABLED` and `EMAIL_DEBUG_MODE` above |
 | `SCIM_BASE_URL` | Base URL of the SCIM operations service (`POST /organizations/external/users`). Optional — required in practice once `CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED=true` (a startup warning is logged if missing) |
 | `SCIM_SCOPES` | Comma-separated OAuth2 scopes for the SCIM operations service (optional) — shared `OAUTH2_*` credentials, not its own |
-| `ONBOARD_EMAIL_FROM` | Sender address for the invitation email. Optional — defaults to `EMAIL_FROM_ADDRESS` |
+| `ONBOARD_EMAIL_FROM` | Sender address for the invitation email, sent through the same email client as everything else. Optional — defaults to `EMAIL_FROM_ADDRESS` |
 | `ONBOARD_PORTAL_URL` | Sign-in link the invitation points at. Optional — defaults to `https://support.wso2.com` |
 
 ### Recipient portal links

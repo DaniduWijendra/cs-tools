@@ -46,6 +46,10 @@ import (
 // emailSender abstracts notifications.EmailClient for testability.
 type emailSender interface {
 	SendEmail(ctx context.Context, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error
+	// SendEmailFrom sends with an explicit sender; "" means the client's
+	// own FromAddress. Lets the onboarding invitation use its own sender
+	// without a second client and token cache.
+	SendEmailFrom(ctx context.Context, from string, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error
 	// FromAddress is needed by a handler that BCCs its audience: the email
 	// service requires a non-empty To, and the sender is the only address that
 	// is always valid and discloses nothing.
@@ -110,6 +114,9 @@ type OnboardingConfig struct {
 	IdentityEnabled bool
 	EmailEnabled    bool
 	PortalURL       string
+	// EmailFrom is the invitation's sender (ONBOARD_EMAIL_FROM); "" means
+	// Email's own FromAddress.
+	EmailFrom string
 }
 
 // Dispatcher turns a published events.Envelope into an actual notification
@@ -1387,10 +1394,14 @@ func (d *Dispatcher) handleCRPlanDateNotice(ctx context.Context, record eventbus
 // identityExisted remembers the first successful answer per record for
 // exactly that case; it's released on full success or record.NoMoreRetries
 // (never IsFinalAttempt — see recordBaseKey for why a dead-lettered record
-// keeps the same key on the DLQ topic). No claim/forget tracking is needed
-// for the email itself: nothing after SendEmail can fail in a way that
-// triggers a retry (step recording is best-effort), so a sent invitation
-// is never re-sent by this handler's own retries.
+// keeps the same key on the DLQ topic). The SCIM call itself is guarded by
+// claim() like every other outbound call here, so two Handle calls racing
+// on the same record (a consumer-group rebalance, or two of this process's
+// consumers) cannot both provision: the loser returns an error and its
+// retry finds the winner's remembered answer. No claim/forget tracking is
+// needed for the email itself: nothing after SendEmail can fail in a way
+// that triggers a retry (step recording is best-effort), so a sent
+// invitation is never re-sent by this handler's own retries.
 func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eventbus.Record, raw json.RawMessage) (retErr error) {
 	var p events.ProjectContactInvitedPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -1410,11 +1421,13 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 
 	identityKey := recordBaseKey(record) + "/identity"
 	defer func() {
-		// Drop the remembered identity answer once no retry can ever need
-		// it again: the whole record succeeded, or nothing will redeliver
-		// its content anywhere (NoMoreRetries — see its doc comment).
+		// Drop the remembered identity answer and its claim once no retry
+		// can ever need them again: the whole record succeeded, or nothing
+		// will redeliver its content anywhere (NoMoreRetries — see its doc
+		// comment).
 		if retErr == nil || record.NoMoreRetries {
 			d.forgetIdentityExisted(identityKey)
+			d.forget(identityKey)
 		}
 	}()
 
@@ -1440,8 +1453,16 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
 			return err
 		}
+		if !d.claim(identityKey) {
+			// Another Handle call holds this record's identity step right
+			// now and has not remembered an answer yet. Don't provision a
+			// second time; let this attempt fail and retry once the winner
+			// has recorded its result.
+			return fmt.Errorf("dispatch: identity step for membership %s is already in progress", p.MembershipSfID)
+		}
 		user, err := d.onboarding.Identity.EnsureExternalUser(ctx, p.Email, p.GivenName, p.FamilyName)
 		if err != nil {
+			d.forget(identityKey)
 			err = fmt.Errorf("dispatch: provision identity for membership %s: %w", p.MembershipSfID, err)
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
 			return err
@@ -1499,19 +1520,18 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 		// been created for you" nor "you already have one", only how to
 		// sign in.
 		var subject, body string
-		switch {
-		case d.onboarding.IdentityEnabled && existed:
+		if d.onboarding.IdentityEnabled && existed {
 			subject = fmt.Sprintf("[WSO2 Support] %s has been added to your account", data.ProjectName)
 			body = notifications.RenderProjectContactInvitedExistingEmail(data)
-		case d.onboarding.IdentityEnabled:
-			data.AccountCreated = true
-			subject = fmt.Sprintf("[WSO2 Support] Welcome: you now have access to %s", data.ProjectName)
-			body = notifications.RenderProjectContactInvitedNewEmail(data)
-		default:
+		} else {
+			data.AccountCreated = d.onboarding.IdentityEnabled
 			subject = fmt.Sprintf("[WSO2 Support] You have been given access to %s", data.ProjectName)
+			if data.AccountCreated {
+				subject = fmt.Sprintf("[WSO2 Support] Welcome: you now have access to %s", data.ProjectName)
+			}
 			body = notifications.RenderProjectContactInvitedNewEmail(data)
 		}
-		if err := d.onboarding.Email.SendEmail(ctx, to, nil, nil, nil, subject, body, nil); err != nil {
+		if err := d.onboarding.Email.SendEmailFrom(ctx, d.onboarding.EmailFrom, to, nil, nil, nil, subject, body, nil); err != nil {
 			err = fmt.Errorf("dispatch: send invitation for membership %s: %w", p.MembershipSfID, err)
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
 			return err
@@ -1526,7 +1546,10 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 // recordOnboardingStep writes one step's outcome to entity-service's
 // onboarding-step ledger (PUT /onboarding-steps/{membershipSfId}/{step}),
 // best-effort: a failure to record is logged at ERROR and otherwise
-// ignored. It must never mask the primary outcome — a step that genuinely
+// ignored. It is synchronous on purpose — the volume is a handful of
+// invitations a day and the two writes per record keep IDENTITY recorded
+// before EMAIL is attempted — but bounded by recordOnboardingStepTimeout
+// so a slow ledger cannot hold the record for long. It must never mask the primary outcome — a step that genuinely
 // succeeded must not turn into a retried (and, for email, re-sent) record
 // because the ledger was briefly unreachable, and a step that failed must
 // return its own error, not the ledger's. lastErr, when non-nil, becomes
@@ -1558,13 +1581,18 @@ func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectC
 	if lastErr != nil {
 		req.LastError = lastErr.Error()
 	}
-	if err := d.onboarding.Steps.RecordOnboardingStep(ctx, req); err != nil {
+	recordCtx, cancel := context.WithTimeout(ctx, recordOnboardingStepTimeout)
+	defer cancel()
+	if err := d.onboarding.Steps.RecordOnboardingStep(recordCtx, req); err != nil {
 		slog.ErrorContext(ctx, "dispatch: failed to record onboarding step; continuing",
 			"membershipSfId", p.MembershipSfID, "step", step, "status", status, "err", err)
 		return
 	}
 	slog.InfoContext(ctx, "dispatch: onboarding step recorded", "membershipSfId", p.MembershipSfID, "step", step, "status", status)
 }
+
+// recordOnboardingStepTimeout bounds one best-effort ledger write.
+const recordOnboardingStepTimeout = 5 * time.Second
 
 // onboardingEventModifiedOn returns the payload's Salesforce timestamp, or
 // the processing time when the payload has none (events.Validate has already

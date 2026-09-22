@@ -32,6 +32,7 @@ import (
 )
 
 type sentEmail struct {
+	from     string
 	to       []string
 	bcc      []string
 	subject  string
@@ -54,9 +55,13 @@ type mockEmailSender struct {
 func (m *mockEmailSender) FromAddress() string { return "noreply@wso2.com" }
 
 func (m *mockEmailSender) SendEmail(ctx context.Context, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error {
+	return m.SendEmailFrom(ctx, "", to, cc, bcc, replyTo, subject, htmlBody, attachments)
+}
+
+func (m *mockEmailSender) SendEmailFrom(ctx context.Context, from string, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls = append(m.calls, sentEmail{to: to, bcc: bcc, subject: subject, htmlBody: htmlBody})
+	m.calls = append(m.calls, sentEmail{from: from, to: to, bcc: bcc, subject: subject, htmlBody: htmlBody})
 	if m.errFor != nil {
 		return m.errFor(to)
 	}
@@ -1534,6 +1539,10 @@ type blockingEmailSender struct {
 }
 
 func (s *blockingEmailSender) FromAddress() string { return "noreply@wso2.com" }
+
+func (s *blockingEmailSender) SendEmailFrom(ctx context.Context, from string, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error {
+	return s.SendEmail(ctx, to, cc, bcc, replyTo, subject, htmlBody, attachments)
+}
 
 func (s *blockingEmailSender) SendEmail(ctx context.Context, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error {
 	atomic.AddInt32(&s.calls, 1)

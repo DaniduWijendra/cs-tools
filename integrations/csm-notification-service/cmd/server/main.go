@@ -209,7 +209,7 @@ func main() {
 	// CALL_SENDING_ENABLED below. Meant for temporarily silencing email
 	// while investigating a delivery issue without also having to stop
 	// exercising the rest of the pipeline (link resolution, Chat, Twilio).
-	emailSendingEnabled := os.Getenv("EMAIL_SENDING_ENABLED") != "false"
+	emailSendingEnabled := envBool("EMAIL_SENDING_ENABLED", true)
 	// A customer-audience notice puts the recipients in BCC and uses the from
 	// address as the only To, so an unset EMAIL_FROM_ADDRESS submits [""] to
 	// the email service rather than failing here. Required whenever sending is
@@ -227,7 +227,7 @@ func main() {
 	// call specifically — doesn't affect the Google Chat alert. Unlike
 	// EMAIL_DEBUG_MODE above, calls have no debug-recipient equivalent, so
 	// this keeps the simpler disable-entirely (log-only) shape.
-	callSendingEnabled := os.Getenv("CALL_SENDING_ENABLED") != "false"
+	callSendingEnabled := envBool("CALL_SENDING_ENABLED", true)
 	if !callSendingEnabled {
 		slog.Warn("CALL_SENDING_ENABLED=false; incident.created calls will be logged, not placed")
 	}
@@ -241,7 +241,7 @@ func main() {
 	defaultOnCallNumber := os.Getenv("INCIDENT_DEFAULT_CALL_TO")
 
 	dispatcher := dispatch.NewDispatcher(emailClient, googleChatClient, twilioClient, linkResolver, emailSendingEnabled, emailDebugMode, emailDebugRecipients, callSendingEnabled, defaultChatProduct, defaultOnCallNumber).
-		WithOnboarding(loadOnboardingConfig(customerEntityClient))
+		WithOnboarding(loadOnboardingConfig(customerEntityClient, emailClient))
 
 	// The main consumer's OnExhausted: publish the exhausted record to the
 	// dead-letter topic instead of just logging and dropping it. The DLQ's
@@ -487,9 +487,10 @@ func main() {
 // — the same entity-service, same shared app; entity-service additionally
 // requires this service's OAuth2 client id to be in its
 // AUTH_INTERNAL_CLIENT_IDS for that endpoint.
-func loadOnboardingConfig(steps *entity.CustomerEntityClient) dispatch.OnboardingConfig {
-	identityEnabled := os.Getenv("CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED") == "true"
-	emailEnabled := os.Getenv("CSM_MIGRATION_ONBOARD_EMAIL_ENABLED") == "true"
+func loadOnboardingConfig(steps *entity.CustomerEntityClient, emailClient *notifications.EmailClient) dispatch.OnboardingConfig {
+	// CSM_MIGRATION_* flags are opt-in: off unless exactly "true".
+	identityEnabled := envBool("CSM_MIGRATION_ONBOARD_IDENTITY_ENABLED", false)
+	emailEnabled := envBool("CSM_MIGRATION_ONBOARD_EMAIL_ENABLED", false)
 
 	scimBaseURL := os.Getenv("SCIM_BASE_URL")
 	if identityEnabled && scimBaseURL == "" {
@@ -503,14 +504,9 @@ func loadOnboardingConfig(steps *entity.CustomerEntityClient) dispatch.Onboardin
 		Scopes:       splitComma(os.Getenv("SCIM_SCOPES")),
 	})
 
-	onboardEmailClient := notifications.NewEmailClient(notifications.EmailConfig{
-		BaseURL:      os.Getenv("EMAIL_BASE_URL"),
-		TokenURL:     os.Getenv("OAUTH2_TOKEN_URL"),
-		ClientID:     os.Getenv("OAUTH2_CLIENT_ID"),
-		ClientSecret: os.Getenv("OAUTH2_CLIENT_SECRET"),
-		Scopes:       splitComma(os.Getenv("EMAIL_SCOPES")),
-		FromAddress:  envOrDefault("ONBOARD_EMAIL_FROM", os.Getenv("EMAIL_FROM_ADDRESS")),
-	})
+	// The invitation reuses the main email client (same grant, same token
+	// cache) and only overrides the sender when ONBOARD_EMAIL_FROM is set.
+	emailFrom := strings.TrimSpace(os.Getenv("ONBOARD_EMAIL_FROM"))
 
 	portalURL := strings.TrimRight(envOrDefault("ONBOARD_PORTAL_URL", "https://support.wso2.com"), "/")
 
@@ -519,11 +515,12 @@ func loadOnboardingConfig(steps *entity.CustomerEntityClient) dispatch.Onboardin
 	}
 	return dispatch.OnboardingConfig{
 		Identity:        scimClient,
-		Email:           onboardEmailClient,
+		Email:           emailClient,
 		Steps:           steps,
 		IdentityEnabled: identityEnabled,
 		EmailEnabled:    emailEnabled,
 		PortalURL:       portalURL,
+		EmailFrom:       emailFrom,
 	}
 }
 
@@ -565,6 +562,22 @@ func mustEnv(key string) string {
 		os.Exit(1)
 	}
 	return v
+}
+
+// envBool reads a boolean flag with its default spelled out at the call
+// site. Only the literal strings "true" and "false" (after trimming) change
+// the value; anything else, including unset, yields def. Killswitches such
+// as EMAIL_SENDING_ENABLED default to true; every CSM_MIGRATION_* flag
+// defaults to false and is turned on deliberately at cutover.
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true":
+		return true
+	case "false":
+		return false
+	default:
+		return def
+	}
 }
 
 func envOrDefault(key, def string) string {
