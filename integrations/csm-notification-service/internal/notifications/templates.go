@@ -458,13 +458,19 @@ type ProjectContactInvitedEmailData struct {
 	ProjectKey  string
 	Roles       []string
 	PortalURL   string
+	// AccountCreated is true only when the identity step ran for this
+	// record and created the account. The "new" template then says so;
+	// otherwise it only explains how to sign in, making no claim about
+	// whether an account exists.
+	AccountCreated bool
 }
 
 // RenderProjectContactInvitedNewEmail fills in the invitation for a contact
-// whose WSO2 account was just created (internal/scim reported existed=false,
-// or identity provisioning was disabled and so nothing could say
-// otherwise): welcome, you've been given access to the project, sign in
-// with your email, first sign-in asks for an email code.
+// not known to already have a WSO2 account: you've been given access to the
+// project, sign in with your email, first sign-in asks for an email code.
+// With d.AccountCreated (internal/scim reported existed=false) it also says
+// the account was created; with identity provisioning disabled it makes no
+// claim either way.
 func RenderProjectContactInvitedNewEmail(d ProjectContactInvitedEmailData) string {
 	return renderProjectContactInvited(projectContactInvitedNewTemplate, d)
 }
@@ -481,6 +487,12 @@ func RenderProjectContactInvitedExistingEmail(d ProjectContactInvitedEmailData) 
 func renderProjectContactInvited(tmpl string, d ProjectContactInvitedEmailData) string {
 	roles := strings.Join(d.Roles, ", ")
 	tmpl = applyOptionalBlock(tmpl, "ROLES", roles)
+	created, unknown := "", "x"
+	if d.AccountCreated {
+		created, unknown = "x", ""
+	}
+	tmpl = applyOptionalBlock(tmpl, "ACCOUNT_CREATED", created)
+	tmpl = applyOptionalBlock(tmpl, "ACCOUNT_UNKNOWN", unknown)
 	replacer := strings.NewReplacer(
 		"<!-- [DISPLAY_NAME] -->", escapeHTML(d.DisplayName),
 		"<!-- [EMAIL] -->", escapeHTML(d.Email),

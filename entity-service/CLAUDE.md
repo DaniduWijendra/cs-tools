@@ -264,7 +264,8 @@ The DATABASE `onboarding_step` is written **inside the same transaction**
 `DATABASE = FAILED` with `lastError` best-effort and returns the original error.
 `project_contact.invited` (`events.ProjectContactInvitedPayload`: membership /
 contact Salesforce ids, email, given / family name, project name and key, the
-raw Salesforce roles, `isIntegrationUser`, `type`) is published only after the
+raw Salesforce roles, `isIntegrationUser`, `type`, `eventModifiedOn` = the
+membership's Salesforce LastModifiedDate) is published only after the
 transaction committed and only for INVITED / RE-INVITED; a nil publisher skips
 it, a publish failure is logged (and recorded by `EventPublisherService`), never
 returned. csm-notification-service consumes it, provisions the Asgardeo user via

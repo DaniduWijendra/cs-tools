@@ -280,10 +280,21 @@ func TestRenderProjectContactInvitedEmail_Variants(t *testing.T) {
 		want, deny []string
 	}{
 		{
-			name:   "new account",
+			name: "new account",
+			render: func(d ProjectContactInvitedEmailData) string {
+				d.AccountCreated = true
+				return RenderProjectContactInvitedNewEmail(d)
+			},
+			want: []string{"Welcome", "A WSO2 account has been created for you", "verification code"},
+			deny: []string{"You already have a WSO2 account", "If you are signing in for the first time"},
+		},
+		{
+			// Identity provisioning disabled: the email must not claim an
+			// account was created, nor that one already exists.
+			name:   "account state unknown",
 			render: RenderProjectContactInvitedNewEmail,
-			want:   []string{"Welcome", "A WSO2 account has been created for you", "verification code"},
-			deny:   []string{"You already have a WSO2 account"},
+			want:   []string{"Welcome", "Sign in with your email address", "If you are signing in for the first time"},
+			deny:   []string{"A WSO2 account has been created for you", "You already have a WSO2 account"},
 		},
 		{
 			name:   "existing account",

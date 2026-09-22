@@ -171,8 +171,10 @@ func (c *Client) EnsureExternalUser(ctx context.Context, email, givenName, famil
 // 201 are successes: EnsureExternalUser needs to tell them apart, so unlike
 // this repo's other do() implementations (which accept any 2xx and return
 // the body alone) the status is returned too. Any other status is an
-// *apierror.Error carrying it and a bounded excerpt of the body, the same
-// shape internal/notifications/email.go produces.
+// *apierror.Error carrying the status only: the body is deliberately not
+// retained, because a SCIM validation error echoes the submitted userName
+// (the invitee's email) and this error ends up persisted as an onboarding
+// step's lastError. Same choice internal/entity makes.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	var reqBody io.Reader
 	if len(body) > 0 {
@@ -199,12 +201,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (int,
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		const maxErrBody = 256
-		excerpt := respBody
-		if len(excerpt) > maxErrBody {
-			excerpt = excerpt[:maxErrBody]
-		}
-		return resp.StatusCode, nil, &apierror.Error{StatusCode: resp.StatusCode, Body: string(excerpt)}
+		return resp.StatusCode, nil, &apierror.Error{StatusCode: resp.StatusCode}
 	}
 
 	return resp.StatusCode, respBody, nil

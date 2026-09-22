@@ -294,7 +294,8 @@ func TestDispatcher_Handle_ProjectContactInvited_BothFlagsOff(t *testing.T) {
 
 // TestDispatcher_Handle_ProjectContactInvited_IdentityOffUsesNewWording:
 // with identity disabled nothing can say whether the account exists, so
-// the email always uses the "new" template.
+// the email uses the "new" template in its neutral form — it must not
+// claim an account was created, nor that one already exists.
 func TestDispatcher_Handle_ProjectContactInvited_IdentityOffUsesNewWording(t *testing.T) {
 	identity, email, steps := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}, &mockStepRecorder{}
 	d := newOnboardingDispatcher(identity, email, steps, false, true)
@@ -305,8 +306,17 @@ func TestDispatcher_Handle_ProjectContactInvited_IdentityOffUsesNewWording(t *te
 	if len(identity.calls) != 0 {
 		t.Errorf("SCIM called %d times with identity disabled", len(identity.calls))
 	}
-	if len(email.calls) != 1 || !strings.Contains(email.calls[0].htmlBody, "A WSO2 account has been created for you") {
-		t.Error("want exactly one email using the new-account wording")
+	if len(email.calls) != 1 {
+		t.Fatalf("want exactly one email, got %d", len(email.calls))
+	}
+	body := email.calls[0].htmlBody
+	if !strings.Contains(body, "Sign in with your email address") ||
+		strings.Contains(body, "A WSO2 account has been created for you") ||
+		strings.Contains(body, "You already have a WSO2 account") {
+		t.Error("with identity disabled the email must use the neutral wording and make no claim about the account")
+	}
+	if !strings.Contains(email.calls[0].subject, "You have been given access to") {
+		t.Errorf("subject = %q, want the neutral subject", email.calls[0].subject)
 	}
 	assertSteps(t, steps, "IDENTITY=SKIPPED", "EMAIL=SUCCEEDED")
 }

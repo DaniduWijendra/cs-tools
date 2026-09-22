@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
@@ -117,12 +118,13 @@ func TestEnsureExternalUser_AlreadyExisted(t *testing.T) {
 }
 
 // TestEnsureExternalUser_UpstreamError: anything but 200/201 is an
-// *apierror.Error carrying the status and a body excerpt, so the caller
-// can record it as the step's lastError and let the consumer retry.
+// *apierror.Error carrying the status and nothing from the body — the
+// caller persists this as the step's lastError, and a SCIM validation
+// body would echo the invitee's email.
 func TestEnsureExternalUser_UpstreamError(t *testing.T) {
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"asgardeo unavailable"}`))
+		_, _ = w.Write([]byte(`{"error":"userName jane@acme.com is invalid"}`))
 	}))
 	defer apiSrv.Close()
 	tokenSrv := newTokenServer(t)
@@ -133,8 +135,11 @@ func TestEnsureExternalUser_UpstreamError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("EnsureExternalUser() error = %v, want *apierror.Error", err)
 	}
-	if apiErr.StatusCode != http.StatusInternalServerError || apiErr.Body != `{"error":"asgardeo unavailable"}` {
-		t.Errorf("got %+v, want status 500 and the body excerpt", apiErr)
+	if apiErr.StatusCode != http.StatusInternalServerError || apiErr.Body != "" {
+		t.Errorf("got %+v, want status 500 and no body retained", apiErr)
+	}
+	if strings.Contains(err.Error(), "jane@acme.com") {
+		t.Errorf("error text %q leaks the response body", err.Error())
 	}
 }
 

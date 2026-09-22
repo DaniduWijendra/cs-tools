@@ -1493,16 +1493,22 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 			PortalURL:   d.onboarding.PortalURL,
 		}
 		// The "existing" wording only when the identity step actually ran
-		// this record and said so; with identity disabled, nothing here can
-		// know whether the account is new, and welcoming someone who already
-		// has an account is the cheaper mistake than telling a brand-new
-		// user they already have one.
+		// this record and said so. With identity disabled nothing here can
+		// know whether an account exists, so the "new" template is sent
+		// with AccountCreated=false: it then says neither "an account has
+		// been created for you" nor "you already have one", only how to
+		// sign in.
 		var subject, body string
-		if d.onboarding.IdentityEnabled && existed {
+		switch {
+		case d.onboarding.IdentityEnabled && existed:
 			subject = fmt.Sprintf("[WSO2 Support] %s has been added to your account", data.ProjectName)
 			body = notifications.RenderProjectContactInvitedExistingEmail(data)
-		} else {
+		case d.onboarding.IdentityEnabled:
+			data.AccountCreated = true
 			subject = fmt.Sprintf("[WSO2 Support] Welcome: you now have access to %s", data.ProjectName)
+			body = notifications.RenderProjectContactInvitedNewEmail(data)
+		default:
+			subject = fmt.Sprintf("[WSO2 Support] You have been given access to %s", data.ProjectName)
 			body = notifications.RenderProjectContactInvitedNewEmail(data)
 		}
 		if err := d.onboarding.Email.SendEmail(ctx, to, nil, nil, nil, subject, body, nil); err != nil {
@@ -1526,14 +1532,14 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 // return its own error, not the ledger's. lastErr, when non-nil, becomes
 // the row's lastError (entity-service keeps it only for a FAILED status).
 //
-// EventModifiedOn is this service's processing time, not a Salesforce
-// LastModifiedDate: the invited payload carries none (entity-service
-// publishes it after its own write, not from the raw Salesforce event).
-// entity-service only applies a step write whose eventModifiedOn is not
-// older than the row's stored one, so a monotonically-later timestamp per
-// attempt is exactly what's needed — every retry's write wins over the
-// attempt before it, and a stale attempt that lands late can't overwrite
-// a newer outcome.
+// EventModifiedOn is the payload's eventModifiedOn — the Salesforce
+// LastModifiedDate of the membership version this event describes. entity-
+// service only applies a step write whose eventModifiedOn is not older than
+// the row's stored one, so a delayed delivery of an older invitation cannot
+// overwrite the outcome recorded for a newer one, while retries of the same
+// version (equal timestamps) still land. Only when the payload carries no
+// timestamp (entity-service could not parse the Salesforce date) does this
+// fall back to the processing time.
 func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectContactInvitedPayload, step entity.OnboardingStep, status entity.OnboardingStepStatus, lastErr error) {
 	if d.onboarding.Steps == nil {
 		slog.WarnContext(ctx, "dispatch: no onboarding-step recorder configured; step outcome not recorded",
@@ -1545,7 +1551,7 @@ func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectC
 		Step:            step,
 		Status:          status,
 		EventType:       string(events.TypeProjectContactInvited),
-		EventModifiedOn: time.Now().UTC(),
+		EventModifiedOn: onboardingEventModifiedOn(p),
 		Email:           p.Email,
 		ContactSfID:     p.ContactSfID,
 	}
@@ -1558,6 +1564,18 @@ func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectC
 		return
 	}
 	slog.InfoContext(ctx, "dispatch: onboarding step recorded", "membershipSfId", p.MembershipSfID, "step", step, "status", status)
+}
+
+// onboardingEventModifiedOn returns the payload's Salesforce timestamp, or
+// the processing time when the payload has none (events.Validate has already
+// rejected a malformed one).
+func onboardingEventModifiedOn(p events.ProjectContactInvitedPayload) time.Time {
+	if p.EventModifiedOn != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, p.EventModifiedOn); err == nil {
+			return ts.UTC()
+		}
+	}
+	return time.Now().UTC()
 }
 
 // rememberIdentityExisted/rememberedIdentityExisted/forgetIdentityExisted

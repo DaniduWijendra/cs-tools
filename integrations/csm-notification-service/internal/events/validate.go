@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"time"
 )
 
 // emailPattern is a deliberately loose "does this look like an email
@@ -269,6 +270,11 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		}
 		if p.MembershipSfID != entityID {
 			return fmt.Errorf("events: payload membershipSfId %q does not match entityId %q", p.MembershipSfID, entityID)
+		}
+		if p.EventModifiedOn != "" {
+			if _, err := time.Parse(time.RFC3339Nano, p.EventModifiedOn); err != nil {
+				return fmt.Errorf("events: eventModifiedOn %q is not RFC 3339: %w", p.EventModifiedOn, err)
+			}
 		}
 	default:
 		return fmt.Errorf("events: unknown event type %q", t)

@@ -435,4 +435,9 @@ type ProjectContactInvitedPayload struct {
 	Roles             []string `json:"roles"`
 	IsIntegrationUser bool     `json:"isIntegrationUser"`
 	Type              string   `json:"type"`
+	// EventModifiedOn is the Salesforce LastModifiedDate of the membership
+	// version this event describes (RFC 3339); dispatch stamps its
+	// onboarding-step writes with it. Optional: an empty value means
+	// entity-service could not parse the Salesforce date.
+	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
 }
