@@ -1394,14 +1394,14 @@ func (d *Dispatcher) handleCRPlanDateNotice(ctx context.Context, record eventbus
 // identityExisted remembers the first successful answer per record for
 // exactly that case; it's released on full success or record.NoMoreRetries
 // (never IsFinalAttempt — see recordBaseKey for why a dead-lettered record
-// keeps the same key on the DLQ topic). The SCIM call itself is guarded by
-// claim() like every other outbound call here, so two Handle calls racing
-// on the same record (a consumer-group rebalance, or two of this process's
-// consumers) cannot both provision: the loser returns an error and its
-// retry finds the winner's remembered answer. No claim/forget tracking is
-// needed for the email itself: nothing after SendEmail can fail in a way
-// that triggers a retry (step recording is best-effort), so a sent
-// invitation is never re-sent by this handler's own retries.
+// keeps the same key on the DLQ topic). The whole attempt is guarded by a
+// per-record claim() (see inflightKey below), so two Handle calls racing on
+// the same record cannot both provision or both send: the loser returns an
+// error and its retry runs alone, finding the winner's remembered answer.
+// No claim/forget tracking is needed for the email itself: nothing after
+// SendEmail can fail in a way that triggers a retry (step recording is
+// best-effort), so a sent invitation is never re-sent by this handler's own
+// retries.
 func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eventbus.Record, raw json.RawMessage) (retErr error) {
 	var p events.ProjectContactInvitedPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -1419,15 +1419,28 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 		return nil
 	}
 
+	// One attempt at a time per record. Two Handle calls racing on the same
+	// record (a consumer-group rebalance, or two of this process's
+	// consumers) must not both run the identity or the email step: the
+	// loser fails here without touching anything and its retry runs the
+	// whole sequence alone, finding whatever the winner remembered. The
+	// guard covers the entire attempt, not just the SCIM call — a call that
+	// arrived after the memo was written but before the winner's email
+	// went out would otherwise send a second invitation. Released whenever
+	// this call returns; the memo below outlives it for sequential retries.
+	inflightKey := recordBaseKey(record) + "/onboarding"
+	if !d.claim(inflightKey) {
+		return fmt.Errorf("dispatch: onboarding for membership %s is already in progress", p.MembershipSfID)
+	}
+	defer d.forget(inflightKey)
+
 	identityKey := recordBaseKey(record) + "/identity"
 	defer func() {
-		// Drop the remembered identity answer and its claim once no retry
-		// can ever need them again: the whole record succeeded, or nothing
-		// will redeliver its content anywhere (NoMoreRetries — see its doc
-		// comment).
+		// Drop the remembered identity answer once no retry can ever need
+		// it again: the whole record succeeded, or nothing will redeliver
+		// its content anywhere (NoMoreRetries — see its doc comment).
 		if retErr == nil || record.NoMoreRetries {
 			d.forgetIdentityExisted(identityKey)
-			d.forget(identityKey)
 		}
 	}()
 
@@ -1453,16 +1466,8 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
 			return err
 		}
-		if !d.claim(identityKey) {
-			// Another Handle call holds this record's identity step right
-			// now and has not remembered an answer yet. Don't provision a
-			// second time; let this attempt fail and retry once the winner
-			// has recorded its result.
-			return fmt.Errorf("dispatch: identity step for membership %s is already in progress", p.MembershipSfID)
-		}
 		user, err := d.onboarding.Identity.EnsureExternalUser(ctx, p.Email, p.GivenName, p.FamilyName)
 		if err != nil {
-			d.forget(identityKey)
 			err = fmt.Errorf("dispatch: provision identity for membership %s: %w", p.MembershipSfID, err)
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepIdentity, entity.OnboardingStepFailed, err)
 			return err

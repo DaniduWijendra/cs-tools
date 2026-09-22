@@ -168,8 +168,49 @@ func TestDispatcher_Handle_ProjectContactInvited_ConcurrentHandlesProvisionOnce(
 	}
 	// The winner's success released the claim and the memo; a later
 	// redelivery starts clean rather than being stuck behind a stale claim.
-	if d.rememberedIdentityExistedForTest(recordBaseKey(rec)+"/identity") || d.claimedForTest(recordBaseKey(rec)+"/identity") {
-		t.Error("identity claim/memo must be released after the record succeeded")
+	if d.rememberedIdentityExistedForTest(recordBaseKey(rec)+"/identity") || d.claimedForTest(recordBaseKey(rec)+"/onboarding") {
+		t.Error("in-flight claim and identity memo must be released after the record succeeded")
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ConcurrentHandleDuringEmailSendsOnce:
+// the guard covers the whole attempt, not just the SCIM call. A second
+// Handle that arrives after the identity memo is written but while the
+// first is still sending the email must fail without sending a second one.
+func TestDispatcher_Handle_ProjectContactInvited_ConcurrentHandleDuringEmailSendsOnce(t *testing.T) {
+	identity, steps := &mockIdentityProvisioner{}, &mockStepRecorder{}
+	email := &mockEmailSender{block: make(chan struct{})}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+	rec := invitedRecord(false)
+
+	first := make(chan error, 1)
+	go func() { first <- d.Handle(context.Background(), rec) }()
+	// Wait until the first call is inside SendEmail (identity done, memo
+	// written), then race it with a second call.
+	deadline := time.After(5 * time.Second)
+	for {
+		identity.mu.Lock()
+		n := len(identity.calls)
+		identity.mu.Unlock()
+		if n == 1 && d.rememberedIdentityExistedForTest(recordBaseKey(rec)+"/identity") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("first Handle never reached the email step")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if err := d.Handle(context.Background(), rec); err == nil {
+		t.Fatal("second Handle succeeded while the first was still sending; it must fail without sending")
+	}
+	close(email.block)
+	if err := <-first; err != nil {
+		t.Fatalf("first Handle returned %v, want nil", err)
+	}
+	if len(identity.calls) != 1 || len(email.calls) != 1 {
+		t.Errorf("scim=%d emails=%d, want exactly one of each", len(identity.calls), len(email.calls))
 	}
 }
 

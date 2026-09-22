@@ -50,6 +50,9 @@ type mockEmailSender struct {
 	// other test here, which drives Handle sequentially.
 	mu    sync.Mutex
 	calls []sentEmail
+	// block, when non-nil, holds every send open until it is closed, so a
+	// test can have a second Handle call arrive mid-send.
+	block chan struct{}
 }
 
 func (m *mockEmailSender) FromAddress() string { return "noreply@wso2.com" }
@@ -59,6 +62,9 @@ func (m *mockEmailSender) SendEmail(ctx context.Context, to, cc, bcc, replyTo []
 }
 
 func (m *mockEmailSender) SendEmailFrom(ctx context.Context, from string, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []notifications.EmailAttachment) error {
+	if m.block != nil {
+		<-m.block
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, sentEmail{from: from, to: to, bcc: bcc, subject: subject, htmlBody: htmlBody})
