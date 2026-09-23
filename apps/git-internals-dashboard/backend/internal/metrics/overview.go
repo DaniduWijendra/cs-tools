@@ -443,6 +443,9 @@ func BuildOverview(ctx context.Context, pool *pgxpool.Pool, cfg *config.AppConfi
 	sort.SliceStable(priorities, func(i, j int) bool { return rankOf(priorities[i].Code) < rankOf(priorities[j].Code) })
 
 	// ── 6. Matrix (honors repo + abtTeam; every tier, independent cells) ────
+	// The four cells are mutually exclusive and sum to each row's total: a
+	// CS-side issue always lands in Cs, never also in Violated/AtRisk/
+	// OnTrack, regardless of its own SLA state.
 	matrixRows := make([]MatrixRow, 0, len(priorities))
 	for _, p := range priorities {
 		var violated, atRisk, onTrack, cs, total int
@@ -453,17 +456,15 @@ func BuildOverview(ctx context.Context, pool *pgxpool.Pool, cfg *config.AppConfi
 			total++
 			state := slaStateOf(i.SlaState)
 			isCs := isCsStatus(statusOf(i.CurrentStatus))
-			if state == "VIOLATED" {
-				violated++
-			}
-			if state == "AT_RISK" {
-				atRisk++
-			}
-			if state == "OK" && !isCs {
-				onTrack++
-			}
-			if isCs {
+			switch {
+			case isCs:
 				cs++
+			case state == "VIOLATED":
+				violated++
+			case state == "AT_RISK":
+				atRisk++
+			case state == "OK":
+				onTrack++
 			}
 		}
 		matrixRows = append(matrixRows, MatrixRow{
@@ -485,17 +486,15 @@ func BuildOverview(ctx context.Context, pool *pgxpool.Pool, cfg *config.AppConfi
 		grandTotal++
 		state := slaStateOf(i.SlaState)
 		isCs := isCsStatus(statusOf(i.CurrentStatus))
-		if state == "VIOLATED" {
-			matrixTotals.Violated++
-		}
-		if state == "AT_RISK" {
-			matrixTotals.AtRisk++
-		}
-		if state == "OK" && !isCs {
-			matrixTotals.OnTrack++
-		}
-		if isCs {
+		switch {
+		case isCs:
 			matrixTotals.Cs++
+		case state == "VIOLATED":
+			matrixTotals.Violated++
+		case state == "AT_RISK":
+			matrixTotals.AtRisk++
+		case state == "OK":
+			matrixTotals.OnTrack++
 		}
 	}
 

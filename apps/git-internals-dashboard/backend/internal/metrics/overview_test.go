@@ -484,11 +484,30 @@ func TestBuildOverviewPrioritiesAndMatrix(t *testing.T) {
 		t.Errorf("expected P3 onTrack=1, got %+v", overview.Priorities[2])
 	}
 
+	// Fixture 102 (High(P2), WOC — a CS-side status) is AT_RISK: the matrix
+	// row's own cells must land it in Cs only, never also in AtRisk, and
+	// every row's four cells must sum to that row's own total.
+	if overview.Matrix.Rows[1].Cells.AtRisk != 0 || overview.Matrix.Rows[1].Cells.Cs != 1 {
+		t.Errorf("expected P2 matrix row cells atRisk=0 cs=1, got %+v", overview.Matrix.Rows[1].Cells)
+	}
+	for _, row := range overview.Matrix.Rows {
+		sum := row.Cells.Violated + row.Cells.AtRisk + row.Cells.OnTrack + row.Cells.Cs
+		if sum != row.Total {
+			t.Errorf("expected row %s cells to sum to its own total %d, got cells=%+v (sum=%d)", row.Code, row.Total, row.Cells, sum)
+		}
+	}
+
 	if overview.Matrix.GrandTotal != 3 {
 		t.Errorf("expected matrix grandTotal=3, got %d", overview.Matrix.GrandTotal)
 	}
-	if overview.Matrix.Totals.Violated != 1 || overview.Matrix.Totals.AtRisk != 1 || overview.Matrix.Totals.Cs != 1 || overview.Matrix.Totals.OnTrack != 1 {
-		t.Errorf("expected matrix totals violated=1 atRisk=1 cs=1 onTrack=1, got %+v", overview.Matrix.Totals)
+	// Fixture 102 (High(P2), WOC — a CS-side status) is AT_RISK: the matrix's
+	// four cells are mutually exclusive, so a CS-side issue lands only in Cs,
+	// never also in AtRisk, regardless of its own SLA state.
+	if overview.Matrix.Totals.Violated != 1 || overview.Matrix.Totals.AtRisk != 0 || overview.Matrix.Totals.Cs != 1 || overview.Matrix.Totals.OnTrack != 1 {
+		t.Errorf("expected matrix totals violated=1 atRisk=0 cs=1 onTrack=1, got %+v", overview.Matrix.Totals)
+	}
+	if overview.Matrix.Totals.Violated+overview.Matrix.Totals.AtRisk+overview.Matrix.Totals.OnTrack+overview.Matrix.Totals.Cs != overview.Matrix.GrandTotal {
+		t.Errorf("expected matrix cells to sum to grandTotal, got totals=%+v grandTotal=%d", overview.Matrix.Totals, overview.Matrix.GrandTotal)
 	}
 }
 
@@ -697,8 +716,10 @@ func TestBuildOverviewAbtTeamFilterNarrowsEverySection(t *testing.T) {
 	if overview.Matrix.GrandTotal != 2 {
 		t.Errorf("expected matrix grandTotal=2, got %d", overview.Matrix.GrandTotal)
 	}
-	if overview.Matrix.Totals.Violated != 1 || overview.Matrix.Totals.AtRisk != 1 || overview.Matrix.Totals.Cs != 1 || overview.Matrix.Totals.OnTrack != 0 {
-		t.Errorf("expected matrix totals violated=1 atRisk=1 cs=1 onTrack=0, got %+v", overview.Matrix.Totals)
+	// The AT_RISK P2 issue is on a CS-side status ("WOC"), so it lands only
+	// in Cs, never also in AtRisk.
+	if overview.Matrix.Totals.Violated != 1 || overview.Matrix.Totals.AtRisk != 0 || overview.Matrix.Totals.Cs != 1 || overview.Matrix.Totals.OnTrack != 0 {
+		t.Errorf("expected matrix totals violated=1 atRisk=0 cs=1 onTrack=0, got %+v", overview.Matrix.Totals)
 	}
 
 	// Volume counts issue creation, so the fixture's issues all land in the

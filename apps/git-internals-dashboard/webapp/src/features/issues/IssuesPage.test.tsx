@@ -134,36 +134,19 @@ describe("IssuesPage", () => {
     delete window.config;
   });
 
-  it("keeps a filter changed mid-debounce instead of the search box's stale snapshot clobbering it", async () => {
+  it("clicking a sortable column header sets sort/order URL params", async () => {
     vi.stubGlobal("fetch", fetchMockFor());
 
     const router = renderIssuesPage();
-
-    // Let the initial overview/issues/taxonomy queries settle.
     await act(async () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    const searchInput = screen.getByPlaceholderText("Search by issue #…");
-    act(() => {
-      fireEvent.change(searchInput, { target: { value: "42" } });
-    });
-
-    // Before the 300ms search debounce fires, apply a second, non-debounced
-    // change — clicking a sortable column header goes through the same
-    // immediate setParams(...) path as a filter dropdown.
     act(() => {
       fireEvent.click(screen.getByText("Created"));
     });
 
-    await act(async () => {
-      vi.advanceTimersByTime(300);
-      await vi.runOnlyPendingTimersAsync();
-    });
-
-    const search = router.state.location.search;
-    expect(search).toContain("q=42");
-    expect(search).toContain("sort=created");
+    expect(router.state.location.search).toContain("sort=created");
   });
 
   it("ticking two Status options sets repeated status= URL params, OR-ed together", async () => {

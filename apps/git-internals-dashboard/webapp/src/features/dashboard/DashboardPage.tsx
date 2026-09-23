@@ -43,15 +43,19 @@ import { acrylicSurfaceSx } from "@lib/surfaces";
 // exact, rather than being carried across as `bucket` verbatim: violated/
 // at_risk become an slaState tick, cs/product_side become one status= tick
 // per matching taxonomy status (falling back to `bucket` when taxonomy
-// hasn't loaded yet), and untracked becomes the priority sentinel. A bucket
-// with no such exact equivalent (on_track, or tracked with no priority
-// override) is carried across as `bucket`, which /issues then shows as a
-// removable scope chip.
+// hasn't loaded yet), untracked becomes the priority sentinel, and tracked
+// (with or without a specific priority override) becomes one priority= tick
+// per matching canonical priority tier — every tier when there's no
+// override, since "has a priority" and "priority is one of the configured
+// tiers" are the same set of issues. A bucket with no such exact equivalent
+// (on_track is the only one left) is carried across as `bucket`, which
+// /issues then shows as a removable scope chip.
 function buildDrillUrl(
   bucket: string,
   opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null },
   currentSearch: string,
   taxonomy: Taxonomy | undefined,
+  priorityKeys: string[],
 ): string {
   const base = new URLSearchParams(currentSearch);
   const next = new URLSearchParams();
@@ -64,8 +68,12 @@ function buildDrillUrl(
   resolve("repo");
   resolve("abtTeam");
 
-  if (bucket === "tracked" && opts.priority) {
-    next.set("priority", opts.priority);
+  if (bucket === "tracked") {
+    if (opts.priority) {
+      next.set("priority", opts.priority);
+    } else {
+      for (const key of priorityKeys) next.append("priority", key);
+    }
     return `/issues?${next.toString()}`;
   }
   if (bucket === "untracked") {
@@ -99,7 +107,7 @@ function buildDrillUrl(
       }
       break;
     }
-    default: // on_track, tracked with no priority override, and any other scope
+    default: // on_track, and any other scope with no dropdown equivalent
       next.set("bucket", bucket);
   }
   return `/issues?${next.toString()}`;
@@ -131,7 +139,8 @@ export default function DashboardPage() {
     bucket: string,
     opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null } = {},
   ) => {
-    void navigate(buildDrillUrl(bucket, opts, params.toString(), taxonomy));
+    const priorityKeys = overview?.priorities.map((p) => p.key) ?? [];
+    void navigate(buildDrillUrl(bucket, opts, params.toString(), taxonomy, priorityKeys));
   };
 
   if (isError && !overview) {

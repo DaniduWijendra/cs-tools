@@ -14,8 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { useState, useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { Box, Button, Chip, Skeleton, TablePagination, TableSortLabel } from "@mui/material";
 import { X } from "@wso2/oxygen-ui-icons-react";
 import { useOverview, useIssues, useTaxonomy, makeIsCsStatus } from "@api/hooks";
@@ -33,8 +32,8 @@ import { gridTemplate } from "@lib/grid";
 import { SLA_STATE_LABEL } from "@lib/sla";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 
-const ROWS_PER_PAGE_OPTIONS = [20, 50, 100];
-const DEFAULT_ROWS_PER_PAGE = 20;
+const ROWS_PER_PAGE_OPTIONS = [10, 20, 50, 100];
+const DEFAULT_ROWS_PER_PAGE = 10;
 
 // SLA state dropdown options, in a fixed worst-to-best order. TERMINAL is
 // excluded: this page lists open, non-terminal issues only.
@@ -73,8 +72,6 @@ const FILTER_KEYS = ["repo", "priority", "abtTeam", "status", "slaState"] as con
 /** The filtered/drill-down issue list page, URL-driven by the five filter dropdowns, bucket, sort/order, and q. */
 export default function IssuesPage() {
   const [params, setParams] = useSearchParams();
-  const navigate = useNavigate();
-  const [qInput, setQInput] = useState(params.get("q") ?? "");
 
   const { repo, priority, abtTeam, status, slaState, setFilter } = useIssueListFilters();
   const bucket = params.get("bucket") as BucketKey | null;
@@ -82,26 +79,6 @@ export default function IssuesPage() {
   const order = parseIssueSortOrder(params.get("order"));
   const rowsPerPage = Number(params.get("pageSize")) || DEFAULT_ROWS_PER_PAGE;
   const page = Number(params.get("page")) || 0;
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      // This effect re-runs on every params change (e.g. clicking to page 2
-      // sets ?page=1, which re-fires it) since it's re-based on the current
-      // `params` every time so a filter change applied while this timer is
-      // pending is never clobbered by a stale snapshot when it finally fires
-      // — see below. But that means it must bail out here whenever qInput
-      // isn't actually introducing a new search, or it would unconditionally
-      // strip `page` on every unrelated param change (e.g. pagination),
-      // bouncing the page back to 1 a moment after any click.
-      if ((params.get("q") ?? "") === qInput) return;
-      const next = new URLSearchParams(params);
-      if (qInput) next.set("q", qInput);
-      else next.delete("q");
-      next.delete("page"); // a new search always starts back at page 1
-      void navigate(`/issues?${next.toString()}`.replace(/\?$/, ""), { replace: true });
-    }, 300);
-    return () => clearTimeout(t);
-  }, [qInput, navigate, params]);
 
   // TablePagination's page is 0-indexed; the URL stores it 1-indexed-minus-1
   // implicitly (0 = unset = page 1) so a bare /issues URL has no ?page=0 noise.
@@ -211,26 +188,14 @@ export default function IssuesPage() {
         <StaleDataAlert key={errorUpdatedAt} message={errorMessage(error, "Failed to refresh the issue list")} />
       )}
 
-      <Box sx={{ mb: 2, mt: "18px", display: "flex", flexWrap: "wrap", alignItems: "flex-end", justifyContent: "space-between", gap: "14px" }}>
-        <Box>
-          <Box component="h1" sx={{ m: 0, fontSize: 22, fontWeight: 600, lineHeight: 1.2, letterSpacing: "-0.01em" }}>{title}</Box>
-          <Box sx={{ mt: 0.75, fontSize: 13, color: "var(--sla-fg3)" }}>
-            <Box component="b" sx={{ fontWeight: 600, color: "var(--sla-fg2)", fontFamily: "var(--font-mono)" }}>
-              {total}
-            </Box>{" "}
-            matching open issues · click any row to open it on GitHub
-          </Box>
+      <Box sx={{ mb: 2, mt: "18px" }}>
+        <Box component="h1" sx={{ m: 0, fontSize: 22, fontWeight: 600, lineHeight: 1.2, letterSpacing: "-0.01em" }}>{title}</Box>
+        <Box sx={{ mt: 0.75, fontSize: 13, color: "var(--sla-fg3)" }}>
+          <Box component="b" sx={{ fontWeight: 600, color: "var(--sla-fg2)", fontFamily: "var(--font-mono)" }}>
+            {total}
+          </Box>{" "}
+          matching open issues · click any row to open it on GitHub
         </Box>
-        <Box
-          component="input"
-          placeholder="Search by issue #…"
-          value={qInput}
-          onChange={(e) => setQInput((e.target as HTMLInputElement).value.replace(/\D/g, ""))}
-          sx={{
-            height: 36, width: 192, borderRadius: "9px", border: "1px solid var(--sla-border)", bgcolor: "var(--sla-card)",
-            px: 1.5, fontSize: 13, color: "var(--sla-fg)", fontFamily: "inherit", "&:focus": { outline: "none", borderColor: "var(--sla-fg3)" },
-          }}
-        />
       </Box>
 
       {hasScopeChip && (

@@ -20,6 +20,7 @@ import { Outlet, useMatch } from "react-router";
 import { useOverview } from "@api/hooks";
 import { FetchProgressBar, FetchProgressProvider } from "@components/FetchProgressBar";
 import { FilterSelect } from "@components/FilterSelect";
+import { IssueSearchBox } from "@components/IssueSearchBox";
 import { SyncButton } from "@components/SyncButton";
 import { UserProfile } from "@components/UserProfile";
 import { useFetchProgressActive } from "@lib/fetchProgress";
@@ -130,7 +131,7 @@ function AppShellContent({ children }: { children?: ReactNode }) {
             </Box>
           </Box>
 
-          {!onIssuesPage && <GlobalFilterSelects />}
+          {onIssuesPage ? <IssueSearchBox /> : <GlobalFilterSelects />}
 
           <Box sx={{ display: "flex", alignItems: "center", gap: "10px", pl: 1 }}>
             <SyncButton />
