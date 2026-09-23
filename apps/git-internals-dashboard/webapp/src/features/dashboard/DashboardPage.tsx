@@ -22,7 +22,8 @@ import { StaleDataAlert } from "@components/StaleDataAlert";
 import { UnknownStatusAlert } from "@components/UnknownStatusAlert";
 import { errorMessage } from "@lib/apiError";
 import { useReportFetchProgress } from "@lib/fetchProgress";
-import { useGlobalFilters } from "@lib/filters";
+import { NO_PRIORITY_VALUE, useGlobalFilters } from "@lib/filters";
+import type { Taxonomy } from "@api/types";
 import { HeroCard, CsHeroCard } from "@components/HeroCard";
 import { ProjectCard } from "@components/ProjectCard";
 import { PriorityTierCard } from "@components/PriorityTierCard";
@@ -37,14 +38,23 @@ import { acrylicSurfaceSx } from "@lib/surfaces";
 // the current filter. status is list-scoped — only ever set when this drill asks for it
 // (never inherited), so e.g. a single-CS-status refinement can't leak into a later
 // "Violated" drill.
+//
+// bucket itself maps onto /issues's dropdown-backed filters wherever that's
+// exact, rather than being carried across as `bucket` verbatim: violated/
+// at_risk become an slaState tick, cs/product_side become one status= tick
+// per matching taxonomy status (falling back to `bucket` when taxonomy
+// hasn't loaded yet), and untracked becomes the priority sentinel. A bucket
+// with no such exact equivalent (on_track, or tracked with no priority
+// override) is carried across as `bucket`, which /issues then shows as a
+// removable scope chip.
 function buildDrillUrl(
   bucket: string,
   opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null },
   currentSearch: string,
+  taxonomy: Taxonomy | undefined,
 ): string {
   const base = new URLSearchParams(currentSearch);
   const next = new URLSearchParams();
-  next.set("bucket", bucket);
   // Carries repo/priority/abtTeam from the current URL unless opts explicitly sets
   // or clears (null) them for this drill.
   const resolve = (key: "repo" | "priority" | "abtTeam") => {
@@ -52,9 +62,46 @@ function buildDrillUrl(
     if (v) next.set(key, v);
   };
   resolve("repo");
-  resolve("priority");
   resolve("abtTeam");
-  if (opts.status) next.set("status", opts.status);
+
+  if (bucket === "tracked" && opts.priority) {
+    next.set("priority", opts.priority);
+    return `/issues?${next.toString()}`;
+  }
+  if (bucket === "untracked") {
+    next.set("priority", NO_PRIORITY_VALUE);
+    return `/issues?${next.toString()}`;
+  }
+  resolve("priority");
+
+  switch (bucket) {
+    case "violated":
+      next.set("slaState", "VIOLATED");
+      break;
+    case "at_risk":
+      next.set("slaState", "AT_RISK");
+      break;
+    case "cs":
+      if (opts.status) {
+        next.set("status", opts.status);
+      } else if (taxonomy) {
+        for (const s of taxonomy.csStatuses) next.append("status", s);
+      } else {
+        next.set("bucket", "cs");
+      }
+      break;
+    case "product_side": {
+      const productSideStatuses = taxonomy?.statuses.filter((s) => s.category === "PRODUCT_SIDE").map((s) => s.name) ?? [];
+      if (productSideStatuses.length > 0) {
+        for (const s of productSideStatuses) next.append("status", s);
+      } else {
+        next.set("bucket", "product_side");
+      }
+      break;
+    }
+    default: // on_track, tracked with no priority override, and any other scope
+      next.set("bucket", bucket);
+  }
   return `/issues?${next.toString()}`;
 }
 
@@ -84,7 +131,7 @@ export default function DashboardPage() {
     bucket: string,
     opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null } = {},
   ) => {
-    void navigate(buildDrillUrl(bucket, opts, params.toString()));
+    void navigate(buildDrillUrl(bucket, opts, params.toString(), taxonomy));
   };
 
   if (isError && !overview) {

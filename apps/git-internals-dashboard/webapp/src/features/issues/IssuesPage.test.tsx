@@ -28,18 +28,32 @@ function jsonResponse(body: unknown): Response {
 const EMPTY_OVERVIEW = {
   refreshedAt: "2026-01-01T00:00:00Z",
   filters: { repo: null, priority: null, abtTeam: null },
-  abtTeams: [],
+  abtTeams: ["Atlas"],
   hero: {
     violated: { n: 0, delta: 0, spark: [] },
     atRisk: { n: 0, delta: 0, spark: [] },
     cs: { n: 0, byStatus: [] },
     productSide: { n: 0, delta: 0, spark: [] },
   },
-  projects: [],
-  priorities: [],
+  projects: [
+    { repoId: 1, name: "Alpha", repo: "org/alpha", violated: 0, atRisk: 0, cs: 0, onTrack: 0, openTracked: 0, untracked: 0, worst: false, allClear: true },
+  ],
+  priorities: [
+    { key: "critical", code: "P1", label: "Critical", budgetHours: 24, violated: 0, atRisk: 0, cs: 0, onTrack: 0, total: 0 },
+  ],
   matrix: { rows: [], totals: { violated: 0, atRisk: 0, onTrack: 0, cs: 0 }, grandTotal: 0 },
   volume: [],
   unknownStatuses: [],
+};
+
+const TAXONOMY = {
+  statuses: [
+    { name: "Open", category: "PRODUCT_SIDE", accruesSla: true, isTerminal: false, sortOrder: 10 },
+    { name: "WOC", category: "CS_SIDE", accruesSla: false, isTerminal: false, sortOrder: 20 },
+    { name: "Pending Patch Queue", category: "CS_SIDE", accruesSla: false, isTerminal: false, sortOrder: 30 },
+    { name: "Resolved", category: "OTHER", accruesSla: false, isTerminal: true, sortOrder: 40 },
+  ],
+  csStatuses: ["WOC", "Pending Patch Queue"],
 };
 
 /** Two issues with title/abtTeam/openedBy set (one with openedBy: null), as the /issues envelope shape. */
@@ -82,12 +96,21 @@ const ISSUES_WITH_TITLES = {
   hasMore: false,
 };
 
-/** Renders IssuesPage under a fresh QueryClient and a memory router at /issues. */
-function renderIssuesPage() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const router = createMemoryRouter([{ path: "/issues", element: <IssuesPage /> }], {
-    initialEntries: ["/issues"],
+/** A fetch mock backing overview/taxonomy from the fixtures above, with issuesBody for /issues. */
+function fetchMockFor(issuesBody: unknown = { issues: [], total: 0, limit: 20, offset: 0, hasMore: false }) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
+    if (url.includes("/issues")) return Promise.resolve(jsonResponse(issuesBody));
+    if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse(TAXONOMY));
+    return Promise.reject(new Error(`unexpected fetch: ${url}`));
   });
+}
+
+/** Renders IssuesPage under a fresh QueryClient and a memory router at /issues. */
+function renderIssuesPage(initialEntries: string[] = ["/issues"]) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter([{ path: "/issues", element: <IssuesPage /> }], { initialEntries });
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -112,14 +135,7 @@ describe("IssuesPage", () => {
   });
 
   it("keeps a filter changed mid-debounce instead of the search box's stale snapshot clobbering it", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
-      if (url.includes("/issues")) return Promise.resolve(jsonResponse([]));
-      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", fetchMockFor());
 
     const router = renderIssuesPage();
 
@@ -134,10 +150,10 @@ describe("IssuesPage", () => {
     });
 
     // Before the 300ms search debounce fires, apply a second, non-debounced
-    // filter change (the "Violated" bucket chip) — this goes through the
-    // same immediate setParams(...) path as the repo/priority <Select>s.
+    // change — clicking a sortable column header goes through the same
+    // immediate setParams(...) path as a filter dropdown.
     act(() => {
-      fireEvent.click(screen.getByText("Violated"));
+      fireEvent.click(screen.getByText("Created"));
     });
 
     await act(async () => {
@@ -147,62 +163,73 @@ describe("IssuesPage", () => {
 
     const search = router.state.location.search;
     expect(search).toContain("q=42");
-    expect(search).toContain("bucket=violated");
+    expect(search).toContain("sort=created");
   });
 
-  it("splits the CS-side chip into separate Waiting on CS Team / Pending Patch Queue tiles", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
-      if (url.includes("/issues")) return Promise.resolve(jsonResponse([]));
-      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: ["WOC", "Pending Patch Queue"] }));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("ticking two Status options sets repeated status= URL params, OR-ed together", async () => {
+    vi.stubGlobal("fetch", fetchMockFor());
 
     const router = renderIssuesPage();
-
     await act(async () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    // There is no single combined "On CS Side" chip anymore.
-    expect(screen.queryByText("On CS Side")).toBeNull();
-
+    const statusSelect = screen.getByLabelText("Status");
     act(() => {
-      fireEvent.click(screen.getByText("Waiting on CS Team"));
+      fireEvent.mouseDown(statusSelect);
     });
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync();
-    });
-
-    let search = router.state.location.search;
-    expect(search).toContain("bucket=cs");
-    expect(search).toContain("status=WOC");
-    expect(screen.getByText("Waiting on CS Team issues")).toBeTruthy();
-
     act(() => {
-      fireEvent.click(screen.getByText("Pending Patch Queue"));
+      fireEvent.click(screen.getByRole("option", { name: "WOC" }));
     });
+    act(() => {
+      fireEvent.click(screen.getByRole("option", { name: "Pending Patch Queue" }));
+    });
+
+    const statusValues = new URLSearchParams(router.state.location.search).getAll("status");
+    expect(statusValues).toEqual(["WOC", "Pending Patch Queue"]);
+  });
+
+  it('shows "Clear filters (n)" once a filter is active, and clears the filter keys and bucket', async () => {
+    vi.stubGlobal("fetch", fetchMockFor());
+
+    const router = renderIssuesPage(["/issues?status=WOC&bucket=cs"]);
     await act(async () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    search = router.state.location.search;
-    expect(search).toContain("bucket=cs");
-    expect(search).toContain("status=Pending+Patch+Queue");
-    expect(screen.getByText("Pending Patch Queue issues")).toBeTruthy();
+    // 1 dropdown with a selection (status) + 1 for the bucket scope chip = 2.
+    const clearButton = screen.getByText("Clear filters (2)");
+    act(() => {
+      fireEvent.click(clearButton);
+    });
+
+    const search = router.state.location.search;
+    expect(search).not.toContain("status=");
+    expect(search).not.toContain("bucket=");
+  });
+
+  it('renders a removable scope chip for a bucket with no exact dropdown equivalent, e.g. "on_track"', async () => {
+    vi.stubGlobal("fetch", fetchMockFor());
+
+    const router = renderIssuesPage(["/issues?bucket=on_track"]);
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    const chipLabel = screen.getByText("On track (excluding CS side)");
+    expect(chipLabel).toBeTruthy();
+
+    const chip = chipLabel.closest(".MuiChip-root");
+    const deleteIcon = chip!.querySelector(".MuiChip-deleteIcon")!;
+    act(() => {
+      fireEvent.click(deleteIcon);
+    });
+
+    expect(router.state.location.search).not.toContain("bucket=");
   });
 
   it("renders titles inline and the Opened by column without a separate titles request", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
-      if (url.includes("/issues")) return Promise.resolve(jsonResponse(ISSUES_WITH_TITLES));
-      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", fetchMockFor(ISSUES_WITH_TITLES));
 
     renderIssuesPage();
 
@@ -223,20 +250,13 @@ describe("IssuesPage", () => {
     // hit (including a round trip to fetch titles separately) would fail
     // this assertion.
     const calledEndpoints = new Set(
-      fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname),
+      (vi.mocked(fetch).mock.calls).map(([input]) => new URL(String(input)).pathname),
     );
     expect(calledEndpoints).toEqual(new Set(["/issues", "/metrics/overview", "/taxonomy"]));
   });
 
-  it("does not render its own Project/Priority filter selects", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(EMPTY_OVERVIEW));
-      if (url.includes("/issues")) return Promise.resolve(jsonResponse({ issues: [], total: 0, limit: 20, offset: 0, hasMore: false }));
-      if (url.includes("/taxonomy")) return Promise.resolve(jsonResponse({ statuses: [], csStatuses: [] }));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("renders exactly the five filter dropdowns, none of the app header's own selects", async () => {
+    vi.stubGlobal("fetch", fetchMockFor());
 
     renderIssuesPage();
 
@@ -244,11 +264,12 @@ describe("IssuesPage", () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    // IssuesPage renders only its own sort control — the Project/Priority
-    // selects shown alongside it in the app header live in AppShell, which
-    // this standalone render doesn't include.
     const comboboxes = screen.getAllByRole("combobox");
-    expect(comboboxes).toHaveLength(1);
-    expect(comboboxes[0]).toHaveTextContent("Sort:");
+    expect(comboboxes).toHaveLength(5);
+    expect(screen.getByLabelText("Project")).toBeTruthy();
+    expect(screen.getByLabelText("Priority")).toBeTruthy();
+    expect(screen.getByLabelText("ABT Team")).toBeTruthy();
+    expect(screen.getByLabelText("Status")).toBeTruthy();
+    expect(screen.getByLabelText("SLA state")).toBeTruthy();
   });
 });

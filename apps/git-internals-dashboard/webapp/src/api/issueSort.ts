@@ -14,14 +14,27 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// GET /issues's `sort` values. Matches the backend's issueSortColumns
-// whitelist (internal/handler/issue_sort.go) one-for-one — add a sortable
-// field in both places together.
-export type IssueSortField = "sla_consumption" | "age";
+// GET /issues's `sort`/`order` values. Matches the backend's
+// issueSortColumns whitelist (internal/handler/issue_sort.go) one-for-one —
+// add a sortable field in both places together.
+export type IssueSortField = "sla_consumption" | "created" | "updated";
+export type IssueSortOrder = "asc" | "desc";
 
-export const DEFAULT_ISSUE_SORT: IssueSortField = "sla_consumption";
+const ISSUE_SORT_FIELDS: readonly IssueSortField[] = ["sla_consumption", "created", "updated"];
 
-export const ISSUE_SORT_OPTIONS: { value: IssueSortField; label: string }[] = [
-  { value: "sla_consumption", label: "SLA consumption" },
-  { value: "age", label: "Age (created date)" },
-];
+export const DEFAULT_ISSUE_SORT: { field: IssueSortField; order: IssueSortOrder } = {
+  field: "sla_consumption",
+  order: "desc",
+};
+
+/** Maps an unknown or legacy URL `sort` value (e.g. a bookmarked `sort=age`) to the default field instead of sending it to the backend. */
+export function parseIssueSortField(value: string | null): IssueSortField {
+  return value != null && (ISSUE_SORT_FIELDS as readonly string[]).includes(value)
+    ? (value as IssueSortField)
+    : DEFAULT_ISSUE_SORT.field;
+}
+
+/** Maps an unknown URL `order` value to the default direction instead of sending it to the backend. */
+export function parseIssueSortOrder(value: string | null): IssueSortOrder {
+  return value === "asc" || value === "desc" ? value : DEFAULT_ISSUE_SORT.order;
+}

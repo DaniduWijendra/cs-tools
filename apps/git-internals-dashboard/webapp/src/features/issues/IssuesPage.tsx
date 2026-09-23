@@ -16,33 +16,32 @@
 
 import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Box, MenuItem, Skeleton, TablePagination } from "@mui/material";
+import { Box, Button, Chip, Skeleton, TablePagination, TableSortLabel } from "@mui/material";
+import { X } from "@wso2/oxygen-ui-icons-react";
 import { useOverview, useIssues, useTaxonomy, makeIsCsStatus } from "@api/hooks";
-import type { BucketKey } from "@api/types";
-import { DEFAULT_ISSUE_SORT, ISSUE_SORT_OPTIONS, type IssueSortField } from "@api/issueSort";
+import type { BucketKey, SlaState } from "@api/types";
+import { DEFAULT_ISSUE_SORT, parseIssueSortField, parseIssueSortOrder, type IssueSortField, type IssueSortOrder } from "@api/issueSort";
 import { BackButton } from "@components/BackButton";
 import { ErrorState } from "@components/ErrorState";
 import { StaleDataAlert } from "@components/StaleDataAlert";
-import { FilterSelect } from "@components/FilterSelect";
+import { MultiSelectFilter } from "@components/MultiSelectFilter";
 import { errorMessage } from "@lib/apiError";
-import { useGlobalFilters, projectNameFor } from "@lib/filters";
+import { useIssueListFilters, projectNameFor, priorityOptionsFrom, NO_PRIORITY_VALUE } from "@lib/filters";
 import { useReportFetchProgress } from "@lib/fetchProgress";
 import { IssueTimelineRow } from "@components/IssueTimelineRow";
 import { gridTemplate } from "@lib/grid";
+import { SLA_STATE_LABEL } from "@lib/sla";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 
 const ROWS_PER_PAGE_OPTIONS = [20, 50, 100];
 const DEFAULT_ROWS_PER_PAGE = 20;
 
-const KIND_CHIPS: { key: BucketKey; status?: string; label: string }[] = [
-  { key: "all", label: "All Open" },
-  { key: "violated", label: "Violated" },
-  { key: "at_risk", label: "At Risk" },
-  { key: "cs", status: "WOC", label: "Waiting on CS Team" },
-  { key: "cs", status: "Pending Patch Queue", label: "Pending Patch Queue" },
-  { key: "product_side", label: "On Product Team Side" },
-  { key: "untracked", label: "Untracked" },
-];
+// SLA state dropdown options, in a fixed worst-to-best order. TERMINAL is
+// excluded: this page lists open, non-terminal issues only.
+const SLA_STATE_OPTIONS: { value: SlaState; label: string }[] = (["VIOLATED", "AT_RISK", "OK", "NO_SLA"] as const).map((s) => ({
+  value: s,
+  label: SLA_STATE_LABEL[s],
+}));
 
 const BUCKET_TITLES: Partial<Record<BucketKey, string>> = {
   violated: "Violated issues",
@@ -53,25 +52,34 @@ const BUCKET_TITLES: Partial<Record<BucketKey, string>> = {
   tracked: "Open tracked issues",
   untracked: "Untracked / missing priority",
   attention: "Attention set",
-  all: "All open issues",
 };
 
-// Friendlier page heading for a single-status drill-down than the raw status name.
-const STATUS_TITLES: Record<string, string> = {
-  WOC: "Waiting on CS Team issues",
-  "Pending Patch Queue": "Pending Patch Queue issues",
+// A bucket whose meaning can't be expressed as ticked filter-dropdown
+// options (e.g. "on track" is SLA OK *and* not on the CS side) still reaches
+// the backend as `bucket`, shown here as a removable scope chip instead.
+const SCOPE_CHIP_LABEL: Partial<Record<BucketKey, string>> = {
+  on_track: "On track (excluding CS side)",
+  tracked: "Has a priority",
+  attention: "Needs attention",
+  cs: "On CS side",
+  product_side: "On product team side",
+  violated: "Violated",
+  at_risk: "At risk",
+  untracked: "No priority",
 };
 
-/** The filtered/drill-down issue list page, URL-driven by repo/priority/bucket/status/q. */
+const FILTER_KEYS = ["repo", "priority", "abtTeam", "status", "slaState"] as const;
+
+/** The filtered/drill-down issue list page, URL-driven by the five filter dropdowns, bucket, sort/order, and q. */
 export default function IssuesPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const [qInput, setQInput] = useState(params.get("q") ?? "");
 
-  const { repo, priority, abtTeam } = useGlobalFilters();
-  const status = params.get("status") ?? undefined;
-  const bucket = (params.get("bucket") ?? "all") as BucketKey;
-  const sort = (params.get("sort") as IssueSortField | null) ?? DEFAULT_ISSUE_SORT;
+  const { repo, priority, abtTeam, status, slaState, setFilter } = useIssueListFilters();
+  const bucket = params.get("bucket") as BucketKey | null;
+  const sort = parseIssueSortField(params.get("sort"));
+  const order = parseIssueSortOrder(params.get("order"));
   const rowsPerPage = Number(params.get("pageSize")) || DEFAULT_ROWS_PER_PAGE;
   const page = Number(params.get("page")) || 0;
 
@@ -79,12 +87,12 @@ export default function IssuesPage() {
     const t = setTimeout(() => {
       // This effect re-runs on every params change (e.g. clicking to page 2
       // sets ?page=1, which re-fires it) since it's re-based on the current
-      // `params` every time so a repo/priority change applied while this
-      // timer is pending is never clobbered by a stale snapshot when it
-      // finally fires — see below. But that means it must bail out here
-      // whenever qInput isn't actually introducing a new search, or it would
-      // unconditionally strip `page` on every unrelated param change (e.g.
-      // pagination), bouncing the page back to 1 a moment after any click.
+      // `params` every time so a filter change applied while this timer is
+      // pending is never clobbered by a stale snapshot when it finally fires
+      // — see below. But that means it must bail out here whenever qInput
+      // isn't actually introducing a new search, or it would unconditionally
+      // strip `page` on every unrelated param change (e.g. pagination),
+      // bouncing the page back to 1 a moment after any click.
       if ((params.get("q") ?? "") === qInput) return;
       const next = new URLSearchParams(params);
       if (qInput) next.set("q", qInput);
@@ -94,30 +102,6 @@ export default function IssuesPage() {
     }, 300);
     return () => clearTimeout(t);
   }, [qInput, navigate, params]);
-
-  // Sets or clears (empty value) one URL search param, replacing history, and
-  // resets back to page 1 — a filter/sort/page-size change invalidates
-  // whatever page the user was on.
-  const setParam = (key: string, value: string) => {
-    const next = new URLSearchParams(params);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    next.delete("page");
-    setParams(next, { replace: true });
-  };
-
-  // Switching kind (or "All open") clears any single-status refinement, unless
-  // the chip itself carries one (e.g. the CS-side "Waiting on CS Team" / "Pending
-  // Patch Queue" chips, which share bucket=cs and differ only by status).
-  const setBucket = (key: BucketKey, chipStatus?: string) => {
-    const next = new URLSearchParams(params);
-    if (key === "all") next.delete("bucket");
-    else next.set("bucket", key);
-    if (chipStatus) next.set("status", chipStatus);
-    else next.delete("status");
-    next.delete("page");
-    setParams(next, { replace: true });
-  };
 
   // TablePagination's page is 0-indexed; the URL stores it 1-indexed-minus-1
   // implicitly (0 = unset = page 1) so a bare /issues URL has no ?page=0 noise.
@@ -136,7 +120,45 @@ export default function IssuesPage() {
     setParams(next, { replace: true });
   };
 
-  const { data: overview } = useOverview({ repo, priority, abtTeam });
+  // Omits `sort`/`order` from the URL when they're the default, so a
+  // never-touched sort stays invisible in a shared/bookmarked link.
+  const setSort = (field: IssueSortField, nextOrder: IssueSortOrder) => {
+    const next = new URLSearchParams(params);
+    if (field === DEFAULT_ISSUE_SORT.field) next.delete("sort");
+    else next.set("sort", field);
+    if (nextOrder === "desc") next.delete("order");
+    else next.set("order", nextOrder);
+    next.delete("page");
+    setParams(next, { replace: true });
+  };
+
+  // Clicking an inactive column sorts by it, descending; clicking the
+  // already-active column toggles its direction.
+  const handleSortClick = (field: IssueSortField) => {
+    if (field === sort) setSort(field, order === "asc" ? "desc" : "asc");
+    else setSort(field, "desc");
+  };
+
+  const removeScopeChip = () => {
+    const next = new URLSearchParams(params);
+    next.delete("bucket");
+    next.delete("page");
+    setParams(next, { replace: true });
+  };
+
+  const clearFilters = () => {
+    const next = new URLSearchParams(params);
+    for (const key of FILTER_KEYS) next.delete(key);
+    next.delete("bucket");
+    next.delete("page");
+    setParams(next, { replace: true });
+  };
+
+  // Unfiltered: this page's own dropdowns own repo/priority/abtTeam, so its
+  // option lists (and every row's project name) must never shrink as the
+  // user ticks filters, and this request must stay independent of the
+  // header's own (elsewhere-rendered) filtered overview.
+  const { data: overview } = useOverview();
   const { data: taxonomy } = useTaxonomy();
   const isCsStatus = makeIsCsStatus(taxonomy?.csStatuses);
   const {
@@ -148,13 +170,15 @@ export default function IssuesPage() {
     errorUpdatedAt,
     refetch,
   } = useIssues({
-    bucket,
+    bucket: bucket ?? undefined,
     repo,
     priority,
     abtTeam,
     status,
+    slaState,
     q: params.get("q") ?? undefined,
     sort,
+    order,
     limit: rowsPerPage,
     offset: page * rowsPerPage,
   });
@@ -163,10 +187,20 @@ export default function IssuesPage() {
   const issues = data?.issues;
   const total = data?.total ?? 0;
 
-  const projName = repo ? projectNameFor(overview?.projects, repo ?? null) : "All Projects";
+  const projectOptions = (overview?.projects ?? []).map((p) => ({ value: p.repo, label: p.name }));
+  const priorityOptions = [...priorityOptionsFrom(overview?.priorities), { value: NO_PRIORITY_VALUE, label: "No priority" }];
+  const abtTeamOptions = (overview?.abtTeams ?? []).map((t) => ({ value: t, label: t }));
+  const statusOptions = (taxonomy?.statuses ?? [])
+    .filter((s) => !s.isTerminal && s.name !== "")
+    .slice()
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((s) => ({ value: s.name, label: s.name }));
 
-  // A single CS status gets its own titled list.
-  const title = status ? (STATUS_TITLES[status] ?? `${status} issues`) : (BUCKET_TITLES[bucket] ?? "Issues");
+  const hasScopeChip = !!bucket && bucket !== "all";
+  const activeFilterCount =
+    [repo, priority, abtTeam, status, slaState].filter((vs) => vs.length > 0).length + (hasScopeChip ? 1 : 0);
+
+  const title = hasScopeChip ? (BUCKET_TITLES[bucket] ?? "Open issues") : "Open issues";
   const cols = gridTemplate("full");
 
   return (
@@ -181,55 +215,53 @@ export default function IssuesPage() {
         <Box>
           <Box component="h1" sx={{ m: 0, fontSize: 22, fontWeight: 600, lineHeight: 1.2, letterSpacing: "-0.01em" }}>{title}</Box>
           <Box sx={{ mt: 0.75, fontSize: 13, color: "var(--sla-fg3)" }}>
-            {abtTeam ? `${abtTeam} · ` : ""}{projName} ·{" "}
             <Box component="b" sx={{ fontWeight: 600, color: "var(--sla-fg2)", fontFamily: "var(--font-mono)" }}>
               {total}
             </Box>{" "}
             matching open issues · click any row to open it on GitHub
           </Box>
         </Box>
-        <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <Box
-            component="input"
-            placeholder="Search by issue #…"
-            value={qInput}
-            onChange={(e) => setQInput((e.target as HTMLInputElement).value.replace(/\D/g, ""))}
-            sx={{
-              height: 36, width: 192, borderRadius: "9px", border: "1px solid var(--sla-border)", bgcolor: "var(--sla-card)",
-              px: 1.5, fontSize: 13, color: "var(--sla-fg)", fontFamily: "inherit", "&:focus": { outline: "none", borderColor: "var(--sla-fg3)" },
-            }}
-          />
-          <FilterSelect value={sort} onChange={(v) => setParam("sort", v === DEFAULT_ISSUE_SORT ? "" : v)}>
-            {ISSUE_SORT_OPTIONS.map((o) => (
-              <MenuItem key={o.value} value={o.value}>
-                Sort: {o.label}
-              </MenuItem>
-            ))}
-          </FilterSelect>
-        </Box>
+        <Box
+          component="input"
+          placeholder="Search by issue #…"
+          value={qInput}
+          onChange={(e) => setQInput((e.target as HTMLInputElement).value.replace(/\D/g, ""))}
+          sx={{
+            height: 36, width: 192, borderRadius: "9px", border: "1px solid var(--sla-border)", bgcolor: "var(--sla-card)",
+            px: 1.5, fontSize: 13, color: "var(--sla-fg)", fontFamily: "inherit", "&:focus": { outline: "none", borderColor: "var(--sla-fg3)" },
+          }}
+        />
       </Box>
 
-      {/* Kind chips */}
-      <Box sx={{ mb: 2, display: "flex", flexWrap: "wrap", gap: 1 }}>
-        {KIND_CHIPS.map((chip) => {
-          const active = bucket === chip.key && (chip.status ?? undefined) === status;
-          return (
-            <Box
-              key={chip.status ? `${chip.key}:${chip.status}` : chip.key}
-              component="button"
-              type="button"
-              onClick={() => setBucket(chip.key, chip.status)}
-              sx={{
-                borderRadius: "8px", border: "1px solid", px: 1.5, py: 0.75, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
-                borderColor: active ? "var(--sla-primary)" : "var(--sla-border)",
-                bgcolor: active ? "var(--sla-primary)" : "var(--sla-card)",
-                color: active ? "var(--sla-contrast-text)" : "var(--sla-fg2)",
-              }}
-            >
-              {chip.label}
-            </Box>
-          );
-        })}
+      {hasScopeChip && (
+        <Box sx={{ mb: 1.5 }}>
+          <Chip
+            label={SCOPE_CHIP_LABEL[bucket] ?? bucket}
+            size="small"
+            onDelete={removeScopeChip}
+            sx={{ borderRadius: "8px", bgcolor: "var(--sla-surface-muted)", color: "var(--sla-fg2)", border: "1px solid var(--sla-border)" }}
+          />
+        </Box>
+      )}
+
+      {/* Filter row */}
+      <Box sx={{ mb: 2, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 1.25, alignItems: "end" }}>
+        <MultiSelectFilter id="filter-repo" label="Project" values={repo} options={projectOptions} onChange={(v) => setFilter("repo", v)} />
+        <MultiSelectFilter id="filter-priority" label="Priority" values={priority} options={priorityOptions} onChange={(v) => setFilter("priority", v)} />
+        <MultiSelectFilter id="filter-abtTeam" label="ABT Team" values={abtTeam} options={abtTeamOptions} onChange={(v) => setFilter("abtTeam", v)} />
+        <MultiSelectFilter id="filter-status" label="Status" values={status} options={statusOptions} onChange={(v) => setFilter("status", v)} />
+        <MultiSelectFilter id="filter-slaState" label="SLA state" values={slaState} options={SLA_STATE_OPTIONS} onChange={(v) => setFilter("slaState", v as SlaState[])} />
+        {activeFilterCount > 0 && (
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={clearFilters}
+            startIcon={<X size={14} />}
+            sx={{ height: 36, borderColor: "var(--sla-border)", color: "var(--sla-fg2)", textTransform: "none", whiteSpace: "nowrap" }}
+          >
+            Clear filters ({activeFilterCount})
+          </Button>
+        )}
       </Box>
 
       {/* Table */}
@@ -247,8 +279,9 @@ export default function IssuesPage() {
           <span>Pri</span>
           <span>Status</span>
           <span>SLA state</span>
-          <span>Budget</span>
-          <Box component="span" sx={{ textAlign: "right" }}>Age</Box>
+          <SortHeaderCell label="SLA Elapsed %" field="sla_consumption" sort={sort} order={order} onSort={handleSortClick} />
+          <SortHeaderCell label="Created" field="created" sort={sort} order={order} onSort={handleSortClick} align="right" />
+          <SortHeaderCell label="Updated" field="updated" sort={sort} order={order} onSort={handleSortClick} align="right" />
         </Box>
 
         {isError && !issues ? (
@@ -296,6 +329,51 @@ export default function IssuesPage() {
       <Box sx={{ mt: 3, textAlign: "center", fontSize: 11.5, color: "var(--sla-no-sla)" }}>
         Read-only · issues open in GitHub in a new tab · Closed &amp; Terminal issues excluded
       </Box>
+    </Box>
+  );
+}
+
+/**
+ * One clickable, sortable column header. The active column shows its arrow
+ * fixed in the current direction; an inactive column shows MUI's default
+ * hover-only arrow, pointing descending (what clicking it would do first).
+ */
+function SortHeaderCell({
+  label,
+  field,
+  sort,
+  order,
+  onSort,
+  align = "left",
+}: {
+  label: string;
+  field: IssueSortField;
+  sort: IssueSortField;
+  order: IssueSortOrder;
+  onSort: (field: IssueSortField) => void;
+  align?: "left" | "right";
+}) {
+  const active = field === sort;
+  return (
+    <Box
+      component="span"
+      aria-sort={active ? (order === "asc" ? "ascending" : "descending") : "none"}
+      sx={{ display: "flex", justifyContent: align === "right" ? "flex-end" : "flex-start" }}
+    >
+      <TableSortLabel
+        active={active}
+        direction={active ? order : "desc"}
+        onClick={() => onSort(field)}
+        sx={{
+          flexDirection: align === "right" ? "row-reverse" : "row",
+          color: "inherit",
+          "&:hover": { color: "var(--sla-fg2)" },
+          "&.Mui-active": { color: "var(--sla-fg)" },
+          "& .MuiTableSortLabel-icon": { color: "inherit" },
+        }}
+      >
+        {label}
+      </TableSortLabel>
     </Box>
   );
 }

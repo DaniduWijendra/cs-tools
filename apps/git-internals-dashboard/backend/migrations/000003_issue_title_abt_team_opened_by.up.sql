@@ -1,6 +1,6 @@
--- Security-approved columns: title, ABT team, and opened-by (a @wso2.com
--- address only, enforced by the CHECK below). Nothing else from the issue
--- body is ever persisted.
+-- The only issue-body-derived columns persisted: title, ABT team, and
+-- opened-by, the last restricted to a @wso2.com address by the CHECK below.
+-- Nothing else from the issue body is ever persisted.
 ALTER TABLE issues
   ADD COLUMN title     text,
   ADD COLUMN abt_team  text,

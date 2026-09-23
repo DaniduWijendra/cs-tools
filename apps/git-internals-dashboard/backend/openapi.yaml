@@ -67,12 +67,30 @@ paths:
       summary: Filterable issue list.
       operationId: getIssues
       parameters:
-        - $ref: '#/components/parameters/RepoParam'
+        - name: repo
+          in: query
+          description: '"owner/name". Repeatable; values are OR-ed together.'
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 50
+            items:
+              type: string
+              pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
         - name: priority
           in: query
+          description: >-
+            Repeatable; values are OR-ed together. The sentinel value
+            __none__ matches an issue with no priority (i.priority IS NULL).
+          style: form
+          explode: true
           schema:
-            type: string
-            maxLength: 50
+            type: array
+            maxItems: 50
+            items:
+              type: string
+              maxLength: 50
         - name: state
           in: query
           schema:
@@ -80,14 +98,38 @@ paths:
             enum: [OPEN, CLOSED]
         - name: slaState
           in: query
+          description: >-
+            Repeatable; values are OR-ed together. NO_SLA also matches an
+            issue with no issue_sla row.
+          style: form
+          explode: true
           schema:
-            $ref: '#/components/schemas/SlaState'
+            type: array
+            maxItems: 50
+            items:
+              $ref: '#/components/schemas/SlaState'
         - name: status
           in: query
+          description: Repeatable; values are OR-ed together.
+          style: form
+          explode: true
           schema:
-            type: string
-            maxLength: 50
-        - $ref: '#/components/parameters/AbtTeamParam'
+            type: array
+            maxItems: 50
+            items:
+              type: string
+              maxLength: 50
+        - name: abtTeam
+          in: query
+          description: Repeatable; values are OR-ed together.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 50
+            items:
+              type: string
+              maxLength: 100
         - name: q
           in: query
           description: Issue number.
@@ -109,19 +151,33 @@ paths:
             default: 0
         - name: bucket
           in: query
+          description: >-
+            Defines a scope; every filter above is AND-ed on top of it
+            (slaState replaces the base scope's implicit "not TERMINAL" rule
+            instead of AND-ing with it, unless the bucket already picked its
+            own SLA state).
           schema:
             type: string
             enum: [all, violated, at_risk, on_track, cs, product_side, tracked, untracked, attention]
         - name: sort
           in: query
           description: >-
-            Whitelisted server-side sort. sla_consumption (default) orders by
-            issue_sla.pct_consumed descending, nulls last; age orders by
-            githubCreatedAt ascending (oldest first).
+            Whitelisted server-side sort column. sla_consumption (default)
+            orders by issue_sla.pct_consumed; created and updated order by
+            githubCreatedAt/githubUpdatedAt. Every column sorts NULLS LAST in
+            both directions, with issues.id ascending as a deterministic
+            tie-breaker.
           schema:
             type: string
-            enum: [sla_consumption, age]
+            enum: [sla_consumption, created, updated]
             default: sla_consumption
+        - name: order
+          in: query
+          description: Sort direction for the `sort` column.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
       responses:
         "200":
           description: Ok

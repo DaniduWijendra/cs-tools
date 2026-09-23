@@ -19,6 +19,7 @@ import { Box } from "@mui/material";
 import { useIssue } from "@api/hooks";
 import type { IssueRow, SlaState } from "@api/types";
 import { ErrorState } from "@components/ErrorState";
+import { RelativeTime } from "@components/RelativeTime";
 import { errorMessage } from "@lib/apiError";
 import { gridTemplate, type IssueRowVariant } from "@lib/grid";
 import { fmtAge, fmtDateTime, shortPriority, SLA_STATE_LABEL, SLA_STATE_COLOR } from "@lib/sla";
@@ -161,10 +162,21 @@ export function IssueTimelineRow({
           </Box>
         </Box>
 
-        {/* Age */}
-        <Box component="span" sx={{ textAlign: "right", fontSize: 12, color: "var(--sla-fg3)", fontFamily: MONO }}>
-          {fmtAge(issue.githubCreatedAt)}
-        </Box>
+        {/* Age (compact) / Created + Updated (full) */}
+        {variant === "full" ? (
+          <>
+            <Box component="span" sx={{ textAlign: "right", fontSize: 12, color: "var(--sla-fg3)", fontFamily: MONO }}>
+              <RelativeTime iso={issue.githubCreatedAt} />
+            </Box>
+            <Box component="span" sx={{ textAlign: "right", fontSize: 12, color: "var(--sla-fg3)", fontFamily: MONO }}>
+              <RelativeTime iso={issue.githubUpdatedAt} />
+            </Box>
+          </>
+        ) : (
+          <Box component="span" sx={{ textAlign: "right", fontSize: 12, color: "var(--sla-fg3)", fontFamily: MONO }}>
+            {fmtAge(issue.githubCreatedAt)}
+          </Box>
+        )}
       </Box>
 
       {open && (

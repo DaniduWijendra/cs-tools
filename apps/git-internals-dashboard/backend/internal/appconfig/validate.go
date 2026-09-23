@@ -139,6 +139,7 @@ func Validate(cfg *Config) error {
 	positive("api.priorityParamMaxLength", cfg.API.PriorityParamMaxLength)
 	positive("api.statusParamMaxLength", cfg.API.StatusParamMaxLength)
 	positive("api.abtTeamParamMaxLength", cfg.API.AbtTeamParamMaxLength)
+	positive("api.filterParamMaxValues", cfg.API.FilterParamMaxValues)
 	if cfg.API.IssuesDefaultLimit > cfg.API.IssuesMaxLimit {
 		add("api.issuesDefaultLimit: must not exceed api.issuesMaxLimit")
 	}

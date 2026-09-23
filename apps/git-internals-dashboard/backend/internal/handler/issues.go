@@ -189,7 +189,7 @@ func (h *IssuesHandler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	whereSQL, args := buildIssuesWhere(taxonomy.CsStatuses(h.cfg), taxonomy.ProductSideStatuses(h.cfg), q)
-	orderSQL := issueSortColumns[q.Sort]
+	orderSQL := issueOrderBy(q.Sort, q.Order)
 
 	pageArgs := &sqlArgs{values: args}
 	limitPlaceholder := pageArgs.add(q.Limit)

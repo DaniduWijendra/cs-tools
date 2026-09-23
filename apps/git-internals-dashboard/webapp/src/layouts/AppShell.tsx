@@ -16,7 +16,7 @@
 
 import type { ReactNode } from "react";
 import { Box, MenuItem } from "@mui/material";
-import { Outlet } from "react-router";
+import { Outlet, useMatch } from "react-router";
 import { useOverview } from "@api/hooks";
 import { FetchProgressBar, FetchProgressProvider } from "@components/FetchProgressBar";
 import { FilterSelect } from "@components/FilterSelect";
@@ -24,6 +24,53 @@ import { SyncButton } from "@components/SyncButton";
 import { UserProfile } from "@components/UserProfile";
 import { useFetchProgressActive } from "@lib/fetchProgress";
 import { priorityOptionsFrom, useGlobalFilters } from "@lib/filters";
+
+/**
+ * The header's global Project/Priority/ABT Team selects, plus the filtered
+ * `useOverview` call that backs their option lists. Rendered only off
+ * `/issues`, whose own filter dropdowns already own those URL keys and fetch
+ * overview unfiltered — mounting this here too would fire a second,
+ * redundant (and differently-scoped) overview request on that page.
+ */
+function GlobalFilterSelects() {
+  const { repo, priority, abtTeam, setFilter } = useGlobalFilters();
+  const { data: overview } = useOverview({ repo, priority, abtTeam });
+
+  const repoOptions = overview?.projects ?? [];
+  const priorityOptions = priorityOptionsFrom(overview?.priorities);
+  const abtTeamOptions = overview?.abtTeams ?? [];
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
+      <FilterSelect value={repo ?? "all"} onChange={(v) => setFilter("repo", v === "all" ? "" : v)}>
+        <MenuItem value="all">All Projects</MenuItem>
+        {repoOptions.map((r) => (
+          <MenuItem key={r.repoId} value={r.repo}>
+            {r.name}
+          </MenuItem>
+        ))}
+      </FilterSelect>
+
+      <FilterSelect value={priority ?? "all"} onChange={(v) => setFilter("priority", v === "all" ? "" : v)}>
+        <MenuItem value="all">All Priorities</MenuItem>
+        {priorityOptions.map((p) => (
+          <MenuItem key={p.value} value={p.value}>
+            {p.label}
+          </MenuItem>
+        ))}
+      </FilterSelect>
+
+      <FilterSelect value={abtTeam ?? "all"} onChange={(v) => setFilter("abtTeam", v === "all" ? "" : v)}>
+        <MenuItem value="all">All ABT Teams</MenuItem>
+        {abtTeamOptions.map((team) => (
+          <MenuItem key={team} value={team}>
+            {team}
+          </MenuItem>
+        ))}
+      </FilterSelect>
+    </Box>
+  );
+}
 
 /** The WSO2 pulse mark shown in the top nav bar. */
 function Logo() {
@@ -41,12 +88,7 @@ export default function AppShell({ children }: { children?: ReactNode }) {
 
 function AppShellContent({ children }: { children?: ReactNode }) {
   const progressActive = useFetchProgressActive();
-  const { repo, priority, abtTeam, setFilter } = useGlobalFilters();
-  const { data: overview } = useOverview({ repo, priority, abtTeam });
-
-  const repoOptions = overview?.projects ?? [];
-  const priorityOptions = priorityOptionsFrom(overview?.priorities);
-  const abtTeamOptions = overview?.abtTeams ?? [];
+  const onIssuesPage = useMatch("/issues");
 
   return (
     // No bgcolor here — Oxygen UI's MuiCssBaseline override paints the
@@ -88,34 +130,7 @@ function AppShellContent({ children }: { children?: ReactNode }) {
             </Box>
           </Box>
 
-          <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <FilterSelect value={repo ?? "all"} onChange={(v) => setFilter("repo", v === "all" ? "" : v)}>
-              <MenuItem value="all">All Projects</MenuItem>
-              {repoOptions.map((r) => (
-                <MenuItem key={r.repoId} value={r.repo}>
-                  {r.name}
-                </MenuItem>
-              ))}
-            </FilterSelect>
-
-            <FilterSelect value={priority ?? "all"} onChange={(v) => setFilter("priority", v === "all" ? "" : v)}>
-              <MenuItem value="all">All Priorities</MenuItem>
-              {priorityOptions.map((p) => (
-                <MenuItem key={p.value} value={p.value}>
-                  {p.label}
-                </MenuItem>
-              ))}
-            </FilterSelect>
-
-            <FilterSelect value={abtTeam ?? "all"} onChange={(v) => setFilter("abtTeam", v === "all" ? "" : v)}>
-              <MenuItem value="all">All ABT Teams</MenuItem>
-              {abtTeamOptions.map((team) => (
-                <MenuItem key={team} value={team}>
-                  {team}
-                </MenuItem>
-              ))}
-            </FilterSelect>
-          </Box>
+          {!onIssuesPage && <GlobalFilterSelects />}
 
           <Box sx={{ display: "flex", alignItems: "center", gap: "10px", pl: 1 }}>
             <SyncButton />

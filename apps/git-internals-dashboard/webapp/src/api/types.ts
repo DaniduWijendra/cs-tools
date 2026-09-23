@@ -16,7 +16,7 @@
 
 // Wire types for the backend API's request/response shapes. Fields and
 // query params use camelCase (e.g. `slaState`, not `sla_state`).
-import type { IssueSortField } from "./issueSort";
+import type { IssueSortField, IssueSortOrder } from "./issueSort";
 
 export type SlaState = "NO_SLA" | "OK" | "AT_RISK" | "VIOLATED" | "TERMINAL";
 
@@ -211,17 +211,18 @@ export type BucketKey =
   | "untracked"
   | "attention";
 export interface IssueFilters {
-  repo?: string;
-  priority?: string;
-  abtTeam?: string;
+  repo?: string[];
+  priority?: string[];
+  abtTeam?: string[];
   state?: "OPEN" | "CLOSED";
-  slaState?: SlaState;
-  status?: string;
+  slaState?: SlaState[];
+  status?: string[];
   q?: string; // issue number (digits only)
   limit?: number;
   offset?: number;
   bucket?: BucketKey;
   sort?: IssueSortField;
+  order?: IssueSortOrder;
 }
 
 export interface GlobalFilters {

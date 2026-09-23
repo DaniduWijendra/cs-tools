@@ -368,11 +368,12 @@ func TestIngestIssuePersistsTitleAndBodyMetadataAndClearsOnReingest(t *testing.T
 }
 
 // TestDedupeKeyDoesNotCollideAcrossFieldBoundaries guards against the "|"
-// join delimiter letting a status name shift a field boundary: previously,
-// {prev: "a|b", status: "c"} and {prev: "a", status: "b|c"} produced the
-// identical joined string (and therefore key) for the same repo/timestamp,
-// which would make the ON CONFLICT clause silently drop one of two distinct
-// status transitions.
+// join delimiter letting a status name shift a field boundary: a plain
+// "|"-join of {prev: "a|b", status: "c"} and {prev: "a", status: "b|c"}
+// would produce the identical joined string (and therefore key) for the same
+// repo/timestamp, silently dropping one of two distinct status transitions
+// via ON CONFLICT — dedupeKey's length-prefixing of each field is what
+// prevents that collision.
 func TestDedupeKeyDoesNotCollideAcrossFieldBoundaries(t *testing.T) {
 	k1 := dedupeKey("acme", "widgets", 42, "PVT_1", "2026-01-01T00:00:00Z", strp("a|b"), strp("c"))
 	k2 := dedupeKey("acme", "widgets", 42, "PVT_1", "2026-01-01T00:00:00Z", strp("a"), strp("b|c"))

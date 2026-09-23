@@ -87,3 +87,20 @@ describe("IssueTimelineRow Opened by cell", () => {
     expect(screen.queryByText("person@wso2.com")).toBeNull();
   });
 });
+
+describe("IssueTimelineRow Created/Updated cells", () => {
+  it('variant="full" renders relative Created and Updated times instead of a single Age cell', () => {
+    renderRow(issue(301), "full");
+    // Exact text depends on real "now" relative to the fixture's fixed
+    // timestamps, so assert there are two relative-time strings, not a
+    // specific value.
+    const times = screen.getAllByText(/ago|from now|just now/);
+    expect(times.length).toBe(2);
+  });
+
+  it('variant="compact" (the default) still shows the Age cell via fmtAge, not a relative-time string', () => {
+    renderRow(issue(302, { githubCreatedAt: new Date(Date.now() - 3 * 3_600_000).toISOString() }));
+    expect(screen.getByText(/^\d+h$/)).toBeTruthy();
+    expect(screen.queryByText(/ago|from now|just now/)).toBeNull();
+  });
+});

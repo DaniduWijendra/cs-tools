@@ -19,7 +19,7 @@ import { Box } from "@mui/material";
 import { useIssues } from "@api/hooks";
 import type { Overview, OverviewProject } from "@api/types";
 import { IssueTimelineRow } from "@components/IssueTimelineRow";
-import { projectNameFor } from "@lib/filters";
+import { projectNameFor, toFilterList } from "@lib/filters";
 import { gridTemplate } from "@lib/grid";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 
@@ -49,7 +49,14 @@ export function AttentionSet({ hero, projects, repo, priority, abtTeam, isCsStat
   // Capped summary, not a browse view: no pagination/sort controls of its
   // own, just a bounded top-N by SLA consumption. The full, paginated list
   // lives on the Issues page (bucket=attention).
-  const { data } = useIssues({ bucket: "attention", sort: "sla_consumption", limit: 50, repo, priority, abtTeam });
+  const { data } = useIssues({
+    bucket: "attention",
+    sort: "sla_consumption",
+    limit: 50,
+    repo: toFilterList(repo),
+    priority: toFilterList(priority),
+    abtTeam: toFilterList(abtTeam),
+  });
   const issues = data?.issues;
 
   // Friendly project name for "owner/name", falling back to the repo's own name part.
@@ -139,7 +146,7 @@ export function AttentionSet({ hero, projects, repo, priority, abtTeam, isCsStat
         <span>Project</span>
         <span>Pri</span>
         <span>Status</span>
-        <span>Budget</span>
+        <span>SLA Elapsed %</span>
         <Box component="span" sx={{ textAlign: "right" }}>Age</Box>
       </Box>
 

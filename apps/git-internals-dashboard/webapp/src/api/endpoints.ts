@@ -31,7 +31,7 @@ import type {
 
 export const api = {
   listIssues: (filters: IssueFilters = {}) =>
-    request<IssueListResponse>(`/issues${qs(filters as Record<string, string | number | undefined>)}`),
+    request<IssueListResponse>(`/issues${qs(filters as Record<string, string | number | string[] | undefined>)}`),
 
   getIssue: (id: number) => request<IssueDetail>(`/issues/${id}`),
 

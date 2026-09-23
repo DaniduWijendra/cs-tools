@@ -16,9 +16,9 @@
 
 // Shared grid templates so issue-list headers and rows stay aligned.
 export type IssueRowVariant = "full" | "compact";
-// full    = Issue | Project | Opened by | Pri | Status | SLA state | Budget | Age   (/issues)
-// compact = Issue | Project | Pri | Status | Budget | Age                          (attention set)
+// full    = Issue | Project | Opened by | Pri | Status | SLA state | SLA Elapsed % | Created | Updated (/issues)
+// compact = Issue | Project | Pri | Status | Budget | Age                                              (attention set)
 export const gridTemplate = (variant: IssueRowVariant): string =>
   variant === "full"
-    ? "minmax(0,1fr) 158px 210px 56px 168px 132px 150px 56px"
+    ? "minmax(0,1fr) 150px 190px 48px 160px 120px 150px 96px 96px"
     : "minmax(0,1fr) 158px 56px 168px 150px 56px";

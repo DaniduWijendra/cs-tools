@@ -176,6 +176,7 @@ type rawAPI struct {
 	PriorityParamMaxLength *int `yaml:"priorityParamMaxLength"`
 	StatusParamMaxLength   *int `yaml:"statusParamMaxLength"`
 	AbtTeamParamMaxLength  *int `yaml:"abtTeamParamMaxLength"`
+	FilterParamMaxValues   *int `yaml:"filterParamMaxValues"`
 }
 
 func (r rawAPI) resolve(d API) API {
@@ -203,6 +204,9 @@ func (r rawAPI) resolve(d API) API {
 	}
 	if r.AbtTeamParamMaxLength != nil {
 		a.AbtTeamParamMaxLength = *r.AbtTeamParamMaxLength
+	}
+	if r.FilterParamMaxValues != nil {
+		a.FilterParamMaxValues = *r.FilterParamMaxValues
 	}
 	return a
 }

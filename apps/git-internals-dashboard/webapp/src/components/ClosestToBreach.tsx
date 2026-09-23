@@ -17,7 +17,7 @@
 import { Box } from "@mui/material";
 import { useIssues } from "@api/hooks";
 import type { OverviewProject } from "@api/types";
-import { projectNameFor } from "@lib/filters";
+import { projectNameFor, toFilterList } from "@lib/filters";
 import { shortPriority } from "@lib/sla";
 import { acrylicSurfaceSx } from "@lib/surfaces";
 import { safeHttpUrl } from "@lib/url";
@@ -43,7 +43,14 @@ interface ClosestToBreachProps {
 
 /** Top-9 tracked issues by budget consumed, shown only once one is AT_RISK or VIOLATED per the API's own SLA verdict. */
 export function ClosestToBreach({ repo, priority, abtTeam, projects }: ClosestToBreachProps) {
-  const { data } = useIssues({ bucket: "tracked", sort: "sla_consumption", limit: 9, repo, priority, abtTeam });
+  const { data } = useIssues({
+    bucket: "tracked",
+    sort: "sla_consumption",
+    limit: 9,
+    repo: toFilterList(repo),
+    priority: toFilterList(priority),
+    abtTeam: toFilterList(abtTeam),
+  });
   const issues = data?.issues;
 
   // Friendly project name for "owner/name", falling back to the repo's own name part.

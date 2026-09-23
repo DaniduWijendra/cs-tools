@@ -107,6 +107,9 @@ api:
   priorityParamMaxLength: 50
   statusParamMaxLength: 50
   abtTeamParamMaxLength: 100
+  # Max number of repeated values accepted for one of `repo`, `priority`,
+  # `abtTeam`, `status`, or `slaState` in a single /issues request.
+  filterParamMaxValues: 50
 
 securityHeaders:
   # Every key below is optional and ships commented out, same as `database:`

@@ -116,6 +116,10 @@ type API struct {
 	// ingest.maxABTTeamLen: lowering it below that cap makes stored team
 	// names longer than the new limit permanently unfilterable.
 	AbtTeamParamMaxLength int
+	// FilterParamMaxValues caps how many repeated values a single multi-value
+	// query parameter (repo, priority, abtTeam, status, slaState) may carry,
+	// bounding the size of the ANY($n) array Postgres has to evaluate.
+	FilterParamMaxValues int
 }
 
 // Readiness holds GET /readyz's tuning: the DB ping deadline, how long a
@@ -174,6 +178,7 @@ func Default() Config {
 			PriorityParamMaxLength: 50,
 			StatusParamMaxLength:   50,
 			AbtTeamParamMaxLength:  100,
+			FilterParamMaxValues:   50,
 		},
 		SecurityHeaders: SecurityHeaders{
 			"Content-Security-Policy":           "default-src 'none'; frame-ancestors 'none'",

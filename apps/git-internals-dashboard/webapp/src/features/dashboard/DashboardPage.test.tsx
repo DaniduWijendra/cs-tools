@@ -180,6 +180,6 @@ describe("DashboardPage", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/issues"));
     expect(router.state.location.search).toContain("abtTeam=Atlas");
-    expect(router.state.location.search).toContain("bucket=violated");
+    expect(router.state.location.search).toContain("slaState=VIOLATED");
   });
 });

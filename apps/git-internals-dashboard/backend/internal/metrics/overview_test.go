@@ -414,8 +414,9 @@ func TestBuildOverviewProjectsCard(t *testing.T) {
 
 // TestBuildOverviewProjectsIncludesRepoWithNoOpenIssues guards against
 // Projects/Volume silently dropping an enabled repo just because it has no
-// current open non-terminal issue: allIssues (which both sections used to be
-// built from) would never surface such a repo at all.
+// current open non-terminal issue: allIssues only contains repos with at
+// least one such issue, so building Projects/Volume from it would drop a
+// quiet repo entirely instead of showing it with zero counts.
 func TestBuildOverviewProjectsIncludesRepoWithNoOpenIssues(t *testing.T) {
 	pool := testPool(t)
 	seedMetricsFixture(t, pool)
