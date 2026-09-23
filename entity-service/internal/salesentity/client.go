@@ -18,7 +18,7 @@
 // (not GraphQL sales/entity-graphql-service). POST /salesforce/events uses
 // POST /customer-search to fetch a Customer by Salesforce Account Id. The write
 // side (PATCH /contacts/{id}, PATCH /project-contacts/{id}) backs the
-// first-access flip -- see internal/service/first_access_service.go.
+// registration flip -- see internal/service/membership_registration_service.go.
 package salesentity
 
 import (
@@ -262,7 +262,7 @@ func (c *Client) GetContact(ctx context.Context, id string) (Contact, error) {
 // Salesforce's SN_T_Project_Contact trigger recomputes every membership's
 // State__c from this flag on each save (true -> INVITED, false -> REGISTERED,
 // unless the membership is DEACTIVATED), so clearing it must happen BEFORE
-// UpdateProjectContactState, never after -- see first_access_service.go.
+// UpdateProjectContactState, never after -- see membership_registration_service.go.
 func (c *Client) UpdateContactLockout(ctx context.Context, contactSfID string, lockedOut bool) error {
 	return c.patchWithRetry(ctx, contactPath+url.PathEscape(contactSfID),
 		updateContactRequest{LockoutStatus: lockedOut}, "contact", nil)

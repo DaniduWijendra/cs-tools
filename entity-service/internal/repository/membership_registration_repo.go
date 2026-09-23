@@ -25,7 +25,7 @@ import (
 )
 
 // InvitedMembership is one not-yet-accepted project_contact row, reduced to
-// the two Salesforce ids the first-access flip needs: the membership's own
+// the two Salesforce ids the registration flip needs: the membership's own
 // (project_contact.sf_id) and its contact's (account_contact.sf_id, the
 // Salesforce Contact the lockout flag lives on).
 type InvitedMembership struct {
@@ -33,13 +33,13 @@ type InvitedMembership struct {
 	ContactSfID    string
 }
 
-// FirstAccessRepository reads what POST /users/me/first-access has to act on:
+// MembershipRegistrationRepository reads what POST /users/me/memberships/register has to act on:
 // the caller's memberships that Salesforce still considers un-accepted.
 //
 // Schema prerequisite, the same one the Salesforce membership ingest carries:
 // the sf_id columns on project_contact and account_contact come from the
 // csm-sync migration 0076, which is not in this repo's migrations/.
-type FirstAccessRepository interface {
+type MembershipRegistrationRepository interface {
 	// InvitedMembershipsByEmail returns the caller's project_contact rows in
 	// an un-accepted state (INVITED / RE-INVITED) that carry both Salesforce
 	// ids. A row missing either id cannot be flipped in Salesforce at all, so
@@ -49,19 +49,19 @@ type FirstAccessRepository interface {
 	InvitedMembershipsByEmail(ctx context.Context, email string) ([]InvitedMembership, error)
 }
 
-type firstAccessRepo struct {
+type registrationRepo struct {
 	db *pgxpool.Pool
 }
 
-// NewFirstAccessRepository constructs a FirstAccessRepository backed by the pool.
-func NewFirstAccessRepository(db *pgxpool.Pool) FirstAccessRepository {
-	return &firstAccessRepo{db: db}
+// NewMembershipRegistrationRepository constructs a MembershipRegistrationRepository backed by the pool.
+func NewMembershipRegistrationRepository(db *pgxpool.Pool) MembershipRegistrationRepository {
+	return &registrationRepo{db: db}
 }
 
-// InvitedMembershipsByEmail implements FirstAccessRepository. project_contact
+// InvitedMembershipsByEmail implements MembershipRegistrationRepository. project_contact
 // is matched on its own email (case-insensitively), the same join
 // access_repo.go's RegisteredProjectIDs uses for the mirror-image state.
-func (r *firstAccessRepo) InvitedMembershipsByEmail(ctx context.Context, email string) ([]InvitedMembership, error) {
+func (r *registrationRepo) InvitedMembershipsByEmail(ctx context.Context, email string) ([]InvitedMembership, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT pc.sf_id, ac.sf_id
 		FROM project_contact pc
@@ -73,7 +73,7 @@ func (r *firstAccessRepo) InvitedMembershipsByEmail(ctx context.Context, email s
 		ORDER BY pc.sf_id`,
 		email, []string{domain.MembershipStateInvited, domain.MembershipStateReInvited})
 	if err != nil {
-		return nil, fmt.Errorf("first access: invited memberships by email: %w", err)
+		return nil, fmt.Errorf("register memberships: invited memberships by email: %w", err)
 	}
 	defer rows.Close()
 
@@ -81,12 +81,12 @@ func (r *firstAccessRepo) InvitedMembershipsByEmail(ctx context.Context, email s
 	for rows.Next() {
 		var m InvitedMembership
 		if err := rows.Scan(&m.MembershipSfID, &m.ContactSfID); err != nil {
-			return nil, fmt.Errorf("first access: scan invited membership: %w", err)
+			return nil, fmt.Errorf("register memberships: scan invited membership: %w", err)
 		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("first access: iterate invited memberships: %w", err)
+		return nil, fmt.Errorf("register memberships: iterate invited memberships: %w", err)
 	}
 	return out, nil
 }

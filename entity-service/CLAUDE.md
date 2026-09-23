@@ -50,7 +50,7 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `SALES_ENTITY_CLIENT_SECRET` | no* | — | Choreo connection client secret |
 | `SALES_ENTITY_SCOPES` | no | — | Optional space-separated OAuth2 scopes for REST `sales/sales-entity-service` |
 | `SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes (see "Salesforce membership ingest" below). The Account branch is unaffected |
-| `CSM_MIGRATION_FIRST_ACCESS_ENABLED` | no | `false` | Must be `"true"` for `POST /users/me/first-access` to be registered at all (see "First access" below). Off = the route 404s and nothing on that path can write to Salesforce |
+| `CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED` | no | `false` | Must be `"true"` for `POST /users/me/memberships/register` to be registered at all (see "Membership registration" below). Off = the route 404s and nothing on that path can write to Salesforce |
 
 \* `DB_USER`/`DB_PASSWORD`/`DB_NAME` are required when `DATA_SOURCE=postgres`
 and **optional** when `DATA_SOURCE=servicenow`, where entity reads and writes
@@ -302,7 +302,7 @@ write was based on.
   statuses?}, pagination}` → `{steps, total, limit, offset}`, newest first,
   `normalizePagination` (limit 20, max 50).
 
-## First access (`POST /users/me/first-access`)
+## Membership registration (`POST /users/me/memberships/register`)
 
 H-0 of the customer onboarding flow. A customer invited in the Customer Portal
 gets a Salesforce Contact and a `Project_Contact__c` membership in state
@@ -312,14 +312,14 @@ clears the contact's lockout flag on first sign-in. After cutover the Customer
 Portal owns it, and the work lives here rather than in the portal, so the
 portal never needs Salesforce write access of its own.
 
-`POST /users/me/first-access` → **204, no body**, no request body either. The
+`POST /users/me/memberships/register` → **204, no body**, no request body either. The
 caller is the Customer Portal acting on behalf of the signed-in user, so it
 carries an end-user token and the caller is resolved exactly the way
 `GET /users/me` resolves it: the `email` claim of the already-validated
 `x-user-id-token` (`middleware.UserIDTokenFromContext` → `emailFromJWT`).
 A missing header is a 401, an undecodable token a 400 — no new convention.
 
-**Postgres-only and off by default.** `CSM_MIGRATION_FIRST_ACCESS_ENABLED` must
+**Postgres-only and off by default.** `CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED` must
 be exactly `"true"` (same parse as every other flag here); while it is off
 `routes.go` does not register the route at all, so it 404s and nothing on this
 path can reach Salesforce. It also needs what it depends on — a pool, the four
@@ -333,7 +333,7 @@ outcome is: one indexed read of `project_contact`, no rows, return. Nothing is
 logged and Salesforce is never touched. Keep it that way — anything added to
 this path runs on every profile load of every user.
 
-`FirstAccessRepository.InvitedMembershipsByEmail` (`first_access_repo.go`) is
+`MembershipRegistrationRepository.InvitedMembershipsByEmail` (`membership_registration_repo.go`) is
 that read: `project_contact` joined to `account_contact`, matched on
 `LOWER(pc.email)` (the same join `access_repo.go`'s `RegisteredProjectIDs`
 uses for the mirror-image state), state ∈ INVITED / RE-INVITED, returning
@@ -371,7 +371,7 @@ write would be a no-op that looked like a success.
    `ProjectMembershipRepository.Upsert`, the DATABASE step and the duplicate
    guard are then literally the same code, none of it reimplemented. The flip
    changed the record's `LastModifiedDate`, so the duplicate guard does not
-   skip it. `routes.go` hands the first-access service the *same*
+   skip it. `routes.go` hands the membership-registration service the *same*
    membership-ingest-enabled `SalesforceEventService` value the Salesforce
    event handler holds.
 4. **`REGISTRATION` = SUCCEEDED / FAILED** per membership via the existing

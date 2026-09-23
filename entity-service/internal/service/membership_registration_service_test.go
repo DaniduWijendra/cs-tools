@@ -29,22 +29,22 @@ import (
 )
 
 const (
-	firstAccessEmail       = "jane@acme.com"
-	firstAccessMembership1 = "a0e000000000001AAA"
-	firstAccessMembership2 = "a0e000000000002AAA"
-	firstAccessContact1    = "003000000000001AAA"
-	firstAccessContact2    = "003000000000002AAA"
+	registeringUserEmail = "jane@acme.com"
+	invitedMembership1   = "a0e000000000001AAA"
+	invitedMembership2   = "a0e000000000002AAA"
+	invitedContact1      = "003000000000001AAA"
+	invitedContact2      = "003000000000002AAA"
 )
 
 // ---- fakes ---------------------------------------------------------------
 
-type fakeFirstAccessRepo struct {
+type fakeMembershipRegistrationRepo struct {
 	byEmail map[string][]repository.InvitedMembership
 	queried []string
 	err     error
 }
 
-func (f *fakeFirstAccessRepo) InvitedMembershipsByEmail(_ context.Context, email string) ([]repository.InvitedMembership, error) {
+func (f *fakeMembershipRegistrationRepo) InvitedMembershipsByEmail(_ context.Context, email string) ([]repository.InvitedMembership, error) {
 	f.queried = append(f.queried, email)
 	if f.err != nil {
 		return nil, f.err
@@ -95,28 +95,28 @@ func (f *fakeIngestEvents) HandleEvent(_ context.Context, req domain.SalesforceE
 
 // ---- harness -------------------------------------------------------------
 
-type firstAccessHarness struct {
-	repo   *fakeFirstAccessRepo
+type registrationHarness struct {
+	repo   *fakeMembershipRegistrationRepo
 	sales  *fakeSalesEntityWriter
 	events *fakeIngestEvents
 	steps  *fakeStepRepo
-	svc    FirstAccessService
+	svc    MembershipRegistrationService
 }
 
-func newFirstAccessHarness(memberships ...repository.InvitedMembership) *firstAccessHarness {
-	h := &firstAccessHarness{
-		repo:   &fakeFirstAccessRepo{byEmail: map[string][]repository.InvitedMembership{firstAccessEmail: memberships}},
+func newRegistrationHarness(memberships ...repository.InvitedMembership) *registrationHarness {
+	h := &registrationHarness{
+		repo:   &fakeMembershipRegistrationRepo{byEmail: map[string][]repository.InvitedMembership{registeringUserEmail: memberships}},
 		sales:  &fakeSalesEntityWriter{lockoutErrBy: map[string]error{}, stateErrBy: map[string]error{}, persisted: map[string]salesentity.ProjectContact{}},
 		events: &fakeIngestEvents{errBy: map[string]error{}},
 		steps:  &fakeStepRepo{},
 	}
-	h.svc = NewFirstAccessService(h.repo, h.sales, h.events, h.steps)
+	h.svc = NewMembershipRegistrationService(h.repo, h.sales, h.events, h.steps)
 	return h
 }
 
-func firstAccessCtx(t *testing.T) context.Context {
+func registrationCtx(t *testing.T) context.Context {
 	t.Helper()
-	return contextWithUserIDToken(fakeJWTWithEmail(t, firstAccessEmail))
+	return contextWithUserIDToken(fakeJWTWithEmail(t, registeringUserEmail))
 }
 
 func invited(membershipSfID, contactSfID string) repository.InvitedMembership {
@@ -142,11 +142,11 @@ func stepFor(t *testing.T, steps *fakeStepRepo, membershipSfID string) domain.Up
 
 // The endpoint runs on every profile load, so the no-membership case must do
 // nothing at all -- in particular it must never reach Salesforce.
-func TestFirstAccess_NoInvitedMembershipsIsANoOp(t *testing.T) {
-	h := newFirstAccessHarness()
+func TestMembershipRegistration_NoInvitedMembershipsIsANoOp(t *testing.T) {
+	h := newRegistrationHarness()
 
-	if err := h.svc.RecordFirstAccess(firstAccessCtx(t)); err != nil {
-		t.Fatalf("RecordFirstAccess: %v", err)
+	if err := h.svc.RegisterInvitedMemberships(registrationCtx(t)); err != nil {
+		t.Fatalf("RegisterInvitedMemberships: %v", err)
 	}
 	if got := len(h.sales.calls); got != 0 {
 		t.Errorf("sales entity calls = %v, want none", h.sales.calls)
@@ -157,27 +157,27 @@ func TestFirstAccess_NoInvitedMembershipsIsANoOp(t *testing.T) {
 	if got := len(h.steps.upserts); got != 0 {
 		t.Errorf("onboarding steps written = %d, want 0", got)
 	}
-	if !reflect.DeepEqual(h.repo.queried, []string{firstAccessEmail}) {
-		t.Errorf("repo queried = %v, want [%s]", h.repo.queried, firstAccessEmail)
+	if !reflect.DeepEqual(h.repo.queried, []string{registeringUserEmail}) {
+		t.Errorf("repo queried = %v, want [%s]", h.repo.queried, registeringUserEmail)
 	}
 }
 
 // The Salesforce SN_T_Project_Contact trigger recomputes the membership state
 // from the contact lockout flag on every save, so clearing the flag MUST come
 // first -- asserted here explicitly, on one ordered call list.
-func TestFirstAccess_ClearsLockoutBeforeSettingState(t *testing.T) {
-	h := newFirstAccessHarness(invited(firstAccessMembership1, firstAccessContact1))
-	h.sales.persisted[firstAccessMembership1] = salesentity.ProjectContact{
-		ID: firstAccessMembership1, State: sampleStr(domain.MembershipStateRegistered), LastModifiedDate: sampleStr(testLastModified),
+func TestMembershipRegistration_ClearsLockoutBeforeSettingState(t *testing.T) {
+	h := newRegistrationHarness(invited(invitedMembership1, invitedContact1))
+	h.sales.persisted[invitedMembership1] = salesentity.ProjectContact{
+		ID: invitedMembership1, State: sampleStr(domain.MembershipStateRegistered), LastModifiedDate: sampleStr(testLastModified),
 	}
 
-	if err := h.svc.RecordFirstAccess(firstAccessCtx(t)); err != nil {
-		t.Fatalf("RecordFirstAccess: %v", err)
+	if err := h.svc.RegisterInvitedMemberships(registrationCtx(t)); err != nil {
+		t.Fatalf("RegisterInvitedMemberships: %v", err)
 	}
 
 	want := []string{
-		"lockout:" + firstAccessContact1 + ":false",
-		"state:" + firstAccessMembership1 + ":" + domain.MembershipStateRegistered,
+		"lockout:" + invitedContact1 + ":false",
+		"state:" + invitedMembership1 + ":" + domain.MembershipStateRegistered,
 	}
 	if !reflect.DeepEqual(h.sales.calls, want) {
 		t.Fatalf("sales entity calls = %v, want %v (lockout must be cleared first)", h.sales.calls, want)
@@ -187,13 +187,13 @@ func TestFirstAccess_ClearsLockoutBeforeSettingState(t *testing.T) {
 	wantEvent := domain.SalesforceEventRequest{
 		EventType:   domain.SalesforceEventUpdated,
 		Entity:      domain.SalesforceEntityProjectContact,
-		ReferenceID: firstAccessMembership1,
+		ReferenceID: invitedMembership1,
 	}
 	if !reflect.DeepEqual(h.events.handled, []domain.SalesforceEventRequest{wantEvent}) {
 		t.Errorf("re-ingest = %+v, want %+v", h.events.handled, wantEvent)
 	}
 
-	step := stepFor(t, h.steps, firstAccessMembership1)
+	step := stepFor(t, h.steps, invitedMembership1)
 	if step.Step != domain.OnboardingStepRegistration || step.Status != domain.OnboardingStepSucceeded {
 		t.Errorf("step = %s/%s, want REGISTRATION/SUCCEEDED", step.Step, step.Status)
 	}
@@ -203,11 +203,11 @@ func TestFirstAccess_ClearsLockoutBeforeSettingState(t *testing.T) {
 	if step.UpdatedBy != domain.SalesforceSyncActor {
 		t.Errorf("updatedBy = %q, want %q", step.UpdatedBy, domain.SalesforceSyncActor)
 	}
-	if step.Email != firstAccessEmail {
-		t.Errorf("email = %q, want %q", step.Email, firstAccessEmail)
+	if step.Email != registeringUserEmail {
+		t.Errorf("email = %q, want %q", step.Email, registeringUserEmail)
 	}
-	if step.ContactSfID == nil || *step.ContactSfID != firstAccessContact1 {
-		t.Errorf("contactSfId = %v, want %q", step.ContactSfID, firstAccessContact1)
+	if step.ContactSfID == nil || *step.ContactSfID != invitedContact1 {
+		t.Errorf("contactSfId = %v, want %q", step.ContactSfID, invitedContact1)
 	}
 	// Stamped with the Salesforce version the flip actually persisted.
 	wantModified, _ := parseSalesforceLastModified(sampleStr(testLastModified))
@@ -218,24 +218,24 @@ func TestFirstAccess_ClearsLockoutBeforeSettingState(t *testing.T) {
 
 // With the lockout flag still set the trigger would revert the state write, so
 // a failed clear must skip it rather than issue a call that looks successful.
-func TestFirstAccess_LockoutFailureSkipsTheStateUpdate(t *testing.T) {
-	h := newFirstAccessHarness(invited(firstAccessMembership1, firstAccessContact1))
-	h.sales.lockoutErrBy[firstAccessContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
+func TestMembershipRegistration_LockoutFailureSkipsTheStateUpdate(t *testing.T) {
+	h := newRegistrationHarness(invited(invitedMembership1, invitedContact1))
+	h.sales.lockoutErrBy[invitedContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
 
-	err := h.svc.RecordFirstAccess(firstAccessCtx(t))
+	err := h.svc.RegisterInvitedMemberships(registrationCtx(t))
 	var sue *apierror.ServiceUnavailableError
 	if !errors.As(err, &sue) {
 		t.Fatalf("err = %v (%T), want *apierror.ServiceUnavailableError", err, err)
 	}
 
-	want := []string{"lockout:" + firstAccessContact1 + ":false"}
+	want := []string{"lockout:" + invitedContact1 + ":false"}
 	if !reflect.DeepEqual(h.sales.calls, want) {
 		t.Errorf("sales entity calls = %v, want %v (no state update)", h.sales.calls, want)
 	}
 	if got := len(h.events.handled); got != 0 {
 		t.Errorf("re-ingest calls = %d, want 0", got)
 	}
-	step := stepFor(t, h.steps, firstAccessMembership1)
+	step := stepFor(t, h.steps, invitedMembership1)
 	if step.Status != domain.OnboardingStepFailed {
 		t.Errorf("status = %s, want FAILED", step.Status)
 	}
@@ -245,42 +245,42 @@ func TestFirstAccess_LockoutFailureSkipsTheStateUpdate(t *testing.T) {
 }
 
 // Each of the three writes is part of one guarded per-membership attempt.
-func TestFirstAccess_PerMembershipFailuresRecordFAILED(t *testing.T) {
+func TestMembershipRegistration_PerMembershipFailuresRecordFAILED(t *testing.T) {
 	tests := []struct {
 		name      string
-		setup     func(h *firstAccessHarness)
+		setup     func(h *registrationHarness)
 		wantCalls []string
 		wantEvent bool
 	}{
 		{
 			name: "state update rejected",
-			setup: func(h *firstAccessHarness) {
-				h.sales.stateErrBy[firstAccessMembership1] = &apierror.DownstreamError{Msg: "salesforce rejected the project contact update"}
+			setup: func(h *registrationHarness) {
+				h.sales.stateErrBy[invitedMembership1] = &apierror.DownstreamError{Msg: "salesforce rejected the project contact update"}
 			},
 			wantCalls: []string{
-				"lockout:" + firstAccessContact1 + ":false",
-				"state:" + firstAccessMembership1 + ":" + domain.MembershipStateRegistered,
+				"lockout:" + invitedContact1 + ":false",
+				"state:" + invitedMembership1 + ":" + domain.MembershipStateRegistered,
 			},
 		},
 		{
 			name: "re-ingest failed",
-			setup: func(h *firstAccessHarness) {
-				h.events.errBy[firstAccessMembership1] = errors.New("upsert membership: resolve project")
+			setup: func(h *registrationHarness) {
+				h.events.errBy[invitedMembership1] = errors.New("upsert membership: resolve project")
 			},
 			wantCalls: []string{
-				"lockout:" + firstAccessContact1 + ":false",
-				"state:" + firstAccessMembership1 + ":" + domain.MembershipStateRegistered,
+				"lockout:" + invitedContact1 + ":false",
+				"state:" + invitedMembership1 + ":" + domain.MembershipStateRegistered,
 			},
 			wantEvent: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newFirstAccessHarness(invited(firstAccessMembership1, firstAccessContact1))
+			h := newRegistrationHarness(invited(invitedMembership1, invitedContact1))
 			tc.setup(h)
 
-			if err := h.svc.RecordFirstAccess(firstAccessCtx(t)); err == nil {
-				t.Fatal("RecordFirstAccess returned nil, want an error (the only membership failed)")
+			if err := h.svc.RegisterInvitedMemberships(registrationCtx(t)); err == nil {
+				t.Fatal("RegisterInvitedMemberships returned nil, want an error (the only membership failed)")
 			}
 			if !reflect.DeepEqual(h.sales.calls, tc.wantCalls) {
 				t.Errorf("sales entity calls = %v, want %v", h.sales.calls, tc.wantCalls)
@@ -288,7 +288,7 @@ func TestFirstAccess_PerMembershipFailuresRecordFAILED(t *testing.T) {
 			if got := len(h.events.handled) > 0; got != tc.wantEvent {
 				t.Errorf("re-ingest attempted = %v, want %v", got, tc.wantEvent)
 			}
-			step := stepFor(t, h.steps, firstAccessMembership1)
+			step := stepFor(t, h.steps, invitedMembership1)
 			if step.Status != domain.OnboardingStepFailed {
 				t.Errorf("status = %s, want FAILED", step.Status)
 			}
@@ -298,42 +298,42 @@ func TestFirstAccess_PerMembershipFailuresRecordFAILED(t *testing.T) {
 
 // One bad membership must not cost the caller the others; the request still
 // succeeds, and the failed one is still INVITED for the next profile load.
-func TestFirstAccess_OneFailureDoesNotStopTheOthers(t *testing.T) {
-	h := newFirstAccessHarness(
-		invited(firstAccessMembership1, firstAccessContact1),
-		invited(firstAccessMembership2, firstAccessContact2),
+func TestMembershipRegistration_OneFailureDoesNotStopTheOthers(t *testing.T) {
+	h := newRegistrationHarness(
+		invited(invitedMembership1, invitedContact1),
+		invited(invitedMembership2, invitedContact2),
 	)
-	h.sales.lockoutErrBy[firstAccessContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
+	h.sales.lockoutErrBy[invitedContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
 
-	if err := h.svc.RecordFirstAccess(firstAccessCtx(t)); err != nil {
-		t.Fatalf("RecordFirstAccess = %v, want nil on a partial success", err)
+	if err := h.svc.RegisterInvitedMemberships(registrationCtx(t)); err != nil {
+		t.Fatalf("RegisterInvitedMemberships = %v, want nil on a partial success", err)
 	}
 
 	want := []string{
-		"lockout:" + firstAccessContact1 + ":false",
-		"lockout:" + firstAccessContact2 + ":false",
-		"state:" + firstAccessMembership2 + ":" + domain.MembershipStateRegistered,
+		"lockout:" + invitedContact1 + ":false",
+		"lockout:" + invitedContact2 + ":false",
+		"state:" + invitedMembership2 + ":" + domain.MembershipStateRegistered,
 	}
 	if !reflect.DeepEqual(h.sales.calls, want) {
 		t.Errorf("sales entity calls = %v, want %v", h.sales.calls, want)
 	}
-	if got := stepFor(t, h.steps, firstAccessMembership1).Status; got != domain.OnboardingStepFailed {
+	if got := stepFor(t, h.steps, invitedMembership1).Status; got != domain.OnboardingStepFailed {
 		t.Errorf("membership 1 status = %s, want FAILED", got)
 	}
-	if got := stepFor(t, h.steps, firstAccessMembership2).Status; got != domain.OnboardingStepSucceeded {
+	if got := stepFor(t, h.steps, invitedMembership2).Status; got != domain.OnboardingStepSucceeded {
 		t.Errorf("membership 2 status = %s, want SUCCEEDED", got)
 	}
 }
 
-func TestFirstAccess_EveryMembershipFailingIsAnError(t *testing.T) {
-	h := newFirstAccessHarness(
-		invited(firstAccessMembership1, firstAccessContact1),
-		invited(firstAccessMembership2, firstAccessContact2),
+func TestMembershipRegistration_EveryMembershipFailingIsAnError(t *testing.T) {
+	h := newRegistrationHarness(
+		invited(invitedMembership1, invitedContact1),
+		invited(invitedMembership2, invitedContact2),
 	)
-	h.sales.lockoutErrBy[firstAccessContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
-	h.sales.lockoutErrBy[firstAccessContact2] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
+	h.sales.lockoutErrBy[invitedContact1] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
+	h.sales.lockoutErrBy[invitedContact2] = &apierror.ServiceUnavailableError{Msg: "salesentity: down"}
 
-	err := h.svc.RecordFirstAccess(firstAccessCtx(t))
+	err := h.svc.RegisterInvitedMemberships(registrationCtx(t))
 	var sue *apierror.ServiceUnavailableError
 	if !errors.As(err, &sue) {
 		t.Fatalf("err = %v (%T), want *apierror.ServiceUnavailableError", err, err)
@@ -344,7 +344,7 @@ func TestFirstAccess_EveryMembershipFailingIsAnError(t *testing.T) {
 	}
 }
 
-func TestFirstAccess_RejectsACallerWithNoIdentity(t *testing.T) {
+func TestMembershipRegistration_RejectsACallerWithNoIdentity(t *testing.T) {
 	tests := []struct {
 		name  string
 		token string
@@ -369,9 +369,9 @@ func TestFirstAccess_RejectsACallerWithNoIdentity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newFirstAccessHarness(invited(firstAccessMembership1, firstAccessContact1))
+			h := newRegistrationHarness(invited(invitedMembership1, invitedContact1))
 
-			err := h.svc.RecordFirstAccess(contextWithUserIDToken(tc.token))
+			err := h.svc.RegisterInvitedMemberships(contextWithUserIDToken(tc.token))
 			if err == nil || !tc.check(err) {
 				t.Fatalf("err = %v (%T), want the rejection for %s", err, err, tc.name)
 			}
@@ -387,14 +387,14 @@ func TestFirstAccess_RejectsACallerWithNoIdentity(t *testing.T) {
 
 // A membership whose persisted record came back empty (sales-entity-service
 // could not re-read it after a successful write) is still a success.
-func TestFirstAccess_EmptyPersistedRecordIsStillASuccess(t *testing.T) {
-	h := newFirstAccessHarness(invited(firstAccessMembership1, firstAccessContact1))
+func TestMembershipRegistration_EmptyPersistedRecordIsStillASuccess(t *testing.T) {
+	h := newRegistrationHarness(invited(invitedMembership1, invitedContact1))
 	// No h.sales.persisted entry: a zero ProjectContact, no LastModifiedDate.
 
-	if err := h.svc.RecordFirstAccess(firstAccessCtx(t)); err != nil {
-		t.Fatalf("RecordFirstAccess: %v", err)
+	if err := h.svc.RegisterInvitedMemberships(registrationCtx(t)); err != nil {
+		t.Fatalf("RegisterInvitedMemberships: %v", err)
 	}
-	step := stepFor(t, h.steps, firstAccessMembership1)
+	step := stepFor(t, h.steps, invitedMembership1)
 	if step.Status != domain.OnboardingStepSucceeded {
 		t.Errorf("status = %s, want SUCCEEDED", step.Status)
 	}

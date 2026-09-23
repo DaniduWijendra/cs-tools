@@ -193,9 +193,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
 	var salesforceEventHandler *handler.SalesforceEventHandler
-	// firstAccessHandler needs the very same membership-ingest-enabled
+	// membershipRegistrationHandler needs the very same membership-ingest-enabled
 	// SalesforceEventService this block builds, so the two are wired together
-	// rather than side by side — see the POST /users/me/first-access block
+	// rather than side by side — see the POST /users/me/memberships/register block
 	// right below.
 	var membershipIngestSvc service.SalesforceEventService
 	var salesEntityClient *salesentity.Client
@@ -224,8 +224,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		}
 	}
 
-	// POST /users/me/first-access (H-0 of the customer onboarding flow).
-	// Postgres-only, and off unless CSM_MIGRATION_FIRST_ACCESS_ENABLED is
+	// POST /users/me/memberships/register (H-0 of the customer onboarding flow).
+	// Postgres-only, and off unless CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED is
 	// exactly "true": with the flag off the route is not registered at all, so
 	// it 404s and nothing on this path can write to Salesforce. It also needs
 	// what it depends on to exist — the SALES_ENTITY_* client for the two
@@ -233,10 +233,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// membership — so SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
 	// this 404 too, rather than flipping Salesforce with no matching database
 	// write.
-	var firstAccessHandler *handler.FirstAccessHandler
-	if db != nil && cfg.CSMMigrationFirstAccessEnabled && salesEntityClient != nil && membershipIngestSvc != nil {
-		firstAccessHandler = handler.NewFirstAccessHandler(service.NewFirstAccessService(
-			repository.NewFirstAccessRepository(db),
+	var membershipRegistrationHandler *handler.MembershipRegistrationHandler
+	if db != nil && cfg.CSMMigrationMembershipRegistrationEnabled && salesEntityClient != nil && membershipIngestSvc != nil {
+		membershipRegistrationHandler = handler.NewMembershipRegistrationHandler(service.NewMembershipRegistrationService(
+			repository.NewMembershipRegistrationRepository(db),
 			salesEntityClient,
 			membershipIngestSvc,
 			repository.NewOnboardingStepRepository(db),
@@ -786,8 +786,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
 	}
 
-	if firstAccessHandler != nil {
-		mux.HandleFunc("POST /users/me/first-access", firstAccessHandler.RecordFirstAccess)
+	if membershipRegistrationHandler != nil {
+		mux.HandleFunc("POST /users/me/memberships/register", membershipRegistrationHandler.RegisterInvitedMemberships)
 	}
 
 	if snUserHandler != nil {

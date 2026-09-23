@@ -1197,11 +1197,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /users/me/first-access:
+  /users/me/memberships/register:
     post:
       summary: Mark the caller's still-invited memberships as registered.
       description: >
-        Postgres-only, and registered only when CSM_MIGRATION_FIRST_ACCESS_ENABLED
+        Postgres-only, and registered only when CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED
         is "true" (404 otherwise). Called by the Customer Portal on every profile
         load for the user identified by the x-user-id-token header. For each of
         that user's project memberships still in state INVITED or RE-INVITED, it
@@ -1211,10 +1211,10 @@ paths:
         such membership - almost every call - does nothing at all. One membership
         failing does not stop the others; an error is reported only when every
         membership failed. No request body, and no response body.
-      operationId: recordUserFirstAccess
+      operationId: recordUserMembershipRegistration
       responses:
         "204":
-          description: First access handled. No content.
+          description: Invited memberships registered, or the caller had none. No content.
         "400":
           description: Bad request - x-user-id-token could not be decoded.
           content:

@@ -29,7 +29,7 @@ import (
 )
 
 // SalesEntityMembershipWriteClient is the write half of the REST
-// sales/sales-entity-service contract the first-access flip needs. Kept
+// sales/sales-entity-service contract the registration flip needs. Kept
 // separate from SalesEntityMembershipClient (the read half the ingest uses)
 // so the ingest cannot accidentally gain write access to Salesforce;
 // *salesentity.Client satisfies both.
@@ -43,33 +43,33 @@ type SalesEntityMembershipWriteClient interface {
 	UpdateProjectContactState(ctx context.Context, membershipSfID, state string) (salesentity.ProjectContact, error)
 }
 
-type firstAccessService struct {
-	repo  repository.FirstAccessRepository
+type membershipRegistrationService struct {
+	repo  repository.MembershipRegistrationRepository
 	sales SalesEntityMembershipWriteClient
 	// events is the same SalesforceEventService POST /salesforce/events is
 	// backed by. Re-ingesting through it (rather than through a second copy
 	// of the mapping) is what keeps the Postgres row, the DATABASE onboarding
 	// step and the invited-event decision identical to a real Salesforce
-	// envelope -- see RecordFirstAccess step 4.
+	// envelope -- see RegisterInvitedMemberships step 4.
 	events SalesforceEventService
 	steps  repository.OnboardingStepRepository
 }
 
-// NewFirstAccessService constructs a FirstAccessService. events must be the
+// NewMembershipRegistrationService constructs a MembershipRegistrationService. events must be the
 // membership-ingest-enabled SalesforceEventService (routes.go only builds this
 // service when it is), otherwise the Salesforce flip would happen with no
 // matching database write.
-func NewFirstAccessService(
-	repo repository.FirstAccessRepository,
+func NewMembershipRegistrationService(
+	repo repository.MembershipRegistrationRepository,
 	sales SalesEntityMembershipWriteClient,
 	events SalesforceEventService,
 	steps repository.OnboardingStepRepository,
-) FirstAccessService {
-	return &firstAccessService{repo: repo, sales: sales, events: events, steps: steps}
+) MembershipRegistrationService {
+	return &membershipRegistrationService{repo: repo, sales: sales, events: events, steps: steps}
 }
 
-// RecordFirstAccess implements FirstAccessService.
-func (s *firstAccessService) RecordFirstAccess(ctx context.Context) error {
+// RegisterInvitedMemberships implements MembershipRegistrationService.
+func (s *membershipRegistrationService) RegisterInvitedMemberships(ctx context.Context) error {
 	// Same identity resolution as GET /users/me: the already-validated
 	// x-user-id-token's email claim. No token is a 401; an undecodable one a
 	// 400 -- the convention userService.GetMe already set.
@@ -93,7 +93,7 @@ func (s *firstAccessService) RecordFirstAccess(ctx context.Context) error {
 		return nil
 	}
 
-	slog.InfoContext(ctx, "first access: flipping invited memberships to REGISTERED", "membershipCount", len(memberships))
+	slog.InfoContext(ctx, "register memberships: flipping invited memberships to REGISTERED", "membershipCount", len(memberships))
 
 	var firstErr error
 	failed := 0
@@ -106,7 +106,7 @@ func (s *firstAccessService) RecordFirstAccess(ctx context.Context) error {
 			// Deliberately no email in this line: membership and contact ids
 			// identify the record without putting a customer's address in the
 			// logs.
-			slog.ErrorContext(ctx, "first access: could not register membership",
+			slog.ErrorContext(ctx, "register memberships: could not register a membership",
 				"membershipSfId", m.MembershipSfID, "contactSfId", m.ContactSfID, "err", err)
 		}
 	}
@@ -125,7 +125,7 @@ func (s *firstAccessService) RecordFirstAccess(ctx context.Context) error {
 // unit: any of them failing leaves the step FAILED, since the membership is
 // only really registered when Salesforce has been flipped and Postgres has
 // caught up.
-func (s *firstAccessService) registerMembership(ctx context.Context, m repository.InvitedMembership, email string) error {
+func (s *membershipRegistrationService) registerMembership(ctx context.Context, m repository.InvitedMembership, email string) error {
 	persisted, err := s.flipMembership(ctx, m)
 	s.recordRegistrationStep(ctx, m, email, persisted, err)
 	return err
@@ -140,7 +140,7 @@ func (s *firstAccessService) registerMembership(ctx context.Context, m repositor
 // is DEACTIVATED). Setting the state first and clearing the flag second would
 // have the trigger overwrite REGISTERED back to INVITED on the state write's
 // own save. Do not reorder these two calls.
-func (s *firstAccessService) flipMembership(ctx context.Context, m repository.InvitedMembership) (salesentity.ProjectContact, error) {
+func (s *membershipRegistrationService) flipMembership(ctx context.Context, m repository.InvitedMembership) (salesentity.ProjectContact, error) {
 	if err := s.sales.UpdateContactLockout(ctx, m.ContactSfID, false); err != nil {
 		// The state update is skipped entirely: with the flag still set the
 		// trigger would just revert it, so the call would be a no-op that
@@ -174,7 +174,7 @@ func (s *firstAccessService) flipMembership(ctx context.Context, m repository.In
 // eventModifiedOn is the persisted record's own LastModifiedDate when
 // Salesforce gave one back, so the row is stamped with the same Salesforce
 // version the ingest's DATABASE step is.
-func (s *firstAccessService) recordRegistrationStep(
+func (s *membershipRegistrationService) recordRegistrationStep(
 	ctx context.Context, m repository.InvitedMembership, email string,
 	persisted salesentity.ProjectContact, cause error,
 ) {
@@ -201,7 +201,7 @@ func (s *firstAccessService) recordRegistrationStep(
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordRegistrationStepTimeout)
 	defer cancel()
 	if _, err := s.steps.Upsert(recordCtx, step); err != nil {
-		slog.ErrorContext(ctx, "first access: recording the REGISTRATION onboarding step failed",
+		slog.ErrorContext(ctx, "register memberships: recording the REGISTRATION onboarding step failed",
 			"membershipSfId", m.MembershipSfID, "status", step.Status, "err", err)
 	}
 }
