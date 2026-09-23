@@ -271,3 +271,130 @@ func TestGetContact_ServerErrorIs503(t *testing.T) {
 		t.Fatalf("err = %v, want ServiceUnavailableError", err)
 	}
 }
+
+func TestUpdateContactLockout_PatchesLockoutStatusOnly(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	client := newMembershipTestClient(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/contacts/{id}", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			if r.Header.Get("Authorization") != "Bearer test-token" {
+				t.Errorf("auth = %q", r.Header.Get("Authorization"))
+			}
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("parse body: %v", err)
+			}
+			// PATCH /contacts/{id} answers 200 with no body at all.
+			w.WriteHeader(http.StatusOK)
+		})
+	})
+	if err := client.UpdateContactLockout(context.Background(), "003000000000001AAA", false); err != nil {
+		t.Fatalf("UpdateContactLockout: %v", err)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/contacts/003000000000001AAA" {
+		t.Errorf("request = %s %s, want PATCH /contacts/003000000000001AAA", gotMethod, gotPath)
+	}
+	if len(gotBody) != 1 || gotBody["lockoutStatus"] != false {
+		t.Errorf("body = %v, want exactly {lockoutStatus: false}", gotBody)
+	}
+}
+
+func TestUpdateProjectContactState_ReturnsTheReReadRecord(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	client := newMembershipTestClient(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/project-contacts/{id}", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("parse body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "a0e000000000001AAA", "email": "jane@acme.com", "state": "REGISTERED",
+				"lastModifiedDate": "2026-09-18T06:37:07.000+0000",
+			})
+		})
+	})
+	got, err := client.UpdateProjectContactState(context.Background(), "a0e000000000001AAA", "REGISTERED")
+	if err != nil {
+		t.Fatalf("UpdateProjectContactState: %v", err)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/project-contacts/a0e000000000001AAA" {
+		t.Errorf("request = %s %s, want PATCH /project-contacts/a0e000000000001AAA", gotMethod, gotPath)
+	}
+	if len(gotBody) != 1 || gotBody["state"] != "REGISTERED" {
+		t.Errorf("body = %v, want exactly {state: REGISTERED}", gotBody)
+	}
+	if got.ID != "a0e000000000001AAA" || deref(got.State) != "REGISTERED" || deref(got.LastModifiedDate) != "2026-09-18T06:37:07.000+0000" {
+		t.Errorf("project contact = %+v", got)
+	}
+}
+
+// sales-entity-service writes the record, then re-reads it best-effort: a
+// failed re-read there is still a 200, with an empty body.
+func TestUpdateProjectContactState_EmptyBodyIsAZeroRecordNotAnError(t *testing.T) {
+	client := newMembershipTestClient(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/project-contacts/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	})
+	got, err := client.UpdateProjectContactState(context.Background(), "a0e000000000001AAA", "REGISTERED")
+	if err != nil {
+		t.Fatalf("UpdateProjectContactState: %v", err)
+	}
+	if got.ID != "" || got.State != nil {
+		t.Errorf("project contact = %+v, want the zero record", got)
+	}
+}
+
+func TestUpdateContactLockout_RefreshesTokenOn401(t *testing.T) {
+	calls := 0
+	client := newMembershipTestClient(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/contacts/{id}", func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			if calls == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+	})
+	if err := client.UpdateContactLockout(context.Background(), "003xx000000ABC1", false); err != nil {
+		t.Fatalf("UpdateContactLockout: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want one retry after 401", calls)
+	}
+}
+
+// A write against a record this service has already ingested is a real 404,
+// not the "Salesforce has not committed it yet, retry" the read path means.
+func TestPatchStatusMapping(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		check  func(error) bool
+	}{
+		{"404 is not found", http.StatusNotFound, func(err error) bool {
+			var nfe *apierror.NotFoundError
+			return errors.As(err, &nfe)
+		}},
+		{"400 is a downstream rejection", http.StatusBadRequest, func(err error) bool {
+			var de *apierror.DownstreamError
+			return errors.As(err, &de)
+		}},
+		{"502 is unavailable", http.StatusBadGateway, func(err error) bool {
+			var sue *apierror.ServiceUnavailableError
+			return errors.As(err, &sue)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newMembershipTestClient(t, func(mux *http.ServeMux) {
+				mux.HandleFunc("/project-contacts/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) })
+			})
+			_, err := client.UpdateProjectContactState(context.Background(), "a0e000000000001AAA", "REGISTERED")
+			if err == nil || !tc.check(err) {
+				t.Fatalf("err = %v (%T), want the mapping for %d", err, err, tc.status)
+			}
+		})
+	}
+}

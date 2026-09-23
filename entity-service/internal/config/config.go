@@ -98,6 +98,12 @@ type Config struct {
 	// acknowledged and ignored, as before the branch existed. The Account
 	// branch is unaffected by this flag.
 	SalesforceMembershipIngestEnabled bool
+	// CSMMigrationFirstAccessEnabled turns on POST /users/me/first-access,
+	// which marks the signed-in user's still-INVITED memberships as
+	// REGISTERED in Salesforce (see first_access_service.go). Defaults to
+	// false, and while it is false routes.go does not register the route at
+	// all — it 404s, and nothing on this path can write to Salesforce.
+	CSMMigrationFirstAccessEnabled bool
 	// GithubIntegrationEnabled gates the GitHub change-request sync: the
 	// webhook endpoint and the client that answers it.
 	//
@@ -256,6 +262,7 @@ func Load() *Config {
 		GithubLabelsStrippedOnCreate:             os.Getenv("GITHUB_LABELS_STRIPPED_ON_CREATE"),
 		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
 		SalesforceMembershipIngestEnabled:        os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		CSMMigrationFirstAccessEnabled:           os.Getenv("CSM_MIGRATION_FIRST_ACCESS_ENABLED") == "true",
 		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
 		CRNoticePollInterval:                     envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
 		AuthIssuer:                               os.Getenv("AUTH_ISSUER"),

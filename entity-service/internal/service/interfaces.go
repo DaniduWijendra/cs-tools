@@ -92,6 +92,25 @@ type SalesforceEventService interface {
 	HandleEvent(ctx context.Context, req domain.SalesforceEventRequest) error
 }
 
+// FirstAccessService backs POST /users/me/first-access: the Customer Portal
+// calls it on every profile load, and it marks the signed-in user's still
+// un-accepted memberships as REGISTERED in Salesforce. The portal itself
+// therefore never needs Salesforce write access. Postgres-only, and gated on
+// CSM_MIGRATION_FIRST_ACCESS_ENABLED — see first_access_service.go.
+type FirstAccessService interface {
+	// RecordFirstAccess flips every INVITED / RE-INVITED membership of the
+	// caller (resolved from x-user-id-token, exactly like GetMe) to
+	// REGISTERED in Salesforce, re-ingests each one so Postgres matches, and
+	// records the REGISTRATION onboarding step per membership. A caller with
+	// no such membership — almost every call — does nothing at all.
+	//
+	// An UnauthorizedError is returned when the header is missing and a
+	// ValidationError when the token cannot be decoded. One membership
+	// failing never stops the others: an error is only returned when every
+	// membership failed, so a partial success is still a success.
+	RecordFirstAccess(ctx context.Context) error
+}
+
 // EventPublishFailureService defines the operations available on the
 // event_publish_failures entity — see domain.EventPublishFailure's doc
 // comment for what it's for.

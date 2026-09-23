@@ -50,6 +50,7 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `SALES_ENTITY_CLIENT_SECRET` | no* | — | Choreo connection client secret |
 | `SALES_ENTITY_SCOPES` | no | — | Optional space-separated OAuth2 scopes for REST `sales/sales-entity-service` |
 | `SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes (see "Salesforce membership ingest" below). The Account branch is unaffected |
+| `CSM_MIGRATION_FIRST_ACCESS_ENABLED` | no | `false` | Must be `"true"` for `POST /users/me/first-access` to be registered at all (see "First access" below). Off = the route 404s and nothing on that path can write to Salesforce |
 
 \* `DB_USER`/`DB_PASSWORD`/`DB_NAME` are required when `DATA_SOURCE=postgres`
 and **optional** when `DATA_SOURCE=servicenow`, where entity reads and writes
@@ -300,6 +301,113 @@ write was based on.
 - `POST /onboarding-steps/search` — `{filters: {projectId?, membershipSfIds?,
   statuses?}, pagination}` → `{steps, total, limit, offset}`, newest first,
   `normalizePagination` (limit 20, max 50).
+
+## First access (`POST /users/me/first-access`)
+
+H-0 of the customer onboarding flow. A customer invited in the Customer Portal
+gets a Salesforce Contact and a `Project_Contact__c` membership in state
+INVITED; something has to mark that membership REGISTERED once the person
+actually signs in. **ServiceNow owns that today** — its verification page
+clears the contact's lockout flag on first sign-in. After cutover the Customer
+Portal owns it, and the work lives here rather than in the portal, so the
+portal never needs Salesforce write access of its own.
+
+`POST /users/me/first-access` → **204, no body**, no request body either. The
+caller is the Customer Portal acting on behalf of the signed-in user, so it
+carries an end-user token and the caller is resolved exactly the way
+`GET /users/me` resolves it: the `email` claim of the already-validated
+`x-user-id-token` (`middleware.UserIDTokenFromContext` → `emailFromJWT`).
+A missing header is a 401, an undecodable token a 400 — no new convention.
+
+**Postgres-only and off by default.** `CSM_MIGRATION_FIRST_ACCESS_ENABLED` must
+be exactly `"true"` (same parse as every other flag here); while it is off
+`routes.go` does not register the route at all, so it 404s and nothing on this
+path can reach Salesforce. It also needs what it depends on — a pool, the four
+`SALES_ENTITY_*` vars, and `SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true` for the
+re-ingest — so with the ingest off this 404s too, rather than flipping
+Salesforce with no matching database write.
+
+**The no-op fast path is the point.** The portal calls this on *every* profile
+load, and a membership is only ever INVITED once, so the overwhelmingly common
+outcome is: one indexed read of `project_contact`, no rows, return. Nothing is
+logged and Salesforce is never touched. Keep it that way — anything added to
+this path runs on every profile load of every user.
+
+`FirstAccessRepository.InvitedMembershipsByEmail` (`first_access_repo.go`) is
+that read: `project_contact` joined to `account_contact`, matched on
+`LOWER(pc.email)` (the same join `access_repo.go`'s `RegisteredProjectIDs`
+uses for the mirror-image state), state ∈ INVITED / RE-INVITED, returning
+`project_contact.sf_id` (the membership) and `account_contact.sf_id` (the
+Contact). A row missing either id is left out — it could not be flipped in
+Salesforce anyway. Same `sf_id` schema prerequisite as the membership ingest
+(csm-sync migration 0076).
+
+**THE ORDER OF THE TWO SALESFORCE WRITES IS LOAD-BEARING — do not reorder
+them.** Salesforce's `SN_T_Project_Contact` trigger recomputes every
+membership's `State__c` from the Contact's "Locked Out [ Service Now ]" boolean
+(`Contact.State__c`) on **every** save: locked out → INVITED, not locked out →
+REGISTERED, unless the membership is DEACTIVATED. So per membership, in this
+order:
+
+1. `UpdateContactLockout(contactSfId, false)` — `PATCH /contacts/{id}`
+   `{lockoutStatus: false}`, 200 with no body.
+2. `UpdateProjectContactState(membershipSfId, "REGISTERED")` —
+   `PATCH /project-contacts/{id}` `{state}`, 200 with the record
+   sales-entity-service re-read from Salesforce (a failed re-read there is
+   still a 200 with an **empty body**, which the client returns as a zero
+   record and no error).
+
+Doing it the other way round has the trigger overwrite REGISTERED back to
+INVITED on the state write's own save — verified by hand. If step 1 fails,
+step 2 is **skipped** for that membership: with the flag still set the state
+write would be a no-op that looked like a success.
+
+3. **Re-ingest**, so Postgres matches Salesforce before the request returns
+   instead of whenever the ASB envelope for the same save arrives. This calls
+   `SalesforceEventService.HandleEvent` — the very same entry point
+   `POST /salesforce/events` is backed by — with the envelope Salesforce itself
+   would have emitted (`{eventType: UPDATED, entity: "Project_Contact__c",
+   referenceId: membershipSfId}`). That seam is deliberate: the mapping, the
+   `ProjectMembershipRepository.Upsert`, the DATABASE step and the duplicate
+   guard are then literally the same code, none of it reimplemented. The flip
+   changed the record's `LastModifiedDate`, so the duplicate guard does not
+   skip it. `routes.go` hands the first-access service the *same*
+   membership-ingest-enabled `SalesforceEventService` value the Salesforce
+   event handler holds.
+4. **`REGISTRATION` = SUCCEEDED / FAILED** per membership via the existing
+   `OnboardingStepRepository.Upsert`, actor `domain.SalesforceSyncActor`
+   (`salesforce-sync`, the same actor the ingest records steps under),
+   `eventType` UPDATED and `eventModifiedOn` = the persisted record's own
+   `LastModifiedDate` when Salesforce returned one, else `now()`. The whole
+   per-membership attempt is guarded as one unit: any of the three writes
+   failing records FAILED with the (1000-rune-truncated) error, since the
+   membership is only really registered once Salesforce is flipped *and*
+   Postgres has caught up. The step write itself is best-effort and bounded by
+   its own 3s timeout — the Salesforce side is already committed by then, so it
+   is logged, never returned.
+
+**Error posture**: one membership failing never stops the others; each failure
+is logged with the membership and contact ids. An error is returned only when
+**every** membership failed (the first one, so its own status mapping
+survives) — a partial success is a 204, and the memberships that did not flip
+are still INVITED, so the caller's next profile load retries them.
+
+**PII**: no log line on this path carries the user's email address. Membership
+and contact Salesforce ids identify the record. (The `onboarding_step` row does
+store `email` — that column is part of the existing ledger and the ingest fills
+it the same way; the rule is about logs.)
+
+The two write methods live on the same `salesentity.Client` as the reads
+(`UpdateContactLockout`/`UpdateProjectContactState`, `patch`/`patchWithRetry`
+mirroring `search`/`searchWithRetry` — same token handling, same
+refresh-once-on-401). One status mapping differs on purpose: a **404 on a
+PATCH is a `NotFoundError`**, not the `ServiceUnavailableError` the read path
+returns, because on a write against a record this service has already ingested
+a 404 means the record is genuinely gone, not "Salesforce has not committed it
+yet, retry". A 400 (Salesforce rejected the write) stays a `DownstreamError`.
+`service.SalesEntityMembershipWriteClient` is a separate interface from
+`SalesEntityMembershipClient` so the ingest cannot accidentally gain write
+access to Salesforce; `*salesentity.Client` satisfies both.
 
 Seven call sites publish today, all ServiceNow-data-source-only (`DATA_SOURCE=servicenow`;
 there is no Postgres-backed equivalent for any of them). There is also one

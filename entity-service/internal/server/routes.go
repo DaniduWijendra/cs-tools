@@ -193,8 +193,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
 	var salesforceEventHandler *handler.SalesforceEventHandler
+	// firstAccessHandler needs the very same membership-ingest-enabled
+	// SalesforceEventService this block builds, so the two are wired together
+	// rather than side by side — see the POST /users/me/first-access block
+	// right below.
+	var membershipIngestSvc service.SalesforceEventService
+	var salesEntityClient *salesentity.Client
 	if db != nil && cfg.DataSource == config.DataSourcePostgres && cfg.SalesEntityConfigured() {
-		salesEntityClient := salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
+		salesEntityClient = salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
 			TokenURL:     cfg.SalesEntityTokenURL,
 			ClientID:     cfg.SalesEntityClientID,
 			ClientSecret: cfg.SalesEntityClientSecret,
@@ -205,16 +211,36 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 			// writes user/account_contact/project_contact rows and the
 			// DATABASE onboarding step, and publishes project_contact.invited
 			// when eventPublisher is configured (nil is a no-op there).
-			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventServiceWithMembershipIngest(
+			membershipIngestSvc = service.NewSalesforceEventServiceWithMembershipIngest(
 				accountRepo, salesEntityClient, service.MembershipIngest{
 					Memberships: repository.NewProjectMembershipRepository(db),
 					Steps:       repository.NewOnboardingStepRepository(db),
 					SalesEntity: salesEntityClient,
 					Publisher:   eventPublisher,
-				}))
+				})
+			salesforceEventHandler = handler.NewSalesforceEventHandler(membershipIngestSvc)
 		} else {
 			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventService(accountRepo, salesEntityClient))
 		}
+	}
+
+	// POST /users/me/first-access (H-0 of the customer onboarding flow).
+	// Postgres-only, and off unless CSM_MIGRATION_FIRST_ACCESS_ENABLED is
+	// exactly "true": with the flag off the route is not registered at all, so
+	// it 404s and nothing on this path can write to Salesforce. It also needs
+	// what it depends on to exist — the SALES_ENTITY_* client for the two
+	// PATCHes, and the membership-ingest service to re-ingest each flipped
+	// membership — so SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
+	// this 404 too, rather than flipping Salesforce with no matching database
+	// write.
+	var firstAccessHandler *handler.FirstAccessHandler
+	if db != nil && cfg.CSMMigrationFirstAccessEnabled && salesEntityClient != nil && membershipIngestSvc != nil {
+		firstAccessHandler = handler.NewFirstAccessHandler(service.NewFirstAccessService(
+			repository.NewFirstAccessRepository(db),
+			salesEntityClient,
+			membershipIngestSvc,
+			repository.NewOnboardingStepRepository(db),
+		))
 	}
 
 	// onboarding_step has no ServiceNow equivalent; Postgres-only, like
@@ -758,6 +784,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("PUT /users/me/saved-filter-views", savedFilterViewHandler.Save)
 		mux.HandleFunc("DELETE /users/me/saved-filter-views", savedFilterViewHandler.Delete)
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
+	}
+
+	if firstAccessHandler != nil {
+		mux.HandleFunc("POST /users/me/first-access", firstAccessHandler.RecordFirstAccess)
 	}
 
 	if snUserHandler != nil {

@@ -16,7 +16,9 @@
 
 // Package salesentity is an HTTP client for the REST app sales/sales-entity-service
 // (not GraphQL sales/entity-graphql-service). POST /salesforce/events uses
-// POST /customer-search to fetch a Customer by Salesforce Account Id.
+// POST /customer-search to fetch a Customer by Salesforce Account Id. The write
+// side (PATCH /contacts/{id}, PATCH /project-contacts/{id}) backs the
+// first-access flip -- see internal/service/first_access_service.go.
 package salesentity
 
 import (
@@ -39,8 +41,13 @@ const (
 	customerSearchPath       = "/customer-search"
 	contactSearchPath        = "/contacts/search"
 	projectContactSearchPath = "/project-contacts/search"
-	defaultTimeout           = 15 * time.Second
-	tokenExpirySlack         = 30 * time.Second
+	// contactPath / projectContactPath are the single-record write resources;
+	// the record's Salesforce Id is appended: PATCH /contacts/{id} and
+	// PATCH /project-contacts/{id}.
+	contactPath        = "/contacts/"
+	projectContactPath = "/project-contacts/"
+	defaultTimeout     = 15 * time.Second
+	tokenExpirySlack   = 30 * time.Second
 )
 
 // ClientCredentialsConfig holds the OAuth2 client credentials used to obtain
@@ -145,6 +152,20 @@ type idSearchRequest struct {
 	Limit int    `json:"limit"`
 }
 
+// updateContactRequest is the PATCH /contacts/{id} body. Every field of that
+// resource is optional and only the ones present are written, so this carries
+// lockoutStatus alone -- no other Contact field may be touched from here.
+type updateContactRequest struct {
+	LockoutStatus bool `json:"lockoutStatus"`
+}
+
+// updateProjectContactRequest is the PATCH /project-contacts/{id} body. state
+// and role are both optional there (at least one is required); this writes
+// state alone, leaving the membership's roles untouched.
+type updateProjectContactRequest struct {
+	State string `json:"state"`
+}
+
 type tokenResponse struct {
 	AccessToken string `json:"access_token"`
 	ExpiresIn   int    `json:"expires_in"`
@@ -232,6 +253,111 @@ func (c *Client) GetContact(ctx context.Context, id string) (Contact, error) {
 		return Contact{}, &apierror.ServiceUnavailableError{Msg: "salesentity: contact not found"}
 	}
 	return Contact{}, &apierror.ServiceUnavailableError{Msg: "salesentity: contacts/search returned an unexpected contact"}
+}
+
+// UpdateContactLockout writes the Contact's "Locked Out [ Service Now ]" flag
+// (Salesforce Contact.State__c) via PATCH /contacts/{id} {lockoutStatus}. That
+// resource answers 200 with no body, so nothing is decoded.
+//
+// Salesforce's SN_T_Project_Contact trigger recomputes every membership's
+// State__c from this flag on each save (true -> INVITED, false -> REGISTERED,
+// unless the membership is DEACTIVATED), so clearing it must happen BEFORE
+// UpdateProjectContactState, never after -- see first_access_service.go.
+func (c *Client) UpdateContactLockout(ctx context.Context, contactSfID string, lockedOut bool) error {
+	return c.patchWithRetry(ctx, contactPath+url.PathEscape(contactSfID),
+		updateContactRequest{LockoutStatus: lockedOut}, "contact", nil)
+}
+
+// UpdateProjectContactState writes one Project_Contact__c's membership state
+// via PATCH /project-contacts/{id} {state} and returns the record as
+// sales-entity-service re-read it from Salesforce after the write -- org
+// automation can persist a different state than the one requested, so the
+// persisted record is what the caller should believe.
+//
+// That re-read is best-effort on the sales-entity-service side: a failed
+// re-read there is still a 200, with an empty body. An empty body is therefore
+// a zero ProjectContact and no error, not a parse failure.
+func (c *Client) UpdateProjectContactState(ctx context.Context, membershipSfID, state string) (ProjectContact, error) {
+	var out ProjectContact
+	if err := c.patchWithRetry(ctx, projectContactPath+url.PathEscape(membershipSfID),
+		updateProjectContactRequest{State: state}, "project contact", &out); err != nil {
+		return ProjectContact{}, err
+	}
+	return out, nil
+}
+
+// patchWithRetry PATCHes body to path, refreshing the token once on 401 -- the
+// same policy searchWithRetry applies on the read side.
+func (c *Client) patchWithRetry(ctx context.Context, path string, body any, what string, out any) error {
+	err := c.patch(ctx, path, body, what, out)
+	if errors.Is(err, errCustomerUnauthorized) {
+		c.invalidateToken()
+		err = c.patch(ctx, path, body, what, out)
+		if errors.Is(err, errCustomerUnauthorized) {
+			return &apierror.UnauthorizedError{Msg: "salesentity: " + path + " unauthorized"}
+		}
+	}
+	return err
+}
+
+// patch performs one authenticated PATCH of body to path and, when out is
+// non-nil and the 2xx response carried a body, decodes it into out.
+//
+// Status handling differs from search in one place deliberately: a 404 here is
+// a NotFoundError, not a ServiceUnavailableError. On the read side a 404/empty
+// result means "Salesforce has not committed the record yet, retry"; on a
+// write against a record this service has already ingested it means the record
+// is genuinely gone, and retrying would not bring it back. A 400 (Salesforce
+// rejected the write -- bad Id checksum, a picklist value the org does not
+// accept) falls through to DownstreamError like any other unmapped non-2xx.
+func (c *Client) patch(ctx context.Context, path string, body any, what string, out any) error {
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("salesentity: marshal %s request: %w", path, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("salesentity: build %s request: %w", path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return err
+		}
+		return &apierror.ServiceUnavailableError{Msg: fmt.Sprintf("salesentity: %s request: %v", path, err)}
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("salesentity: read %s response: %w", path, err)
+	}
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		if out == nil || len(bytes.TrimSpace(raw)) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(raw, out); err != nil {
+			return fmt.Errorf("salesentity: parse %s response: %w", path, err)
+		}
+		return nil
+	case resp.StatusCode == http.StatusUnauthorized:
+		return errCustomerUnauthorized
+	case resp.StatusCode == http.StatusNotFound:
+		return &apierror.NotFoundError{Msg: "salesentity: " + what + " not found"}
+	case resp.StatusCode >= 500:
+		return &apierror.ServiceUnavailableError{Msg: fmt.Sprintf("salesentity: %s returned %d", path, resp.StatusCode)}
+	default:
+		return &apierror.DownstreamError{Msg: fmt.Sprintf("salesentity rejected %s (status %d)", path, resp.StatusCode)}
+	}
 }
 
 // searchWithRetry POSTs a search body to path and decodes the JSON array
