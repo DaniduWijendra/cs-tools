@@ -18,6 +18,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -404,5 +405,60 @@ func TestUpdateAccountTeams(t *testing.T) {
 				assertContentType(t, w, "application/json")
 			})
 		}
+	})
+
+	t.Run("rejects a non-admin caller", func(t *testing.T) {
+		var updateCalled bool
+		client := &mockEntityAccountClient{
+			getUserMeFn: func(_ context.Context) ([]byte, error) {
+				return []byte(`{"roles":["agent"]}`), nil
+			},
+			updateAccountTeamsFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				updateCalled = true
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewAccountHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/accounts/"+accountID, strings.NewReader(`{"creTeamId":null}`)))
+		r.SetPathValue("id", accountID)
+		w := httptest.NewRecorder()
+		h.UpdateAccountTeams(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+		assertErrorMessage(t, w, ErrMsgForbidden)
+		assertContentType(t, w, "application/json")
+		if updateCalled {
+			t.Error("UpdateAccountTeams was forwarded to the entity service for a non-admin caller")
+		}
+	})
+
+	t.Run("rejects a caller with no roles at all", func(t *testing.T) {
+		client := &mockEntityAccountClient{
+			getUserMeFn: func(_ context.Context) ([]byte, error) {
+				return []byte(`{"roles":[]}`), nil
+			},
+		}
+		h := NewAccountHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/accounts/"+accountID, strings.NewReader(`{"creTeamId":null}`)))
+		r.SetPathValue("id", accountID)
+		w := httptest.NewRecorder()
+		h.UpdateAccountTeams(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+		assertErrorMessage(t, w, ErrMsgForbidden)
+	})
+
+	t.Run("surfaces an error when the caller's own roles can't be resolved", func(t *testing.T) {
+		client := &mockEntityAccountClient{
+			getUserMeFn: func(_ context.Context) ([]byte, error) {
+				return nil, errors.New("upstream connection refused")
+			},
+		}
+		h := NewAccountHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/accounts/"+accountID, strings.NewReader(`{"creTeamId":null}`)))
+		r.SetPathValue("id", accountID)
+		w := httptest.NewRecorder()
+		h.UpdateAccountTeams(w, r)
+		assertStatus(t, w, http.StatusInternalServerError)
+		assertErrorMessage(t, w, "Failed to resolve caller permissions.")
+		assertContentType(t, w, "application/json")
 	})
 }

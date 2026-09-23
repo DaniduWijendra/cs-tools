@@ -38,6 +38,7 @@ import { useAccountProjects } from "@features/csm-accounts/api/useAccountProject
 import { useGetAccount } from "@features/csm-accounts/api/useGetAccount";
 import { usePatchAccountTeams } from "@features/csm-accounts/api/usePatchAccountTeams";
 import EditAccountTeamsDialog from "@features/csm-accounts/components/EditAccountTeamsDialog";
+import { useGetUsersMe } from "@features/settings/api/useGetUsersMe";
 import {
   getDeactivationState,
   resolveAccountTier,
@@ -207,6 +208,11 @@ export default function CsmAccountDetailPage(): JSX.Element {
   const patchAccountTeams = usePatchAccountTeams(id);
   const [editTeamsOpen, setEditTeamsOpen] = useState(false);
   const { showError } = useErrorBanner();
+  // Client-side affordance only — the backend enforces the actual admin gate
+  // on PATCH /accounts/{id}; hiding the control here just avoids offering an
+  // action that would 403 for everyone else.
+  const { data: me } = useGetUsersMe();
+  const isAdmin = (me?.roles ?? []).some((r) => r.toLowerCase() === "admin");
 
   if (isLoading) {
     return (
@@ -317,14 +323,16 @@ export default function CsmAccountDetailPage(): JSX.Element {
                   —
                 </Typography>
               )}
-              <IconButton
-                size="small"
-                aria-label="Edit CRE / SRE team"
-                className="csm-print-hide"
-                onClick={() => setEditTeamsOpen(true)}
-              >
-                <Pencil size={14} />
-              </IconButton>
+              {isAdmin && (
+                <IconButton
+                  size="small"
+                  aria-label="Edit CRE / SRE team"
+                  className="csm-print-hide"
+                  onClick={() => setEditTeamsOpen(true)}
+                >
+                  <Pencil size={14} />
+                </IconButton>
+              )}
             </Box>
           </MetaCell>
           <MetaCell label="Activated on">

@@ -19,9 +19,11 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 )
@@ -32,6 +34,9 @@ type entityAccountClient interface {
 	SearchAccounts(ctx context.Context, body []byte) ([]byte, error)
 	SearchAccountContacts(ctx context.Context, accountID string, body []byte) ([]byte, error)
 	UpdateAccountTeams(ctx context.Context, id string, body []byte) ([]byte, error)
+	// GetUserMe resolves the caller's own roles for the admin gate below. Reused
+	// from the same entity client UsersHandler already calls for GET /users/me.
+	GetUserMe(ctx context.Context) ([]byte, error)
 }
 
 // AccountHandler handles HTTP requests for account operations, delegating to the
@@ -148,15 +153,25 @@ func (h *AccountHandler) SearchAccountContacts(w http.ResponseWriter, r *http.Re
 // UpdateAccountTeams handles PATCH /accounts/{id}: updates an account's CRE
 // team and/or SRE team assignment. The endpoint is path-scoped, so the
 // request body is capped and forwarded to the entity service as-is (no
-// fields are injected) and the response is returned verbatim. The entity
-// service is the source of truth for field-level validation; the backend has
-// no role-based access control layer yet, so any authenticated user may
-// invoke this today, matching the existing convention on other PATCH
-// endpoints in this codebase.
+// fields are injected) and the response is returned verbatim. Restricted to
+// callers holding the "admin" role (see isAdmin below) — the platform's
+// authorization data, not a token claim, per this codebase's rule that
+// authorization is resolved from platform data, never trusted from the JWT.
 func (h *AccountHandler) UpdateAccountTeams(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	admin, err := h.isAdmin(r.Context())
+	if err != nil {
+		slog.ErrorContext(r.Context(), "resolve caller roles failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to resolve caller permissions.")
+		return
+	}
+	if !admin {
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
 		return
 	}
 
@@ -190,4 +205,28 @@ func (h *AccountHandler) UpdateAccountTeams(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// isAdmin reports whether the caller (resolved from the auth context, not a
+// path/body value) holds the "admin" role, per the entity service's GET
+// /users/me — the same source UsersHandler.GetMe already trusts for roles.
+// Reused rather than duplicated so there is exactly one place that decides
+// what "admin" means for this backend.
+func (h *AccountHandler) isAdmin(ctx context.Context) (bool, error) {
+	raw, err := h.entity.GetUserMe(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	var resp entityUserMeResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false, fmt.Errorf("parse entity GetUserMe response: %w", err)
+	}
+
+	for _, role := range resp.Roles {
+		if strings.EqualFold(role, "admin") {
+			return true, nil
+		}
+	}
+	return false, nil
 }

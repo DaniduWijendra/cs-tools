@@ -26,6 +26,7 @@ const useGetAccountMock = vi.fn();
 const patchMutateMock = vi.fn();
 const showErrorMock = vi.fn();
 const editAccountTeamsDialogMock = vi.fn();
+const useGetUsersMeMock = vi.fn(() => ({ data: { roles: ["admin"] } }));
 let patchIsPending = false;
 let patchIsError = false;
 let patchError: Error | null = null;
@@ -82,6 +83,12 @@ vi.mock("@features/csm-accounts/components/EditAccountTeamsDialog", () => ({
     return null;
   },
 }));
+// Defaults to an admin caller so existing tests (written before the admin
+// gate) keep exercising the edit affordance without every one needing to
+// stub this out explicitly.
+vi.mock("@features/settings/api/useGetUsersMe", () => ({
+  useGetUsersMe: () => useGetUsersMeMock(),
+}));
 
 // Imported after the mocks above so the module picks them up.
 import CsmAccountDetailPage from "@features/csm-accounts/pages/CsmAccountDetailPage";
@@ -137,6 +144,8 @@ describe("CsmAccountDetailPage", () => {
     patchMutateMock.mockReset();
     showErrorMock.mockReset();
     editAccountTeamsDialogMock.mockReset();
+    useGetUsersMeMock.mockReset();
+    useGetUsersMeMock.mockReturnValue({ data: { roles: ["admin"] } });
     patchIsPending = false;
     patchIsError = false;
     patchError = null;
@@ -147,6 +156,15 @@ describe("CsmAccountDetailPage", () => {
     renderPage(<CsmAccountDetailPage />);
     expect(screen.getByText("CRE / SRE team")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit CRE / SRE team" })).toBeInTheDocument();
+  });
+
+  it("hides the edit trigger for a non-admin caller", () => {
+    useGetUsersMeMock.mockReturnValue({ data: { roles: ["agent"] } });
+    mockAccount({ data: BASE_ACCOUNT });
+    renderPage(<CsmAccountDetailPage />);
+    expect(
+      screen.queryByRole("button", { name: "Edit CRE / SRE team" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders CRE and SRE team chips linking to the team directory page", () => {
