@@ -93,6 +93,11 @@ type AccountService interface {
 	// GetAccountByID returns the account with the given UUID. A ValidationError is
 	// returned for a malformed UUID; a NotFoundError if no account matches.
 	GetAccountByID(ctx context.Context, id string) (domain.AccountDetail, error)
+	// UpdateAccountTeams sets the account's CRE and/or SRE team (Postgres data
+	// source only). A ValidationError is returned for a malformed UUID, if
+	// neither field is provided, or if a provided team ID does not reference
+	// an existing team; a NotFoundError if no account matches.
+	UpdateAccountTeams(ctx context.Context, req domain.UpdateAccountTeamsRequest) (domain.AccountDetail, error)
 }
 
 // SalesforceEventService handles POST /salesforce/events. Account fetch goes

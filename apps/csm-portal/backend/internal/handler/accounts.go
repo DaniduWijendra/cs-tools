@@ -31,6 +31,7 @@ type entityAccountClient interface {
 	GetAccount(ctx context.Context, id string) ([]byte, error)
 	SearchAccounts(ctx context.Context, body []byte) ([]byte, error)
 	SearchAccountContacts(ctx context.Context, accountID string, body []byte) ([]byte, error)
+	UpdateAccountTeams(ctx context.Context, id string, body []byte) ([]byte, error)
 }
 
 // AccountHandler handles HTTP requests for account operations, delegating to the
@@ -138,6 +139,53 @@ func (h *AccountHandler) SearchAccountContacts(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchAccountContacts failed", "userID", user.UserID, "accountID", id, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search account contacts.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// UpdateAccountTeams handles PATCH /accounts/{id}: updates an account's CRE
+// team and/or SRE team assignment. The endpoint is path-scoped, so the
+// request body is capped and forwarded to the entity service as-is (no
+// fields are injected) and the response is returned verbatim. The entity
+// service is the source of truth for field-level validation; the backend has
+// no role-based access control layer yet, so any authenticated user may
+// invoke this today, matching the existing convention on other PATCH
+// endpoints in this codebase.
+func (h *AccountHandler) UpdateAccountTeams(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if _, ok := err.(*http.MaxBytesError); ok {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
+			return
+		}
+		writeError(w, http.StatusBadRequest, errMsgReadBody)
+		return
+	}
+
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.entity.UpdateAccountTeams(r.Context(), id, body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity UpdateAccountTeams failed", "userID", user.UserID, "accountID", id, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to update account teams.")
 		return
 	}
 

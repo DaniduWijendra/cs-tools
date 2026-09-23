@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -31,8 +32,9 @@ import (
 )
 
 // AccountRow is the raw shape of one row read from the account table, together
-// with the joined technical-owner/account-manager person refs. It is mapped to
-// domain.AccountView / domain.AccountDetail by the service layer.
+// with the joined technical-owner/account-manager person refs and the joined
+// CRE/SRE team refs. It is mapped to domain.AccountView / domain.AccountDetail
+// by the service layer.
 type AccountRow struct {
 	ID                         string
 	Name                       string
@@ -71,6 +73,13 @@ type AccountRepository interface {
 	// GetAccountByID returns the account with the given UUID, or a NotFoundError
 	// if no such account exists.
 	GetAccountByID(ctx context.Context, id string) (AccountRow, error)
+	// UpdateAccountTeams sets the account's CRE and/or SRE team. A nil
+	// creTeamID/sreTeamID leaves that assignment unchanged; there is no way
+	// to explicitly clear an assignment to "no team" via this method (see
+	// its caller, AccountService.UpdateAccountTeams, for why). Returns a
+	// ValidationError if either non-nil id does not reference an existing
+	// team row, or a NotFoundError if the account does not exist.
+	UpdateAccountTeams(ctx context.Context, accountID string, creTeamID, sreTeamID *string) (AccountRow, error)
 	UpsertFromSalesforce(ctx context.Context, row domain.SalesforceAccountUpsert) error
 	SoftDeleteBySfID(ctx context.Context, sfID string) error
 	LookupUserIDByEmail(ctx context.Context, email string) (*string, error)
@@ -218,6 +227,35 @@ func (r *accountRepo) GetAccountByID(ctx context.Context, id string) (AccountRow
 		return AccountRow{}, fmt.Errorf("get account by id: %w", err)
 	}
 	return a, nil
+}
+
+// updateAccountTeamsQuery leaves cre_team_id/sre_team_id unchanged when the
+// corresponding parameter is NULL (a nil Go pointer) -- the same "nil means
+// don't touch this field" convention UpdateCase uses, here expressed with
+// COALESCE rather than a CASE/empty-string guard since UUID has no such
+// sentinel value. There is no parameter combination that clears a team
+// assignment to "no team" once set; see UpdateAccountTeams's doc comment.
+const updateAccountTeamsQuery = `
+	UPDATE account
+	SET cre_team_id = COALESCE($2::uuid, cre_team_id),
+	    sre_team_id = COALESCE($3::uuid, sre_team_id),
+	    updated_on = now()
+	WHERE id = $1`
+
+// UpdateAccountTeams implements AccountRepository.
+func (r *accountRepo) UpdateAccountTeams(ctx context.Context, accountID string, creTeamID, sreTeamID *string) (AccountRow, error) {
+	tag, err := r.db.Exec(ctx, updateAccountTeamsQuery, accountID, creTeamID, sreTeamID)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			// foreign_key_violation — creTeamID or sreTeamID does not reference an existing team.
+			return AccountRow{}, &apierror.ValidationError{Msg: "one or more referenced team IDs do not exist: " + pgErr.Detail}
+		}
+		return AccountRow{}, fmt.Errorf("update account teams: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return AccountRow{}, &apierror.NotFoundError{Msg: "account not found"}
+	}
+	return r.GetAccountByID(ctx, accountID)
 }
 
 const salesforceSyncActor = domain.SalesforceSyncActor

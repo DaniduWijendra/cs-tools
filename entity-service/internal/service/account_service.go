@@ -21,6 +21,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -67,6 +68,32 @@ func (s *accountService) GetAccountByID(ctx context.Context, id string) (domain.
 		return domain.AccountDetail{}, err
 	}
 	row, err := s.repo.GetAccountByID(ctx, id)
+	if err != nil {
+		return domain.AccountDetail{}, err
+	}
+	return accountRowToDetail(row), nil
+}
+
+// UpdateAccountTeams implements AccountService.
+func (s *accountService) UpdateAccountTeams(ctx context.Context, req domain.UpdateAccountTeamsRequest) (domain.AccountDetail, error) {
+	if err := validateUUIDs("id", []string{req.ID}); err != nil {
+		return domain.AccountDetail{}, err
+	}
+	if req.CreTeamID == nil && req.SreTeamID == nil {
+		return domain.AccountDetail{}, &apierror.ValidationError{Msg: "at least one of creTeamId or sreTeamId must be provided"}
+	}
+	ids := []string{}
+	if req.CreTeamID != nil {
+		ids = append(ids, *req.CreTeamID)
+	}
+	if req.SreTeamID != nil {
+		ids = append(ids, *req.SreTeamID)
+	}
+	if err := validateUUIDs("creTeamId/sreTeamId", ids); err != nil {
+		return domain.AccountDetail{}, err
+	}
+
+	row, err := s.repo.UpdateAccountTeams(ctx, req.ID, req.CreTeamID, req.SreTeamID)
 	if err != nil {
 		return domain.AccountDetail{}, err
 	}

@@ -192,6 +192,13 @@ func (c *CustomerEntityClient) SearchAccountContacts(ctx context.Context, accoun
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/accounts/%s/contacts/search", url.PathEscape(accountID)), body)
 }
 
+// UpdateAccountTeams calls PATCH /accounts/{id} on the entity service to update an
+// account's CRE team and/or SRE team assignment.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *CustomerEntityClient) UpdateAccountTeams(ctx context.Context, id string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/accounts/%s", url.PathEscape(id)), body)
+}
+
 // GetProject calls GET /projects/{id} on the entity service.
 // Response is returned as raw JSON; typed response structs are deferred.
 func (c *CustomerEntityClient) GetProject(ctx context.Context, id string) ([]byte, error) {

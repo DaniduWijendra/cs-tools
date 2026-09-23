@@ -14,8 +14,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { JSX, ReactElement } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import "@testing-library/jest-dom/vitest";
@@ -23,6 +23,12 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import type { Account } from "@features/csm-accounts/types/csmAccounts";
 
 const useGetAccountMock = vi.fn();
+const patchMutateMock = vi.fn();
+const showErrorMock = vi.fn();
+const editAccountTeamsDialogMock = vi.fn();
+let patchIsPending = false;
+let patchIsError = false;
+let patchError: Error | null = null;
 
 // `QueryErrorState` (imported by the page for its error state) pulls in
 // `@api/backend/client` -> `useAuthApiClient` -> `@config/apiConfig`, which
@@ -30,6 +36,23 @@ const useGetAccountMock = vi.fn();
 // vitest. Same stub other page tests use (e.g. `useAccountProjects.test.tsx`).
 vi.mock("@config/apiConfig", () => ({
   apiConfig: { backendUrl: "https://example.test" },
+}));
+
+// The page imports `BackendApiError` directly to classify a failed save —
+// stub it with a real class (so `instanceof` still works), same approach as
+// `ProblemDetailPage.test.tsx`.
+vi.mock("@api/backend/client", () => ({
+  BackendApiError: class BackendApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  },
+}));
+
+vi.mock("@context/error-banner/ErrorBannerContext", () => ({
+  useErrorBanner: () => ({ showError: showErrorMock }),
 }));
 
 vi.mock("@features/csm-accounts/api/useGetAccount", () => ({
@@ -42,6 +65,22 @@ vi.mock("@features/csm-accounts/api/useAccountProjects", () => ({
     isError: false,
     error: null,
   }),
+}));
+vi.mock("@features/csm-accounts/api/usePatchAccountTeams", () => ({
+  usePatchAccountTeams: () => ({
+    mutate: patchMutateMock,
+    isPending: patchIsPending,
+    isError: patchIsError,
+    error: patchError,
+  }),
+}));
+// Exercised in isolation by its own test file; here we only assert this page
+// opens it and wires the expected props/callbacks.
+vi.mock("@features/csm-accounts/components/EditAccountTeamsDialog", () => ({
+  default: (props: unknown) => {
+    editAccountTeamsDialogMock(props);
+    return null;
+  },
 }));
 
 // Imported after the mocks above so the module picks them up.
@@ -94,10 +133,20 @@ function renderPage(ui: ReactElement, extraRoutes: string[] = []): ReturnType<ty
 }
 
 describe("CsmAccountDetailPage", () => {
-  it("renders no CRE/SRE team cell when neither is set", () => {
+  beforeEach(() => {
+    patchMutateMock.mockReset();
+    showErrorMock.mockReset();
+    editAccountTeamsDialogMock.mockReset();
+    patchIsPending = false;
+    patchIsError = false;
+    patchError = null;
+  });
+
+  it("shows a placeholder and an edit trigger when neither CRE nor SRE team is set", () => {
     mockAccount({ data: BASE_ACCOUNT });
     renderPage(<CsmAccountDetailPage />);
-    expect(screen.queryByText("CRE / SRE team")).not.toBeInTheDocument();
+    expect(screen.getByText("CRE / SRE team")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit CRE / SRE team" })).toBeInTheDocument();
   });
 
   it("renders CRE and SRE team chips linking to the team directory page", () => {
@@ -129,5 +178,62 @@ describe("CsmAccountDetailPage", () => {
     expect(screen.getByText("CRE / SRE team")).toBeInTheDocument();
     expect(screen.getByText("SRE Beta")).toBeInTheDocument();
     expect(screen.queryByText("CRE Alpha")).not.toBeInTheDocument();
+  });
+
+  it("opens EditAccountTeamsDialog with the account's current teams when the edit trigger is clicked", () => {
+    mockAccount({
+      data: {
+        ...BASE_ACCOUNT,
+        creTeam: { id: "team-cre-1", name: "CRE Alpha" },
+        sreTeam: null,
+      },
+    });
+    renderPage(<CsmAccountDetailPage />);
+
+    expect(editAccountTeamsDialogMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
+    expect(editAccountTeamsDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentCreTeam: { id: "team-cre-1", name: "CRE Alpha" },
+        currentSreTeam: null,
+        isSaving: false,
+        saveError: null,
+      }),
+    );
+  });
+
+  it("submits the dialog's patch via the mutation and closes the dialog on success", () => {
+    mockAccount({ data: BASE_ACCOUNT });
+    patchMutateMock.mockImplementation((_patch, opts) => {
+      opts?.onSuccess?.();
+    });
+    renderPage(<CsmAccountDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
+    const { onSave } = editAccountTeamsDialogMock.mock.calls[0][0];
+    act(() => onSave({ creTeamId: "team-cre-2" }));
+
+    expect(patchMutateMock).toHaveBeenCalledWith(
+      { creTeamId: "team-cre-2" },
+      expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
+    );
+    // The dialog's onSuccess callback set `editTeamsOpen` back to false, so it
+    // is no longer mounted — the mock component doesn't receive another call.
+    editAccountTeamsDialogMock.mockClear();
+    expect(editAccountTeamsDialogMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an error banner message when the save fails", () => {
+    mockAccount({ data: BASE_ACCOUNT });
+    patchMutateMock.mockImplementation((_patch, opts) => {
+      opts?.onError?.(new Error("Team not found"));
+    });
+    renderPage(<CsmAccountDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
+    const { onSave } = editAccountTeamsDialogMock.mock.calls[0][0];
+    onSave({ creTeamId: "team-cre-2" });
+
+    expect(showErrorMock).toHaveBeenCalled();
   });
 });

@@ -256,6 +256,10 @@ func main() {
 	route("POST /roles/search", handler.PermView, referenceHandler.SearchRoles)
 	route("POST /teams/search", handler.PermView, referenceHandler.SearchTeams)
 	route("GET /accounts/{id}", handler.PermView, accountHandler.GetAccount)
+	// Admin-only: CRE/SRE team is a temporary override of ServiceNow's own
+	// value (see AccountService.UpdateAccountTeams's doc comment) — no other
+	// staff role should be able to set it.
+	route("PATCH /accounts/{id}", handler.PermAdmin, accountHandler.UpdateAccountTeams)
 	route("POST /accounts/search", handler.PermView, accountHandler.SearchAccounts)
 	route("POST /accounts/{id}/contacts/search", handler.PermView, accountHandler.SearchAccountContacts)
 	route("GET /projects/{id}", handler.PermView, projectHandler.GetProject)

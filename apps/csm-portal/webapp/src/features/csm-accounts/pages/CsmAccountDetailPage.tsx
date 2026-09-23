@@ -19,6 +19,7 @@ import {
   Button,
   Card,
   Chip,
+  IconButton,
   Skeleton,
   Table,
   TableBody,
@@ -28,11 +29,15 @@ import {
   TableRow,
   Typography,
 } from "@wso2/oxygen-ui";
-import { ArrowLeft } from "@wso2/oxygen-ui-icons-react";
-import { type JSX, type ReactNode } from "react";
+import { ArrowLeft, Pencil } from "@wso2/oxygen-ui-icons-react";
+import { type JSX, type ReactNode, useState } from "react";
 import { Link as RouterLink, useLocation, useParams } from "react-router";
+import { BackendApiError } from "@api/backend/client";
+import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAccountProjects } from "@features/csm-accounts/api/useAccountProjects";
 import { useGetAccount } from "@features/csm-accounts/api/useGetAccount";
+import { usePatchAccountTeams } from "@features/csm-accounts/api/usePatchAccountTeams";
+import EditAccountTeamsDialog from "@features/csm-accounts/components/EditAccountTeamsDialog";
 import {
   getDeactivationState,
   resolveAccountTier,
@@ -199,6 +204,9 @@ export default function CsmAccountDetailPage(): JSX.Element {
   const fromListState = location.state as { from?: string } | undefined;
   const resolvedBackPath = fromListState?.from ?? "/customers/accounts";
   const { data, isLoading, isError } = useGetAccount(id);
+  const patchAccountTeams = usePatchAccountTeams(id);
+  const [editTeamsOpen, setEditTeamsOpen] = useState(false);
+  const { showError } = useErrorBanner();
 
   if (isLoading) {
     return (
@@ -288,26 +296,37 @@ export default function CsmAccountDetailPage(): JSX.Element {
           <MetaCell label="Technical Owner">
             <Typography variant="body2">{a.technicalOwner?.name ?? "—"}</Typography>
           </MetaCell>
-          {(a.creTeam || a.sreTeam) && (
-            <MetaCell label="CRE / SRE team">
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                {a.creTeam && (
-                  <DirectoryEntityChip
-                    id={a.creTeam.id}
-                    name={a.creTeam.name}
-                    routeBase="/admin/teams"
-                  />
-                )}
-                {a.sreTeam && (
-                  <DirectoryEntityChip
-                    id={a.sreTeam.id}
-                    name={a.sreTeam.name}
-                    routeBase="/admin/teams"
-                  />
-                )}
-              </Box>
-            </MetaCell>
-          )}
+          <MetaCell label="CRE / SRE team">
+            <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0.5 }}>
+              {a.creTeam && (
+                <DirectoryEntityChip
+                  id={a.creTeam.id}
+                  name={a.creTeam.name}
+                  routeBase="/admin/teams"
+                />
+              )}
+              {a.sreTeam && (
+                <DirectoryEntityChip
+                  id={a.sreTeam.id}
+                  name={a.sreTeam.name}
+                  routeBase="/admin/teams"
+                />
+              )}
+              {!a.creTeam && !a.sreTeam && (
+                <Typography variant="body2" color="text.secondary">
+                  —
+                </Typography>
+              )}
+              <IconButton
+                size="small"
+                aria-label="Edit CRE / SRE team"
+                className="csm-print-hide"
+                onClick={() => setEditTeamsOpen(true)}
+              >
+                <Pencil size={14} />
+              </IconButton>
+            </Box>
+          </MetaCell>
           <MetaCell label="Activated on">
             <Typography variant="body2">{formatDate(a.activationDate)}</Typography>
           </MetaCell>
@@ -342,6 +361,37 @@ export default function CsmAccountDetailPage(): JSX.Element {
       </Card>
 
       <ProjectsSection accountId={a.id} />
+
+      {editTeamsOpen && (
+        <EditAccountTeamsDialog
+          currentCreTeam={a.creTeam}
+          currentSreTeam={a.sreTeam}
+          isSaving={patchAccountTeams.isPending}
+          saveError={
+            patchAccountTeams.isError
+              ? patchAccountTeams.error instanceof BackendApiError &&
+                patchAccountTeams.error.message
+                ? patchAccountTeams.error.message
+                : "Could not update the account's teams. Please try again."
+              : null
+          }
+          onClose={() => {
+            if (!patchAccountTeams.isPending) setEditTeamsOpen(false);
+          }}
+          onSave={(patch) =>
+            patchAccountTeams.mutate(patch, {
+              onSuccess: () => setEditTeamsOpen(false),
+              onError: (err) => {
+                const msg =
+                  err instanceof BackendApiError && err.status < 500 && err.message
+                    ? err.message
+                    : "Could not update the account's teams. Please try again.";
+                showError(msg, err);
+              },
+            })
+          }
+        />
+      )}
     </Box>
   );
 }

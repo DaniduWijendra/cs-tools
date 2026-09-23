@@ -1886,6 +1886,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      summary: Set an account's CRE and/or SRE team.
+      description: |
+        Postgres data source only; there is no ServiceNow equivalent. Provide `creTeamId`,
+        `sreTeamId`, or both. A field left out of the request body leaves that team assignment
+        unchanged; there is currently no way to clear an assignment back to no team once set.
+      operationId: patchAccountTeams
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAccountTeamsRequest'
+      responses:
+        "200":
+          description: Account updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetail'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Account not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /accounts/search:
     post:
@@ -10081,6 +10126,22 @@ components:
           items:
             $ref: '#/components/schemas/ProductUpdateEntry'
           description: The deployed product's update-history array as it stands after the write.
+
+    UpdateAccountTeamsRequest:
+      type: object
+      description: |
+        At least one of `creTeamId`/`sreTeamId` must be provided. A field left out of the
+        request body leaves that team assignment unchanged; there is currently no way to
+        clear an assignment back to no team once set.
+      properties:
+        creTeamId:
+          type: string
+          format: uuid
+          description: References an existing team. Omit to leave the account's CRE team unchanged.
+        sreTeamId:
+          type: string
+          format: uuid
+          description: References an existing team. Omit to leave the account's SRE team unchanged.
 
     UpdateCaseRequest:
       type: object
