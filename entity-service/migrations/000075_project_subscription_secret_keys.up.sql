@@ -21,14 +21,23 @@
 -- the dual-write silently discarded step 5's artefacts and every read
 -- reported the project as having no secret keys.
 --
--- TEXT rather than VARCHAR(255) like client_secret: these hold base64-encoded
--- AES-256-GCM ciphertext, whose length follows the plaintext, and a secret
--- long enough to overflow the column should not fail the write.
+-- These columns already exist on the sync-built databases, as VARCHAR(128),
+-- so IF NOT EXISTS makes this a no-op there and the definition below only
+-- takes effect on a database built from migrations/. TEXT rather than a
+-- length-capped VARCHAR because nothing here depends on the width and a key
+-- longer than expected should not fail the write.
+--
+-- Stored as supplied, matching the sync, which writes them in the clear --
+-- the observed values are 64-character keys, not ciphertext. This service
+-- deliberately does not encrypt its own writes: doing so alone would put two
+-- indistinguishable formats in one column and make a row it writes stop
+-- matching the ServiceNow record the project row mirrors. Encrypting these at
+-- rest is worth doing across every writer, which is a platform change.
 ALTER TABLE project
     ADD COLUMN IF NOT EXISTS primary_secret_key TEXT,
     ADD COLUMN IF NOT EXISTS secondary_secret_key TEXT;
 
 COMMENT ON COLUMN project.primary_secret_key IS
-    'Base64-encoded AES-256-GCM ciphertext of the primary subscription secret key. Never stored or returned in the clear.';
+    'Primary subscription secret key, mirrored from the ServiceNow record. Stored as supplied; never returned to a caller -- the read response reports only whether it is present.';
 COMMENT ON COLUMN project.secondary_secret_key IS
-    'Base64-encoded AES-256-GCM ciphertext of the secondary subscription secret key. Never stored or returned in the clear.';
+    'Secondary subscription secret key, mirrored from the ServiceNow record. Stored as supplied; never returned to a caller -- the read response reports only whether it is present.';

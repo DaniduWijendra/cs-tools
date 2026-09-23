@@ -272,9 +272,8 @@ type ProjectStatsService interface {
 // staging and production both run DATA_SOURCE=servicenow and need both.
 //
 //   - GetProjectConsumption and UpdateProjectConsumption read and write the
-//     Postgres mirror, so they need a pool and CONSUMPTION_SECRET_KEY (the
-//     stored OAuth2 credentials and secret keys are never held in the clear).
-//     A pool enables them on either data source.
+//     Postgres mirror, so they need a pool. A pool enables them on either
+//     data source.
 //   - ProcessLicenseDownload needs neither. It reads status from ServiceNow
 //     through the configured Choreo subscription operation and touches
 //     Postgres only to mirror what it did, which is best-effort and skipped

@@ -67,11 +67,6 @@ type Config struct {
 	ServiceNowIntegrationServiceClientID     string
 	ServiceNowIntegrationServiceClientSecret string
 	ServiceNowIntegrationServiceScopes       string
-	// ConsumptionSecretKey is the base64-encoded 32-byte AES key used to
-	// encrypt the product-consumption credentials at rest (see
-	// internal/crypto). Optional: when empty the project-consumption
-	// routes are not registered.
-	ConsumptionSecretKey string
 	// ConsumptionOperationBaseURL is the base URL of the Choreo subscription
 	// operation (operations/choreo-subscription-on-project-create), with the
 	// client credentials it is reached with.
@@ -217,7 +212,6 @@ func Load() *Config {
 		ServiceNowIntegrationServiceClientID:     os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_ID"),
 		ServiceNowIntegrationServiceClientSecret: os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_SECRET"),
 		ServiceNowIntegrationServiceScopes:       os.Getenv("SERVICENOW_INTEGRATION_SERVICE_SCOPES"),
-		ConsumptionSecretKey:                     os.Getenv("CONSUMPTION_SECRET_KEY"),
 		ConsumptionOperationBaseURL:              os.Getenv("PRODUCT_CONSUMPTION_OPERATION_URL"),
 		ConsumptionOperationTokenURL:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_TOKEN_URL"),
 		ConsumptionOperationClientID:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_ID"),

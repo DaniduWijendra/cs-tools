@@ -37,14 +37,12 @@ package repository
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
-	"github.com/wso2-open-operations/cs-tools/entity-service/internal/crypto"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 )
 
@@ -99,11 +97,7 @@ func newIntegrationRepo(t *testing.T) (ProjectConsumptionRepository, *pgxpool.Po
 		        NOW() - INTERVAL '1 day', NOW() + INTERVAL '365 days')
 		ON CONFLICT (id) DO NOTHING`, testIntegrationProjectID, testIntegrationAccountID)
 
-	codec, err := crypto.NewAESGCMCodec(make([]byte, 32))
-	if err != nil {
-		t.Fatalf("codec: %v", err)
-	}
-	return NewProjectConsumptionRepository(pool, codec), pool
+	return NewProjectConsumptionRepository(pool), pool
 }
 
 func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
@@ -142,9 +136,12 @@ func TestIntegration_GetUnknownProjectIsNotFound(t *testing.T) {
 	}
 }
 
-// TestIntegration_SecretsAreCiphertextInTheColumn is the claim the PR makes
-// about data at rest, checked against the column itself rather than the Go API.
-func TestIntegration_SecretsAreCiphertextInTheColumn(t *testing.T) {
+// TestIntegration_SecretsAreStoredAsSupplied pins the format of the three
+// secret-bearing columns, checked against the columns themselves rather than
+// the Go API. They are shared with the ServiceNow sync, which writes them in
+// the clear, so this service writes them the same way -- a second format in
+// the same column could not be told apart from the sync's on read.
+func TestIntegration_SecretsAreStoredAsSupplied(t *testing.T) {
 	repo, pool := newIntegrationRepo(t)
 	ctx := context.Background()
 	const (
@@ -164,24 +161,19 @@ func TestIntegration_SecretsAreCiphertextInTheColumn(t *testing.T) {
 		SecondarySecretKey: ptr(secondaryKey),
 	})
 
-	// Each of the three secret-bearing columns, read as the database holds it.
 	var storedSecret, storedPrimary, storedSecondary string
 	if err := pool.QueryRow(ctx,
 		`SELECT client_secret, primary_secret_key, secondary_secret_key FROM project WHERE id = $1`,
 		testIntegrationProjectID).Scan(&storedSecret, &storedPrimary, &storedSecondary); err != nil {
 		t.Fatalf("read column: %v", err)
 	}
-	for _, f := range []struct{ column, stored, plaintext string }{
+	for _, f := range []struct{ column, stored, supplied string }{
 		{"client_secret", storedSecret, secret},
 		{"primary_secret_key", storedPrimary, primaryKey},
 		{"secondary_secret_key", storedSecondary, secondaryKey},
 	} {
-		raw, err := base64.StdEncoding.DecodeString(f.stored)
-		if err != nil || len(raw) == 0 {
-			t.Fatalf("%s was not written as base64 ciphertext: %v", f.column, err)
-		}
-		if string(raw) == f.plaintext {
-			t.Fatalf("%s is stored in the clear", f.column)
+		if f.stored != f.supplied {
+			t.Fatalf("%s was not stored as supplied: got %q, want %q", f.column, f.stored, f.supplied)
 		}
 	}
 
@@ -201,23 +193,60 @@ func TestIntegration_SecretsAreCiphertextInTheColumn(t *testing.T) {
 	}
 }
 
-// A secret column that is present but not decodable must surface, not silently
-// read back as "this project has no secret" — these columns are also written by
-// the ServiceNow sync, so an unexpected format is exactly the drift worth
-// knowing about.
-func TestIntegration_UndecodableSecretIsAnError(t *testing.T) {
+// A row written by the ServiceNow sync must read back without error. The
+// values the sync writes are 64-character keys and short client secrets, some
+// of which contain characters outside the base64 alphabet -- an earlier
+// revision of this repository decoded and decrypted these columns on read, so
+// every already-provisioned project failed its read with either a decode or an
+// authentication error.
+func TestIntegration_SyncWrittenSecretsReadBack(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+	ctx := context.Background()
+
+	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
+
+	// Shaped like the real synced values: a 64-character hex key, and a client
+	// secret carrying a character base64 has no meaning for.
+	const (
+		syncedKey    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		syncedSecret = "abc-DEF_ghi.jkl~mno"
+	)
+	if _, err := pool.Exec(ctx,
+		`UPDATE project SET client_secret = $2, primary_secret_key = $3, secondary_secret_key = $3 WHERE id = $1`,
+		testIntegrationProjectID, syncedSecret, syncedKey); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	state, _, _, err := repo.Get(ctx, testIntegrationProjectID)
+	if err != nil {
+		t.Fatalf("Get on sync-written secrets: %v", err)
+	}
+	if state.ConsumerSecret == nil || *state.ConsumerSecret != syncedSecret {
+		t.Fatalf("consumerSecret: %+v", state.ConsumerSecret)
+	}
+	if state.PrimarySecretKey == nil || *state.PrimarySecretKey != syncedKey {
+		t.Fatalf("primarySecretKey: %+v", state.PrimarySecretKey)
+	}
+}
+
+// An empty column is "not set", not a present-but-blank secret -- otherwise
+// the read response would report the project as having a secret it does not.
+func TestIntegration_EmptySecretColumnReadsAsAbsent(t *testing.T) {
 	repo, pool := newIntegrationRepo(t)
 	ctx := context.Background()
 
 	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
 	if _, err := pool.Exec(ctx,
-		`UPDATE project SET client_secret = $2 WHERE id = $1`,
-		testIntegrationProjectID, "not base64 at all!!"); err != nil {
+		`UPDATE project SET client_secret = '' WHERE id = $1`, testIntegrationProjectID); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, _, _, err := repo.Get(ctx, testIntegrationProjectID); err == nil {
-		t.Fatal("expected an error for an undecodable stored secret, got none")
+	state, _, _, err := repo.Get(ctx, testIntegrationProjectID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if state.ConsumerSecret != nil {
+		t.Fatalf("an empty column must read as absent, got %q", *state.ConsumerSecret)
 	}
 }
 

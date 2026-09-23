@@ -26,7 +26,6 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
-	"github.com/wso2-open-operations/cs-tools/entity-service/internal/crypto"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
@@ -83,10 +82,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// The two halves are configured independently, because they need different
 	// things and failing one must not take out the other.
 	//
-	// Reading and writing the stored state needs a pool and an encryption key,
-	// since it holds OAuth2 credentials and subscription secret keys; a missing
-	// or malformed key leaves those routes unregistered rather than falling
-	// back to storing the values in the clear. Issuing a licence needs neither:
+	// Reading and writing the stored state needs a pool. Issuing a licence does
+	// not:
 	// the sequence reads status from ServiceNow and runs through the Choreo
 	// operation, touching Postgres only to mirror state, which is best-effort
 	// and skipped entirely when there is no repository. Gating the licence
@@ -99,31 +96,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// both are a bare 404 — and the one thing a person debugging that 404
 	// cannot discover from the outside is that the service deliberately chose
 	// not to register it.
+	// Not logged when db is nil: with no database pool configured, stored state
+	// cannot be registered. The licence route below does not depend on it.
 	var consumptionRepo repository.ProjectConsumptionRepository
-	switch {
-	case db == nil:
-		// Not logged: with no database pool configured, stored state cannot be
-		// registered. The licence route below does not depend on it.
-	case cfg.ConsumptionSecretKey == "":
-		slog.Info("project consumption state routes not registered: CONSUMPTION_SECRET_KEY is unset",
-			"routes", "GET,PATCH /projects/{id}/consumption",
-			"reason", "these routes store OAuth2 credentials and subscription secret keys, which are never stored unencrypted")
-	default:
-		key, err := crypto.KeyFromBase64(cfg.ConsumptionSecretKey)
-		if err != nil {
-			// The error text never contains the key itself — see
-			// crypto.KeyFromBase64.
-			slog.Error("project consumption state routes not registered: invalid CONSUMPTION_SECRET_KEY",
-				"routes", "GET,PATCH /projects/{id}/consumption", "error", err)
-			break
-		}
-		codec, err := crypto.NewAESGCMCodec(key)
-		if err != nil {
-			slog.Error("project consumption state routes not registered: could not construct the codec",
-				"routes", "GET,PATCH /projects/{id}/consumption", "error", err)
-			break
-		}
-		consumptionRepo = repository.NewProjectConsumptionRepository(db, codec)
+	if db != nil {
+		consumptionRepo = repository.NewProjectConsumptionRepository(db)
 	}
 
 	// Provisioning reaches an upstream that mints Choreo applications for real

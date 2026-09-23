@@ -229,14 +229,17 @@ All three routes are scoped to the caller. The project id comes from the request
 who cannot see a project can neither read its provisioning state nor drive provisioning for it; the
 refusal is a 404, never a 403, so a project's existence is not revealed either.
 
-Credentials are encrypted at rest (`internal/crypto`, AES-256-GCM) and never returned by either
-endpoint — the read reports only `hasConsumerSecret`/`hasSecretKeys`. Both routes need a key and are
-not registered without one, so a deployment missing `CONSUMPTION_SECRET_KEY` loses the feature
-rather than storing these values in the clear.
+Credentials are never returned by either endpoint — the read reports only
+`hasConsumerSecret`/`hasSecretKeys`. They are stored as supplied, which is how the ServiceNow sync
+already writes these same columns; the observed values there are plain 64-character keys and short
+client secrets, not ciphertext.
 
-| Variable | Description |
-|---|---|
-| `CONSUMPTION_SECRET_KEY` | Base64-encoded 32-byte AES key (`openssl rand -base64 32`). Optional — absent disables the two routes. Rotating it makes already-stored credentials undecryptable |
+This service deliberately does not encrypt its own writes. Doing so alone would put two formats in
+one column that cannot be told apart on read — a hex key is also valid base64, so no heuristic
+recovers which writer produced a given value — and a row written here would stop matching the
+ServiceNow record the project row mirrors. Encrypting these at rest is worth doing, but it has to
+happen across every writer including the sync, which is a platform change rather than this
+service's to make. These routes need no configuration of their own beyond `DB_*`.
 
 **License issuance still runs in ServiceNow.** This service drives the five-step provisioning
 sequence through the Choreo subscription operation and returns the licence ServiceNow issues; the

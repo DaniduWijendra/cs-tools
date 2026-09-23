@@ -18,7 +18,6 @@ package repository
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -26,7 +25,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
-	"github.com/wso2-open-operations/cs-tools/entity-service/internal/crypto"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 )
 
@@ -54,14 +52,24 @@ type ProjectConsumptionRepository interface {
 // already at or beyond the status a caller tried to write.
 var ErrConsumptionStatusStale = errors.New("project consumption: stored status is not older than the requested status")
 
+// projectConsumptionRepo stores the provisioning artefacts as they are given.
+//
+// These columns are shared with the ServiceNow sync, which writes them in the
+// clear, and the project row is a mirror of the ServiceNow record. Encrypting
+// only this service's writes would put two indistinguishable formats in one
+// column -- a stored value cannot be classified after the fact, since a hex
+// key is also valid base64 -- and would make a row written here stop matching
+// the record it mirrors. Nothing reads these values back either: the read
+// response reports only whether each is present. So they are stored as
+// supplied, matching the sync. Encrypting them at rest is worth doing across
+// every writer, which is a platform change rather than this service's to make.
 type projectConsumptionRepo struct {
-	db    *pgxpool.Pool
-	codec crypto.SecretCodec
+	db *pgxpool.Pool
 }
 
 // NewProjectConsumptionRepository constructs a ProjectConsumptionRepository.
-func NewProjectConsumptionRepository(db *pgxpool.Pool, codec crypto.SecretCodec) ProjectConsumptionRepository {
-	return &projectConsumptionRepo{db: db, codec: codec}
+func NewProjectConsumptionRepository(db *pgxpool.Pool) ProjectConsumptionRepository {
+	return &projectConsumptionRepo{db: db}
 }
 
 func statusToEnum(status domain.ConsumptionStatus) string {
@@ -115,21 +123,21 @@ func (r *projectConsumptionRepo) Get(ctx context.Context, projectID string) (dom
 		WHERE p.id = $1`
 
 	var (
-		name, key       *string
-		id              string
-		appStatus       *string
-		appID           *string
-		clientID        *string
-		clientSecretEnc *string
-		primaryEnc      *string
-		secondaryEnc    *string
-		createdOn       time.Time
-		updatedOn       time.Time
+		name, key    *string
+		id           string
+		appStatus    *string
+		appID        *string
+		clientID     *string
+		clientSecret *string
+		primary      *string
+		secondary    *string
+		createdOn    time.Time
+		updatedOn    time.Time
 	)
 
 	err := r.db.QueryRow(ctx, query, projectID).Scan(
 		&name, &key, &id, &appStatus, &appID, &clientID,
-		&clientSecretEnc, &primaryEnc, &secondaryEnc, &createdOn, &updatedOn,
+		&clientSecret, &primary, &secondary, &createdOn, &updatedOn,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ProjectConsumption{}, "", "", &apierror.NotFoundError{Msg: "project not found"}
@@ -156,82 +164,27 @@ func (r *projectConsumptionRepo) Get(ctx context.Context, projectID string) (dom
 		UpdatedOn:           updatedOn,
 	}
 
-	for _, f := range []struct {
-		name   string
-		stored *string
-		dst    **string
-	}{
-		{"consumerSecret", clientSecretEnc, &state.ConsumerSecret},
-		{"primarySecretKey", primaryEnc, &state.PrimarySecretKey},
-		{"secondarySecretKey", secondaryEnc, &state.SecondarySecretKey},
-	} {
-		plain, err := r.decryptStored(f.stored)
-		if err != nil {
-			// The field name is safe to log; the value is not, and neither
-			// the decode nor the decrypt error includes it.
-			return domain.ProjectConsumption{}, "", "", fmt.Errorf("get project consumption: %s: %w", f.name, err)
-		}
-		*f.dst = plain
-	}
+	state.ConsumerSecret = presentOrNil(clientSecret)
+	state.PrimarySecretKey = presentOrNil(primary)
+	state.SecondarySecretKey = presentOrNil(secondary)
 
 	return state, projectName, projectKey, nil
 }
 
-// decryptStored unseals one base64-encoded ciphertext column, returning nil for
-// a column that is NULL or empty.
+// presentOrNil collapses a NULL or empty column to nil, so that the caller's
+// "is this artefact set" check cannot be satisfied by a blank string.
 //
-// A value that is present but undecodable is an error, not a nil: these columns
-// are also written by the ServiceNow sync, so silently reporting "no secret"
-// for a value in an unexpected format would hide exactly the drift worth
-// knowing about.
-func (r *projectConsumptionRepo) decryptStored(stored *string) (*string, error) {
+// The value itself is never returned to a client -- the read response carries
+// only whether each secret is present -- so it is passed through untouched.
+func presentOrNil(stored *string) *string {
 	if stored == nil || *stored == "" {
-		return nil, nil
+		return nil
 	}
-	cipher, err := base64.StdEncoding.DecodeString(*stored)
-	if err != nil {
-		return nil, fmt.Errorf("stored value is not base64: %w", err)
-	}
-	if len(cipher) == 0 {
-		return nil, nil
-	}
-	plain, err := r.codec.Decrypt(cipher)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt: %w", err)
-	}
-	return &plain, nil
-}
-
-// encryptOptional seals v and base64-encodes it for a TEXT column, passing nil
-// through unchanged so that "field not supplied" stays distinguishable from
-// "field set to empty" all the way down to the COALESCE in Upsert.
-func (r *projectConsumptionRepo) encryptOptional(v *string) (*string, error) {
-	if v == nil {
-		return nil, nil
-	}
-	cipher, err := r.codec.Encrypt(*v)
-	if err != nil {
-		return nil, err
-	}
-	encoded := base64.StdEncoding.EncodeToString(cipher)
-	return &encoded, nil
+	return stored
 }
 
 // Upsert implements ProjectConsumptionRepository.
 func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, next domain.ProjectConsumption) (domain.ProjectConsumption, error) {
-	encryptedSecret, err := r.encryptOptional(next.ConsumerSecret)
-	if err != nil {
-		return domain.ProjectConsumption{}, fmt.Errorf("upsert project consumption: encrypt consumerSecret: %w", err)
-	}
-	encryptedPrimary, err := r.encryptOptional(next.PrimarySecretKey)
-	if err != nil {
-		return domain.ProjectConsumption{}, fmt.Errorf("upsert project consumption: encrypt primarySecretKey: %w", err)
-	}
-	encryptedSecondary, err := r.encryptOptional(next.SecondarySecretKey)
-	if err != nil {
-		return domain.ProjectConsumption{}, fmt.Errorf("upsert project consumption: encrypt secondarySecretKey: %w", err)
-	}
-
 	statusEnum := statusToEnum(next.Status)
 
 	// Every artefact column is COALESCEd against its stored value, so a step
@@ -267,9 +220,9 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 		updatedOn time.Time
 	)
 
-	err = r.db.QueryRow(ctx, updateQuery,
+	err := r.db.QueryRow(ctx, updateQuery,
 		projectID, statusEnum, next.ChoreoApplicationID, next.ConsumerKey,
-		encryptedSecret, encryptedPrimary, encryptedSecondary,
+		next.ConsumerSecret, next.PrimarySecretKey, next.SecondarySecretKey,
 	).Scan(&outID, &retStatus, &appID, &clientID, &createdOn, &updatedOn)
 
 	if errors.Is(err, pgx.ErrNoRows) {
