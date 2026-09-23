@@ -13117,6 +13117,13 @@ components:
         projectCount:
           type: integer
           description: Set for kind=batch only.
+        cases:
+          type: array
+          description: >-
+            Every member case this batch's request published, one per
+            project. Set for kind=batch only.
+          items:
+            $ref: '#/components/schemas/AnnouncementRegistryCaseMember'
         caseId:
           type: string
           description: Set for kind=case only.
@@ -13132,6 +13139,20 @@ components:
         projectName:
           type: string
           description: Set for kind=case only.
+
+    AnnouncementRegistryCaseMember:
+      type: object
+      description: One project's own case within a batch row.
+      properties:
+        caseId:
+          type: string
+        caseNumber:
+          type: string
+        wso2CaseId:
+          type: string
+          description: Project-scoped WSO2 case reference (case internalId).
+        projectName:
+          type: string
 
     SearchAnnouncementRegistryResponse:
       type: object

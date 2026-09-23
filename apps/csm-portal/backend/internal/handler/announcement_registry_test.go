@@ -122,8 +122,8 @@ func TestSearchAnnouncementRegistry_RejectsNegativeOffset(t *testing.T) {
 func TestSearchAnnouncementRegistry_GroupsCasesBelongingToTheSameRequest(t *testing.T) {
 	client := &mockEntityAnnouncementRegistryClient{
 		searchCasesFn: singlePageCases(`[
-			{"id":"case-1","number":"CS001","subject":"Maintenance","updatedOn":"2026-07-02T00:00:00Z","createdOn":"2026-07-01T00:00:00Z"},
-			{"id":"case-2","number":"CS002","subject":"Maintenance","updatedOn":"2026-07-01T00:00:00Z","createdOn":"2026-07-01T00:00:00Z"}
+			{"id":"case-1","number":"CS001","internalId":"ACME-1","subject":"Maintenance","updatedOn":"2026-07-02T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-1","name":"Acme"}},
+			{"id":"case-2","number":"CS002","internalId":"BOLT-1","subject":"Maintenance","updatedOn":"2026-07-01T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-2","name":"Bolt"}}
 		]`, 2),
 		searchAnnouncementRequestsFn: singlePageRequests(`[
 			{"id":"req-1","subject":"Maintenance","createdBy":"jane@example.com","createdAt":"2026-07-01T00:00:00Z","updatedAt":"2026-07-02T00:00:00Z","publishedCaseIds":["case-1","case-2"]}
@@ -148,6 +148,54 @@ func TestSearchAnnouncementRegistry_GroupsCasesBelongingToTheSameRequest(t *test
 	}
 	if got.Total != 1 {
 		t.Fatalf("total = %d, want 1", got.Total)
+	}
+	// The collapsed row must still carry every individual case's own number/
+	// WSO2 reference/project — a batch row that only reports a count gives
+	// the caller no way to ever find out which case belongs to which
+	// project (a real gap reported live: nothing anywhere in the UI could
+	// answer "what's the CS number for project X in this send").
+	if len(row.Cases) != 2 {
+		t.Fatalf("expected both member cases listed on the row, got %+v", row.Cases)
+	}
+	byCaseID := map[string]registryCaseMember{}
+	for _, m := range row.Cases {
+		byCaseID[m.CaseID] = m
+	}
+	if byCaseID["case-1"].CaseNumber != "CS001" || byCaseID["case-1"].WSO2CaseID != "ACME-1" || byCaseID["case-1"].ProjectName != "Acme" {
+		t.Fatalf("expected case-1's own number/wso2CaseId/project, got %+v", byCaseID["case-1"])
+	}
+	if byCaseID["case-2"].CaseNumber != "CS002" || byCaseID["case-2"].WSO2CaseID != "BOLT-1" || byCaseID["case-2"].ProjectName != "Bolt" {
+		t.Fatalf("expected case-2's own number/wso2CaseId/project, got %+v", byCaseID["case-2"])
+	}
+}
+
+// A batch of 3+ member cases is the shape reported live (a real published
+// request whose "3 projects" summary had no way to reveal any of the 3
+// underlying CS numbers) — locks in that every member beyond the first two
+// is retained too, not just enough to prove grouping works at all.
+func TestSearchAnnouncementRegistry_BatchRowListsEveryMemberCaseNotJustTheFirst(t *testing.T) {
+	client := &mockEntityAnnouncementRegistryClient{
+		searchCasesFn: singlePageCases(`[
+			{"id":"case-1","number":"CS001","subject":"Maintenance","updatedOn":"2026-07-03T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-1","name":"Acme"}},
+			{"id":"case-2","number":"CS002","subject":"Maintenance","updatedOn":"2026-07-02T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-2","name":"Bolt"}},
+			{"id":"case-3","number":"CS003","subject":"Maintenance","updatedOn":"2026-07-01T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-3","name":"Cinder"}}
+		]`, 3),
+		searchAnnouncementRequestsFn: singlePageRequests(`[
+			{"id":"req-1","subject":"Maintenance","createdBy":"jane@example.com","createdAt":"2026-07-01T00:00:00Z","updatedAt":"2026-07-03T00:00:00Z","publishedCaseIds":["case-1","case-2","case-3"]}
+		]`, 1),
+	}
+	h := NewAnnouncementRegistryHandler(client)
+	r := withUser(httptest.NewRequest(http.MethodPost, "/announcements/registry/search", strings.NewReader(`{"pagination":{"limit":20}}`)))
+	w := httptest.NewRecorder()
+	h.SearchAnnouncementRegistry(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	var got registrySearchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got.Rows) != 1 || got.Rows[0].ProjectCount != 3 || len(got.Rows[0].Cases) != 3 {
+		t.Fatalf("expected 1 row, projectCount 3, 3 member cases, got %+v", got.Rows)
 	}
 }
 

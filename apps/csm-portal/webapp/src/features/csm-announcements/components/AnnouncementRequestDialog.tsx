@@ -55,10 +55,21 @@ import AddUpdateConfirmationDialog from "@features/csm-announcements/components/
 import { useCreateAnnouncementRequestUpdate } from "@features/csm-announcements/api/useCreateAnnouncementRequestUpdate";
 import { useListAnnouncementRequestUpdates } from "@features/csm-announcements/api/useListAnnouncementRequestUpdates";
 import { usePostAnnouncementUpdateComments } from "@features/csm-announcements/api/usePostAnnouncementUpdateComments";
+import type { AnnouncementRegistryCaseMember } from "@features/csm-announcements/types/announcementRegistry";
 
 interface AnnouncementRequestDialogProps {
   requestId: string;
   onClose: () => void;
+  /**
+   * Every member case this request published — only known when this dialog
+   * was opened from a batch row in the Announcements tab's registry list
+   * (the one place this data exists; see AnnouncementRegistryRow's own doc
+   * comment). Opened from the Pending tab instead, this is empty, and the
+   * "Delivered to" section below simply doesn't render — same graceful
+   * "nothing to show" behavior as a legacy published request with no
+   * publishedCaseIds at all.
+   */
+  caseMembers?: AnnouncementRegistryCaseMember[];
 }
 
 const STATE_TITLE: Record<string, string> = {
@@ -117,6 +128,7 @@ function isEmptyHtml(html: string): boolean {
 export default function AnnouncementRequestDialog({
   requestId,
   onClose,
+  caseMembers = [],
 }: AnnouncementRequestDialogProps): JSX.Element {
   const { data: request, isLoading, isError, refetch } = useGetAnnouncementRequest(requestId);
   const update = useUpdateAnnouncementRequest();
@@ -614,6 +626,57 @@ export default function AnnouncementRequestDialog({
                     retry before this can be published.
                   </Typography>
                 )}
+              </Box>
+            )}
+
+            {request.state === "published" && caseMembers.length > 0 && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <Divider />
+                <Typography variant="subtitle2">
+                  Delivered to {caseMembers.length} project{caseMembers.length === 1 ? "" : "s"}
+                </Typography>
+                {/* A real send can reach ~100 projects, so this is a dense,
+                    scrollable list rather than one card per case (the shape
+                    "Past updates" below uses, fine there since those are
+                    rare and rich-text) — bounded height keeps the dialog
+                    itself from growing without limit alongside the list. */}
+                <Box
+                  sx={{
+                    maxHeight: 220,
+                    overflowY: "auto",
+                    border: 1,
+                    borderColor: "divider",
+                    borderRadius: 1,
+                  }}
+                >
+                  {caseMembers.map((m) => (
+                    <Box
+                      key={m.caseId}
+                      component={Link}
+                      to={`/announcements/${m.caseId}`}
+                      sx={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 1,
+                        px: 1.5,
+                        py: 0.75,
+                        textDecoration: "none",
+                        color: "inherit",
+                        borderBottom: 1,
+                        borderColor: "divider",
+                        "&:last-of-type": { borderBottom: 0 },
+                        "&:hover": { bgcolor: "action.hover" },
+                      }}
+                    >
+                      <Typography variant="body2" noWrap>
+                        {m.projectName || "—"}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ flexShrink: 0 }}>
+                        {m.caseNumber || m.wso2CaseId || "—"}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
               </Box>
             )}
 

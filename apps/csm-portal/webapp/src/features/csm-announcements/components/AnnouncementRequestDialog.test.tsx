@@ -577,6 +577,51 @@ describe("AnnouncementRequestDialog — published", () => {
     expect(screen.queryByRole("button", { name: /^publish$/i })).not.toBeInTheDocument();
   });
 
+  it("shows a Delivered to list with each project's own case number when caseMembers is passed (e.g. opened from a batch row)", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1", "p-2"],
+      resolvedProjectCount: 2,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      publishedCaseIds: ["case-1", "case-2"],
+    });
+    render(
+      <AnnouncementRequestDialog
+        requestId="req-1"
+        onClose={vi.fn()}
+        caseMembers={[
+          { caseId: "case-1", caseNumber: "CS0001", wso2CaseId: "ACME-1", projectName: "Acme" },
+          { caseId: "case-2", caseNumber: "CS0002", wso2CaseId: "BOLT-1", projectName: "Bolt" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Delivered to 2 projects")).toBeInTheDocument();
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.getByText("CS0001")).toBeInTheDocument();
+    expect(screen.getByText("Bolt")).toBeInTheDocument();
+    expect(screen.getByText("CS0002")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Acme.*CS0001/s })).toHaveAttribute(
+      "href",
+      "/announcements/case-1",
+    );
+  });
+
+  it("shows no Delivered to section when caseMembers is empty (e.g. opened from the Pending tab)", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      publishedCaseIds: ["case-1"],
+    });
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/^delivered to/i)).not.toBeInTheDocument();
+  });
+
   it("posting an update records it, then fans out a comment to every published case, via a confirmation popup", async () => {
     mockGet({
       state: "published",

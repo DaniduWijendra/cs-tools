@@ -108,6 +108,19 @@ type registryAnnouncementRequestSearchResponse struct {
 	Limit    int                               `json:"limit"`
 }
 
+// registryCaseMember is one project's case within a "batch" row — the whole
+// reason this handler already fetches every matching case in one shot (see
+// fetchAllMatchingCases) is that grouping needs to inspect each one anyway,
+// so surfacing per-project detail here costs nothing extra: no second
+// request, no per-case lookup by id (which this schema has no query field
+// for at all — case search has no "id in [...]" filter).
+type registryCaseMember struct {
+	CaseID      string `json:"caseId"`
+	CaseNumber  string `json:"caseNumber"`
+	WSO2CaseID  string `json:"wso2CaseId"`
+	ProjectName string `json:"projectName"`
+}
+
 // registryRow is one row of the grouped registry — either a "batch" (a
 // published announcement_request, representing every case in its own
 // PublishedCaseIDs as one row) or a "case" (an announcement-type case with
@@ -123,8 +136,9 @@ type registryRow struct {
 	UpdatedOn string `json:"updatedOn,omitempty"`
 
 	// Batch-only.
-	AnnouncementRequestID string `json:"announcementRequestId,omitempty"`
-	ProjectCount          int    `json:"projectCount,omitempty"`
+	AnnouncementRequestID string               `json:"announcementRequestId,omitempty"`
+	ProjectCount          int                  `json:"projectCount,omitempty"`
+	Cases                 []registryCaseMember `json:"cases,omitempty"`
 
 	// Case-only.
 	CaseID      string `json:"caseId,omitempty"`
@@ -306,17 +320,28 @@ func (h *AnnouncementRegistryHandler) SearchAnnouncementRegistry(w http.Response
 	}
 
 	var rows []registryRow
-	emittedRequestIDs := make(map[string]bool, len(requests))
+	rowIndexByRequestID := make(map[string]int, len(requests))
 	for _, c := range cases {
 		if reqView, ok := caseToRequest[c.ID]; ok {
-			if emittedRequestIDs[reqView.ID] {
+			projectName := ""
+			if c.Project != nil {
+				projectName = c.Project.Name
+			}
+			member := registryCaseMember{
+				CaseID:      c.ID,
+				CaseNumber:  c.Number,
+				WSO2CaseID:  c.InternalID,
+				ProjectName: projectName,
+			}
+			if idx, ok := rowIndexByRequestID[reqView.ID]; ok {
+				rows[idx].Cases = append(rows[idx].Cases, member)
 				continue
 			}
-			emittedRequestIDs[reqView.ID] = true
 			projectCount := len(reqView.PublishedCaseIDs)
 			if reqView.ResolvedProjectCount != nil {
 				projectCount = *reqView.ResolvedProjectCount
 			}
+			rowIndexByRequestID[reqView.ID] = len(rows)
 			rows = append(rows, registryRow{
 				Kind:                  "batch",
 				Subject:               reqView.Subject,
@@ -325,6 +350,7 @@ func (h *AnnouncementRegistryHandler) SearchAnnouncementRegistry(w http.Response
 				UpdatedOn:             reqView.UpdatedAt,
 				AnnouncementRequestID: reqView.ID,
 				ProjectCount:          projectCount,
+				Cases:                 []registryCaseMember{member},
 			})
 			continue
 		}
