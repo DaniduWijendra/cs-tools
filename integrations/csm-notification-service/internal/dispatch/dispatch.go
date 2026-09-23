@@ -89,6 +89,10 @@ type identityProvisioner interface {
 // makes back to entity-service.
 type onboardingStepRecorder interface {
 	RecordOnboardingStep(ctx context.Context, req entity.OnboardingStepRequest) error
+	// EmailAlreadySent reports whether a SUCCEEDED EMAIL step is already on
+	// the ledger for the membership -- the durable "this invitation has
+	// already gone out" check.
+	EmailAlreadySent(ctx context.Context, membershipSfID string) (bool, error)
 }
 
 // OnboardingConfig is everything handleProjectContactInvited needs beyond
@@ -1508,6 +1512,25 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 			err := fmt.Errorf("dispatch: invitation email enabled but no email client configured")
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
 			return err
+		}
+
+		// The durable duplicate-invitation guard, checked immediately
+		// before sending. Everything else that stops a second invitation --
+		// the in-process claim above, the ingest's Salesforce-version
+		// check -- is either per-process or per-version. This one is a row
+		// in Postgres, so it holds across replicas, restarts, a redelivery
+		// on the dead-letter topic, and the case where the customer portal
+		// onboarded this contact synchronously and the Salesforce event for
+		// the same contact only reached the ingest afterwards.
+		//
+		// A failure to read the ledger is not a reason to send: it is also
+		// not a reason to give up, so it is returned and the record is
+		// retried.
+		if sent, err := d.onboarding.Steps.EmailAlreadySent(ctx, p.MembershipSfID); err != nil {
+			return fmt.Errorf("dispatch: check invitation already sent for membership %s: %w", p.MembershipSfID, err)
+		} else if sent {
+			slog.InfoContext(ctx, "dispatch: invitation already recorded as sent for this membership; not sending again", logAttrs...)
+			break
 		}
 
 		data := notifications.ProjectContactInvitedEmailData{

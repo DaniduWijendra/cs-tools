@@ -76,6 +76,56 @@ type OnboardingStepRequest struct {
 	ContactSfID     string    `json:"contactSfId,omitempty"`
 }
 
+// RecordedOnboardingStep is one row of GET
+// /onboarding-steps/{membershipSfId}. Only the two fields the caller acts
+// on are decoded; entity-service returns more.
+type RecordedOnboardingStep struct {
+	Step   OnboardingStep       `json:"step"`
+	Status OnboardingStepStatus `json:"status"`
+}
+
+// getOnboardingStepsResponse is the body of GET
+// /onboarding-steps/{membershipSfId}.
+type getOnboardingStepsResponse struct {
+	Steps []RecordedOnboardingStep `json:"steps"`
+}
+
+// EmailAlreadySent reports whether the ledger already holds a SUCCEEDED
+// EMAIL step for the membership -- that is, whether an invitation has
+// already gone out for it, by this service on an earlier delivery or by
+// whoever onboarded the contact.
+//
+// This is the one durable guard against sending a second invitation. The
+// in-process claim in dispatch only covers one process's lifetime, and the
+// ingest's own duplicate guard only covers the case where the Salesforce
+// version is unchanged; neither survives a redelivery to a different
+// replica, and neither knows about a membership that was onboarded
+// synchronously through the customer portal and only later re-ingested from
+// a Salesforce event. The ledger is a row in Postgres that both services
+// share, so it does.
+//
+// An unknown membership yields false with no error: entity-service answers
+// an empty list rather than a 404.
+func (c *CustomerEntityClient) EmailAlreadySent(ctx context.Context, membershipSfID string) (bool, error) {
+	if membershipSfID == "" {
+		return false, fmt.Errorf("entity: membershipSfId is required to read onboarding steps")
+	}
+	body, err := c.do(ctx, http.MethodGet, "/onboarding-steps/"+url.PathEscape(membershipSfID), nil)
+	if err != nil {
+		return false, err
+	}
+	var out getOnboardingStepsResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return false, fmt.Errorf("entity: decode onboarding steps response: %w", err)
+	}
+	for _, s := range out.Steps {
+		if s.Step == OnboardingStepEmail && s.Status == OnboardingStepSucceeded {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // RecordOnboardingStep calls PUT /onboarding-steps/{membershipSfId}/{step}
 // — the one write this otherwise read-only client makes — recording the
 // latest outcome of one onboarding step for one membership. Idempotent on

@@ -161,3 +161,67 @@ func TestRecordOnboardingStep_RequiresPathValues(t *testing.T) {
 		t.Error("upstream should not have been called")
 	}
 }
+
+// TestEmailAlreadySent pins the read side of the ledger: the path it calls,
+// and that only a SUCCEEDED EMAIL row counts as "already invited". A
+// FAILED or SKIPPED email, or a succeeded step of another kind, must not
+// suppress an invitation.
+func TestEmailAlreadySent(t *testing.T) {
+	cases := map[string]struct {
+		steps []map[string]any
+		want  bool
+	}{
+		"no steps at all":       {steps: []map[string]any{}, want: false},
+		"email succeeded":       {steps: []map[string]any{{"step": "IDENTITY", "status": "SUCCEEDED"}, {"step": "EMAIL", "status": "SUCCEEDED"}}, want: true},
+		"email failed":          {steps: []map[string]any{{"step": "EMAIL", "status": "FAILED"}}, want: false},
+		"email skipped":         {steps: []map[string]any{{"step": "EMAIL", "status": "SKIPPED"}}, want: false},
+		"another step succeeds": {steps: []map[string]any{{"step": "IDENTITY", "status": "SUCCEEDED"}}, want: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"steps": tc.steps})
+			}))
+			defer apiSrv.Close()
+			tokenSrv := newCustomerTokenServer(t)
+			defer tokenSrv.Close()
+
+			got, err := newTestCustomerClient(t, tokenSrv, apiSrv).EmailAlreadySent(context.Background(), "a0e000000000001AAA")
+			if err != nil {
+				t.Fatalf("EmailAlreadySent() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("EmailAlreadySent() = %v, want %v", got, tc.want)
+			}
+			if gotMethod != http.MethodGet || gotPath != "/onboarding-steps/a0e000000000001AAA" {
+				t.Errorf("request = %s %s, want GET /onboarding-steps/a0e000000000001AAA", gotMethod, gotPath)
+			}
+		})
+	}
+}
+
+// TestEmailAlreadySent_UpstreamErrorIsReturned: a ledger we cannot read is
+// an error, never a quiet "no invitation has been sent".
+func TestEmailAlreadySent_UpstreamErrorIsReturned(t *testing.T) {
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer apiSrv.Close()
+	tokenSrv := newCustomerTokenServer(t)
+	defer tokenSrv.Close()
+
+	got, err := newTestCustomerClient(t, tokenSrv, apiSrv).EmailAlreadySent(context.Background(), "a0e000000000001AAA")
+	if err == nil {
+		t.Fatal("EmailAlreadySent() error = nil, want the upstream failure surfaced")
+	}
+	if got {
+		t.Error("EmailAlreadySent() = true on an error; a failed read must never look like a sent invitation")
+	}
+	var apiErr *apierror.Error
+	if !errors.As(err, &apiErr) {
+		t.Errorf("error = %v, want *apierror.Error", err)
+	}
+}

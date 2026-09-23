@@ -63,9 +63,23 @@ func (m *mockIdentityProvisioner) EnsureExternalUser(ctx context.Context, email,
 // mockStepRecorder stands in for entity.CustomerEntityClient's
 // RecordOnboardingStep, keeping every write in order.
 type mockStepRecorder struct {
-	err   error
-	mu    sync.Mutex
-	calls []entity.OnboardingStepRequest
+	err error
+	// emailAlreadySent / emailSentErr drive the durable duplicate-invitation
+	// guard; emailSentChecks counts how often it was consulted.
+	emailAlreadySent bool
+	emailSentErr     error
+	emailSentChecks  int
+	mu               sync.Mutex
+	calls            []entity.OnboardingStepRequest
+}
+
+// emailAlreadySent is what EmailAlreadySent answers; emailSentErr makes the
+// ledger read itself fail.
+func (m *mockStepRecorder) EmailAlreadySent(context.Context, string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.emailSentChecks++
+	return m.emailAlreadySent, m.emailSentErr
 }
 
 func (m *mockStepRecorder) RecordOnboardingStep(ctx context.Context, req entity.OnboardingStepRequest) error {
@@ -572,4 +586,58 @@ func (d *Dispatcher) claimedForTest(key string) bool {
 	d.doneMu.Lock()
 	defer d.doneMu.Unlock()
 	return d.done[key]
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_SkipsWhenTheLedgerSaysSent is
+// the durable guard: a membership whose EMAIL step is already SUCCEEDED --
+// because an earlier delivery sent it, or because the customer portal
+// onboarded the contact synchronously before the Salesforce event arrived --
+// must not be invited a second time. Identity still runs: SCIM is
+// create-if-absent, so it is harmless and keeps the step honest.
+func TestDispatcher_Handle_ProjectContactInvited_SkipsWhenTheLedgerSaysSent(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{}, &mockEmailSender{}
+	steps := &mockStepRecorder{emailAlreadySent: true}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v, want nil", err)
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails, want none: the ledger already records one", len(email.calls))
+	}
+	if steps.emailSentChecks != 1 {
+		t.Errorf("ledger consulted %d times, want exactly 1", steps.emailSentChecks)
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_LedgerUnreadableDoesNotSend:
+// if the ledger cannot be read we do not know whether an invitation went
+// out, so the record is retried rather than risking a second one.
+func TestDispatcher_Handle_ProjectContactInvited_LedgerUnreadableDoesNotSend(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{}, &mockEmailSender{}
+	steps := &mockStepRecorder{emailSentErr: errors.New("entity-service unavailable")}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil {
+		t.Fatal("Handle() = nil, want an error so the consumer retries")
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails, want none while the ledger is unreadable", len(email.calls))
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_LedgerNotConsultedWhenEmailIsOff
+// keeps the guard off the path it cannot affect: with the email step
+// disabled there is nothing to suppress.
+func TestDispatcher_Handle_ProjectContactInvited_LedgerNotConsultedWhenEmailIsOff(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, false)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if steps.emailSentChecks != 0 {
+		t.Errorf("ledger consulted %d times with the email step off, want 0", steps.emailSentChecks)
+	}
 }
