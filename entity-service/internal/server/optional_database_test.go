@@ -28,7 +28,7 @@ import (
 // A DATA_SOURCE=servicenow deployment may legitimately have no database at
 // all: every entity read and write goes to the SN integration service, and
 // nothing in that path touches Postgres. The two Postgres-only feature sets
-// (event_publish_failures, sla_clocks) are the exception, and they are
+// (event_publish_failures, sla-status) are the exception, and they are
 // skipped rather than allowed to panic on a nil pool.
 //
 // These tests exist because a nil *pgxpool.Pool does not fail at construction

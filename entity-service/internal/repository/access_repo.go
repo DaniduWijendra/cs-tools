@@ -34,6 +34,11 @@ type AccessUser struct {
 	Active   bool
 }
 
+// registeredContactState is the project_contact.state that grants a customer
+// access to a project. The access scope and the profile's grantsCaseAccess both
+// use it, so what the profile reports is what is enforced.
+const registeredContactState = "REGISTERED"
+
 // AccessRepository reads what decides which projects a caller may see.
 type AccessRepository interface {
 	// UsersByEmail returns every "user" row with this email (case-insensitive).
@@ -99,8 +104,8 @@ func (r *accessRepo) RegisteredProjectIDs(ctx context.Context, email string) ([]
 	}
 	rows, err := r.db.Query(ctx,
 		`SELECT DISTINCT project_id::TEXT FROM project_contact
-		 WHERE LOWER(email) = LOWER($1) AND state = 'REGISTERED'
-		 ORDER BY 1`, email)
+		 WHERE LOWER(email) = LOWER($1) AND state::TEXT = $2
+		 ORDER BY 1`, email, registeredContactState)
 	if err != nil {
 		return nil, fmt.Errorf("access: registered projects: %w", err)
 	}

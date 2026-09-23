@@ -56,6 +56,16 @@ var signingMethods = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS51
 type UserClaims struct {
 	Email   string
 	Subject string
+	// UserID is the token's "userid" claim -- Asgardeo's stable, per-account
+	// user identifier. Unlike Subject ("sub"), which csm-portal-backend's own
+	// frontend has separately documented as per-session rather than stable
+	// (see that repo's IdTokenClaims doc comment), UserID is the same value
+	// both csm-portal-backend and customer-portal backend-v2 already decode
+	// from this identical token into their own UserInfo.UserID and log on
+	// every request they handle -- see that value's own doc comment for why
+	// this one, not Subject, is the field to correlate a request across
+	// services by.
+	UserID string
 }
 
 // ClientClaims is what a validated client-credentials access token yields.
@@ -65,6 +75,7 @@ type ClientClaims struct {
 
 type tokenClaims struct {
 	Email    string `json:"email"`
+	UserID   string `json:"userid"`
 	ClientID string `json:"client_id"`
 	AZP      string `json:"azp"`
 	jwt.RegisteredClaims
@@ -135,7 +146,7 @@ func (v *Validator) ValidateUserToken(raw string) (UserClaims, error) {
 	if strings.TrimSpace(c.Email) == "" {
 		return UserClaims{}, errors.New("token missing email claim")
 	}
-	return UserClaims{Email: strings.TrimSpace(c.Email), Subject: c.Subject}, nil
+	return UserClaims{Email: strings.TrimSpace(c.Email), Subject: c.Subject, UserID: strings.TrimSpace(c.UserID)}, nil
 }
 
 // ValidateClientToken validates an application's client-credentials access

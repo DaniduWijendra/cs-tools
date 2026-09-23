@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"time"
 )
 
 // emailPattern is a deliberately loose "does this look like an email
@@ -184,42 +183,6 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		// this only relaxes "absent," not "malformed."
 		if p.CallTo != "" && !e164Pattern.MatchString(p.CallTo) {
 			return fmt.Errorf("events: %s callTo %q is not a valid E.164 phone number", t, p.CallTo)
-		}
-	case TypeSLAClockRegister:
-		var p SLAClockRegisterPayload
-		if err := decodeStrict(raw, &p); err != nil {
-			return err
-		}
-		if p.CaseID == "" || len(p.Durations) == 0 || p.CaseTitle == "" {
-			return fmt.Errorf("events: missing required field for %s", t)
-		}
-		for clockType, dur := range p.Durations {
-			if clockType == "" || dur == "" {
-				return fmt.Errorf("events: %s durations must have non-empty clock types and values", t)
-			}
-			// A duration time.ParseDuration can't parse would otherwise only
-			// surface deep inside slaengine's own registration loop, which
-			// logs and skips that one clockType rather than failing the
-			// whole record — for a payload whose durations are ALL
-			// unparsable, that means the record is silently marked handled
-			// with no clock ever registered and no retry/DLQ visibility.
-			// Rejecting it here instead makes it retried and dead-lettered
-			// like any other malformed record.
-			if d, err := time.ParseDuration(dur); err != nil || d <= 0 {
-				return fmt.Errorf("events: %s duration %q for clock type %q is not a valid positive duration", t, dur, clockType)
-			}
-		}
-		// Each AvoidWeekendDueDate entry must name a clock type Durations
-		// actually has an entry for — same "one bad entry fails the whole
-		// event" posture validRecipients uses, rather than silently
-		// ignoring a typo'd/stale clock-type name.
-		for _, clockType := range p.AvoidWeekendDueDate {
-			if _, ok := p.Durations[clockType]; !ok {
-				return fmt.Errorf("events: %s avoidWeekendDueDate entry %q does not match any durations clock type", t, clockType)
-			}
-		}
-		if p.CaseID != entityID {
-			return fmt.Errorf("events: payload caseId %q does not match entityId %q", p.CaseID, entityID)
 		}
 	case TypeSLATierReached:
 		var p SLATierReachedPayload

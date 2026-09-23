@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -73,18 +72,6 @@ const publishCaseAcknowledgedTimeout = 5 * time.Second
 // status-change block) already supplies the "before" CaseView this publish
 // needs.
 const publishSeverityChangedTimeout = 5 * time.Second
-
-// applyResponseSLATimeout bounds applyResponseSLAOnComment's own author
-// resolution (SearchCaseComments) + role lookup (SearchUsers) +
-// SetSLAClockTierReached calls — same reasoning as publishCaseCreatedTimeout,
-// though this one isn't a publish at all (see that function's own doc
-// comment for why it's independent of s.publisher/Event Hub entirely).
-const applyResponseSLATimeout = 5 * time.Second
-
-// applyCaseStateSLATimeout bounds applyCaseStateSLAEffects' own
-// Pause/Resume/SetSLAClockTierReached calls — same reasoning as
-// applyResponseSLATimeout.
-const applyCaseStateSLATimeout = 5 * time.Second
 
 // applyCustomerReplyTimeout bounds applyCustomerReplyStateTransition's own
 // GetCaseByID + author resolution + role lookup + UpdateCase calls — same
@@ -833,22 +820,7 @@ type snCaseService struct {
 	// config.Config.EventHubBroker) — every call site must check before
 	// using it. See publishCaseCreated.
 	publisher EventPublisherService
-	// slaClocks/userSvc/supportEngineerRole back the SLA-tracking additions
-	// in this file (publishCaseCreated's registration step,
-	// applyResponseSLAOnComment, applyCaseStateSLAEffects) — see each
-	// function's own doc comment. slaClocks is nil when this service is
-	// running with DATA_SOURCE=servicenow and no database configured (see
-	// config.Config.HasDatabase/routes.go's own comment on slaClockService)
-	// — every call site must check before using it, same as publisher.
-	// userSvc is only ever consulted once supportEngineerRole is non-empty
-	// (see applyResponseSLAOnComment), so it is never dereferenced while
-	// nil in practice. supportEngineerRole may be "" (see
-	// config.Config.SupportEngineerRole's own doc comment), which
-	// applyResponseSLAOnComment treats as "can't confirm engineer
-	// authorship, skip" rather than an error.
-	slaClocks           SLAClockService
-	userSvc             SNUserService
-	supportEngineerRole string
+	userSvc   SNUserService
 	// customerRoles backs applyCustomerReplyStateTransition — see that
 	// function's own doc comment and config.Config.CustomerRoles'. May be
 	// empty (unconfigured), treated the same "can't confirm authorship,
@@ -859,15 +831,13 @@ type snCaseService struct {
 // NewSNCaseService constructs a CaseService that delegates SearchCases to the
 // Choreo API and all write/read-by-id operations to pgFallback. publisher may
 // be nil (see snCaseService.publisher's doc comment).
-func NewServiceNowCaseService(client *integrationservice.Client, pgFallback CaseService, publisher EventPublisherService, slaClocks SLAClockService, userSvc SNUserService, supportEngineerRole string, customerRoles []string) CaseService {
+func NewServiceNowCaseService(client *integrationservice.Client, pgFallback CaseService, publisher EventPublisherService, userSvc SNUserService, customerRoles []string) CaseService {
 	return &snCaseService{
-		client:              client,
-		pgFallback:          pgFallback,
-		publisher:           publisher,
-		slaClocks:           slaClocks,
-		userSvc:             userSvc,
-		supportEngineerRole: supportEngineerRole,
-		customerRoles:       customerRoles,
+		client:        client,
+		pgFallback:    pgFallback,
+		publisher:     publisher,
+		userSvc:       userSvc,
+		customerRoles: customerRoles,
 	}
 }
 
@@ -1098,14 +1068,6 @@ func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.Creat
 		return
 	}
 
-	// SLA-clock registration runs here — sharing this function's own
-	// s.publisher==nil guard (registration is inherently Kafka-based, same
-	// as every publish in this file) and its GetCaseByID fetch above — but
-	// deliberately BEFORE the watcher-count check below: that check only
-	// gates the case.created *email*, and SLA tracking must happen
-	// regardless of whether the case has watchers to notify.
-	s.publishSLAClockRegister(ctx, cv, req, caseID)
-
 	recipients := watchListUserEmails(cv.WatchList)
 	if len(recipients) == 0 {
 		slog.InfoContext(ctx, "sn create case: case.created not published, case has no watchers to email", "caseId", caseID)
@@ -1144,73 +1106,6 @@ func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.Creat
 		// the full error is already durably recorded in
 		// event_publish_failures by Publish itself).
 		slog.ErrorContext(ctx, "sn create case: publish case.created failed", "caseId", caseID)
-	}
-}
-
-// publishSLAClockRegister best-effort publishes sla.clock.register for a
-// newly created case's applicable SLA clocks — called from
-// publishCaseCreated (see its own doc comment for why this runs before that
-// function's watcher-count check, sharing its s.publisher==nil guard and
-// its GetCaseByID enrichment instead of a second fetch).
-//
-// Which clock types get registered, and their durations, come from
-// sla_policy.go's slaDurations, keyed by cv.Severity — LOW severity's entry
-// only has a "response" duration (WSO2's support policy defines no fixed
-// Workaround/Resolution SLA for it, "best efforts"), so only that one clock
-// gets registered for a LOW-severity case. A severity with no policy entry
-// at all (shouldn't happen given domain.CaseSeverity's own fixed set, but
-// defensively handled rather than assumed) skips publishing entirely,
-// logged as a warning rather than silently registering nothing.
-//
-// Durations are encoded as Go duration strings (time.Duration.String(),
-// e.g. "24h0m0s") — csm-notification-service's slaengine parses them back
-// via time.ParseDuration and adds them to CaseCreatedAt (the case's actual
-// creation time, not publish/consume-time "now" — see
-// events.SLAClockRegisterPayload.CaseCreatedAt's own doc comment) to
-// compute each clock's actual due timestamp; this function never computes
-// an absolute due time itself. AvoidWeekendDueDate carries sla_policy.go's
-// slaAvoidWeekendClockTypes for cv.Severity — see that map's own doc
-// comment for what it's for.
-//
-// Like every other publish in this file, a failed Publish call below is
-// only durably recorded in event_publish_failures (searchable/resolvable),
-// not automatically retried or reconciled — see
-// EventPublisherService.Publish's own KNOWN GAP doc comment. That's an
-// existing, accepted limitation shared by every case.*/incident.* event
-// this service publishes, not something specific to SLA registration.
-func (s *snCaseService) publishSLAClockRegister(ctx context.Context, cv domain.CaseView, req domain.CreateCaseRequest, caseID string) {
-	durations, ok := slaDurations[derefSeverity(cv.Severity)]
-	if !ok || len(durations) == 0 {
-		slog.WarnContext(ctx, "sn create case: sla.clock.register not published, no SLA duration policy for severity", "caseId", caseID, "severity", derefSeverity(cv.Severity))
-		return
-	}
-	durationStrings := make(map[string]string, len(durations))
-	for clockType, d := range durations {
-		durationStrings[clockType] = d.String()
-	}
-
-	payload, err := json.Marshal(events.SLAClockRegisterPayload{
-		CaseID:              caseID,
-		Durations:           durationStrings,
-		CaseCreatedAt:       cv.CreatedOn.Format(time.RFC3339),
-		AvoidWeekendDueDate: slaAvoidWeekendClockTypes[derefSeverity(cv.Severity)],
-		CaseNumber:          cv.Number,
-		WSO2CaseID:          cv.InternalID,
-		CaseTitle:           cv.Subject,
-		CaseType:            strings.ToUpper(req.Type),
-		Product:             caseProductName(cv),
-		Team:                caseTeamName(cv),
-		Priority:            strings.ToUpper(string(derefSeverity(cv.Severity))),
-		State:               strings.ToUpper(string(derefState(cv.State))),
-	})
-	if err != nil {
-		slog.ErrorContext(ctx, "sn create case: encode sla.clock.register payload failed", "caseId", caseID, "error", err)
-		return
-	}
-	if err := s.publisher.Publish(ctx, events.TypeSLAClockRegister, caseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn create case: publish sla.clock.register failed", "caseId", caseID)
 	}
 }
 
@@ -1323,77 +1218,6 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		// Not logging err itself — see publishCaseCreated's matching log
 		// line for why.
 		slog.ErrorContext(ctx, "sn create comment: publish case.comment_added failed", "caseId", req.CaseID)
-	}
-}
-
-// applyResponseSLAOnComment marks the case's "response" SLA clock complete
-// (all three tiers — 50/75/100 — claimed at once via
-// SetSLAClockTierReached, idempotently) when the new comment is a
-// customer-visible reply (req.Type == domain.CommentTypeComment — work
-// notes and system activity entries don't count as a response) from a
-// user holding s.supportEngineerRole.
-//
-// This is a pure in-process DB operation, deliberately NOT gated on
-// s.publisher — unlike every publishXxx function in this file, it never
-// touches Event Hub at all, so a deployment without Event Hub configured
-// must not lose SLA tracking as a side effect. Claiming all three tiers at
-// once (not just "100") is what suppresses a later, spurious breach alert:
-// when csm-notification-service's slaengine eventually reaches the
-// wake-index entries this clock's registration created for 50%/75%/100%
-// elapsed, its own SetTierReachedIfUnset call will see each already
-// claimed and skip publishing — the exact same alreadyReached mechanism
-// that already prevents a duplicate real breach alert, reused here for
-// "this was satisfied early, not breached" instead. Calling this on every
-// qualifying comment (not just literally the first) is intentional and
-// harmless: SetSLAClockTierReached is itself idempotent, so only the
-// first call for a given tier actually claims it.
-//
-// entity-service has no auth/identity layer of its own (the
-// x-user-id-token it forwards is opaque), so "is this comment's author a
-// support engineer" can't be answered from anything in this request — it's
-// answered by resolving the comment's author (resolveCommentAuthor, the
-// same lookup publishCommentAdded already needs for its own display name)
-// and checking their ServiceNow role via s.userSvc.SearchUsers, filtered
-// by the author's email. s.supportEngineerRole being "" (unconfigured — see
-// config.Config.SupportEngineerRole's own doc comment) means this can
-// never be confirmed, so this skips entirely rather than guessing.
-func (s *snCaseService) applyResponseSLAOnComment(ctx context.Context, req domain.CreateCaseCommentRequest, commentID string) {
-	if req.Type != domain.CommentTypeComment || s.supportEngineerRole == "" || s.slaClocks == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, applyResponseSLATimeout)
-	defer cancel()
-
-	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
-	if author == nil || author.Email == "" {
-		slog.InfoContext(ctx, "sn create comment: response SLA not evaluated, could not resolve comment author's email", "caseId", req.CaseID)
-		return
-	}
-
-	usersResp, err := s.userSvc.SearchUsers(ctx, domain.SearchUsersRequest{
-		Pagination: domain.Pagination{Limit: 1},
-		Filters:    domain.SearchUsersFilters{Emails: []string{author.Email}},
-	})
-	if err != nil {
-		slog.ErrorContext(ctx, "sn create comment: response SLA not evaluated, user role lookup failed", "caseId", req.CaseID)
-		return
-	}
-
-	isSupportEngineer := false
-	for _, u := range usersResp.Users {
-		if slices.Contains(u.Roles, s.supportEngineerRole) {
-			isSupportEngineer = true
-			break
-		}
-	}
-	if !isSupportEngineer {
-		return
-	}
-
-	for _, tier := range []string{"50", "75", "100"} {
-		if _, err := s.slaClocks.SetSLAClockTierReached(ctx, req.CaseID, slaClockTypeResponse, tier, domain.SetSLAClockTierRequest{Status: domain.SLATierStatusReached}); err != nil {
-			logSLAClockOpFailed(ctx, "sn create comment: mark response sla clock tier reached failed", req.CaseID, slaClockTypeResponse, err)
-		}
 	}
 }
 
@@ -1543,93 +1367,6 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 		// Not logging err itself — see publishCaseCreated's matching log
 		// line for why.
 		slog.ErrorContext(ctx, "sn update case: publish case.status_changed failed", "caseId", caseID)
-	}
-}
-
-// logSLAClockOpFailed logs an SLA clock mutation's failure — at Info, not
-// Error, when it's a *apierror.NotFoundError: that specifically means no
-// such clock was ever registered for this case (e.g. a LOW-severity case,
-// which never gets a "workaround"/"resolution" clock at all — see
-// sla_policy.go's slaDurations), an expected, harmless outcome on every
-// state transition for such a case, not a real failure worth alerting on.
-// Anything else logs at Error, matching every other best-effort publish
-// helper's own failure logging in this file.
-func logSLAClockOpFailed(ctx context.Context, msg, caseID, clockType string, err error) {
-	var notFound *apierror.NotFoundError
-	if errors.As(err, &notFound) {
-		slog.InfoContext(ctx, msg+": no such sla clock registered", "caseId", caseID, "clockType", clockType)
-		return
-	}
-	slog.ErrorContext(ctx, msg, "caseId", caseID, "clockType", clockType)
-}
-
-// applyCaseStateSLAEffects pauses/resumes/completes the case's "workaround"
-// and "resolution" SLA clocks in reaction to a state-changing PATCH — a
-// pure in-process DB operation, deliberately independent of
-// publishStatusChanged/s.publisher (see this function's call site in
-// UpdateCase for why: pause/resume/completion must keep working even in a
-// deployment that hasn't configured Event Hub, since nothing here actually
-// needs it). Skips entirely when s.slaClocks is nil — a deployment running
-// DATA_SOURCE=servicenow with no database configured (see
-// config.Config.HasDatabase) has nowhere to store SLA clocks at all.
-//
-//   - CaseStateAwaitingInfo/CaseStateSolutionProposed: pause both clocks —
-//     the case is waiting on the customer, not actively being worked, so
-//     neither should keep counting toward a breach.
-//   - CaseStateClosed: resume both (so paused_at doesn't stay stuck at a
-//     non-null value on a row that's now done), then complete "resolution"
-//     the same way applyResponseSLAOnComment completes "response" — claim
-//     all three tiers (50/75/100) at once via SetSLAClockTierReached, which
-//     suppresses any later wake-index entry for it from firing a spurious
-//     breach alert (see that function's own doc comment for the mechanism).
-//     "workaround" is only paused here, not completed:
-//     TODO: workaround SLA has no completion trigger wired up yet — it
-//     needs a "workaround provided" signal that doesn't exist anywhere in
-//     this domain model today, distinct from the case simply closing.
-//     Pausing on close is a stopgap so it stops counting/alerting past
-//     closure, not a substitute for real completion.
-//   - Anything else (e.g. back to CaseStateWorkInProgress): resume both —
-//     the case is active again.
-//
-// Every step is idempotent (Pause/Resume/SetSLAClockTierReached all are),
-// so no no-op pre-check is needed here: a caller re-PATCHing the case's own
-// current state just redundantly re-applies the same effect.
-func (s *snCaseService) applyCaseStateSLAEffects(ctx context.Context, caseID string, state domain.CaseState) {
-	if s.slaClocks == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, applyCaseStateSLATimeout)
-	defer cancel()
-
-	switch state {
-	case domain.CaseStateAwaitingInfo, domain.CaseStateSolutionProposed:
-		if _, err := s.slaClocks.Pause(ctx, caseID, slaClockTypeWorkaround); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: pause workaround sla clock failed", caseID, slaClockTypeWorkaround, err)
-		}
-		if _, err := s.slaClocks.Pause(ctx, caseID, slaClockTypeResolution); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: pause resolution sla clock failed", caseID, slaClockTypeResolution, err)
-		}
-	case domain.CaseStateClosed:
-		if _, err := s.slaClocks.Resume(ctx, caseID, slaClockTypeResolution); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: resume resolution sla clock failed", caseID, slaClockTypeResolution, err)
-		}
-		for _, tier := range []string{"50", "75", "100"} {
-			if _, err := s.slaClocks.SetSLAClockTierReached(ctx, caseID, slaClockTypeResolution, tier, domain.SetSLAClockTierRequest{Status: domain.SLATierStatusReached}); err != nil {
-				logSLAClockOpFailed(ctx, "sn update case: mark resolution sla clock tier reached failed", caseID, slaClockTypeResolution, err)
-			}
-		}
-		// workaround: paused, not completed — see this function's own doc
-		// comment TODO above.
-		if _, err := s.slaClocks.Pause(ctx, caseID, slaClockTypeWorkaround); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: pause workaround sla clock failed", caseID, slaClockTypeWorkaround, err)
-		}
-	default:
-		if _, err := s.slaClocks.Resume(ctx, caseID, slaClockTypeWorkaround); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: resume workaround sla clock failed", caseID, slaClockTypeWorkaround, err)
-		}
-		if _, err := s.slaClocks.Resume(ctx, caseID, slaClockTypeResolution); err != nil {
-			logSLAClockOpFailed(ctx, "sn update case: resume resolution sla clock failed", caseID, slaClockTypeResolution, err)
-		}
 	}
 }
 
@@ -2150,9 +1887,71 @@ func (s *snCaseService) CreateCaseComment(ctx context.Context, req domain.Create
 		},
 	}
 	s.publishCommentAdded(ctx, req, result.Comment.ID)
-	s.applyResponseSLAOnComment(ctx, req, result.Comment.ID)
 	s.applyCustomerReplyStateTransition(ctx, req, result.Comment.ID)
 	return result, nil
+}
+
+// CreateBareCaseComment posts a case comment's content to ServiceNow via the
+// exact same "/comments" endpoint CreateCaseComment uses, but with NONE of
+// that method's side effects: no publishCommentAdded, no
+// applyCustomerReplyStateTransition. Those are separate, sequential Go-side
+// calls CreateCaseComment happens to make after its own POST succeeds --
+// not anything intrinsic to the "/comments" endpoint itself -- so calling
+// only the POST, as this does, genuinely has no side effects on either
+// side.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// comment mirror (see caseService.CreateCaseComment's own doc comment):
+// Postgres already IS authoritative for the comment and has already decided
+// the real outcome (including any state effects a future Postgres-native
+// implementation might add -- see that method's doc comment for the
+// feature-parity gap this deliberately does not build); this call's only
+// job is making sure ServiceNow's copy of the comment text exists too.
+//
+// Do not call this from CreateCaseComment itself -- that method's full
+// side-effect behavior is deliberate and unchanged for live
+// DATA_SOURCE=servicenow traffic.
+func (s *snCaseService) CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error) {
+	if !validCommentType[commentType] {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type contains invalid value: " + string(commentType)}
+	}
+	if content == "" {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "content is required"}
+	}
+	if commentType == domain.CommentTypeActivity {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type 'activity' is not supported for ServiceNow"}
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	snType := snCommentTypeMap[commentType]
+
+	payload := snCreateCommentPayload{
+		ReferenceID:   uuidToSysid(caseID),
+		ReferenceType: "case",
+		Type:          snType,
+		Content:       content,
+	}
+
+	raw, err := s.client.Post(ctx, "/comments", token, payload)
+	if err != nil {
+		return domain.CaseCommentDetail{}, err
+	}
+
+	var snResp snCreateCommentResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse response: %w", err)
+	}
+
+	createdOn, err := parseSNDateTime(ctx, "sn create bare case comment", "createdOn", snResp.Comment.CreatedOn)
+	if err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse createdOn %q: %w", snResp.Comment.CreatedOn, err)
+	}
+
+	return domain.CaseCommentDetail{
+		ID:        sysidToUUID(snResp.Comment.ID),
+		CreatedOn: createdOn,
+		CreatedBy: snResp.Comment.CreatedBy,
+	}, nil
 }
 
 type snCommentFilters struct {
@@ -3081,17 +2880,6 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	if publishStatusChange && snResp.Case.State != nil {
 		s.publishStatusChanged(ctx, req.ID, snResp.Case.State.Label, caseBeforeUpdate)
 	}
-	// Deliberately independent of publishStatusChange (which is also gated
-	// on s.publisher != nil) — see applyCaseStateSLAEffects' own doc
-	// comment for why pause/resume/completion must not depend on Event Hub
-	// being configured. req.State != nil alone (not the no-op-detecting
-	// publishStatusChange flag) is enough: Pause/Resume/
-	// SetSLAClockTierReached are all idempotent, so a caller re-PATCHing
-	// the case's own current state just redundantly re-applies the same
-	// effect harmlessly.
-	if req.State != nil && snResp.Case.State != nil {
-		s.applyCaseStateSLAEffects(ctx, req.ID, derefState(resp.Case.State))
-	}
 	if publishCaseAssign {
 		assigneeName := *req.AssigneeEmail
 		if snResp.Case.AssignedTo != nil && snResp.Case.AssignedTo.Name != "" {
@@ -3119,6 +2907,87 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	}
 
 	return resp, nil
+}
+
+// patchCaseFields performs a bare ServiceNow PATCH for exactly the fields
+// given (state/severity/workState, whichever are non-nil), with NONE of
+// UpdateCase's enrichment reads, no-op detection, or event publishing: no
+// GetCaseByID, no publishStatusChanged/publishSeverityChanged.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// State/Severity/WorkState mirror (see caseService.UpdateCase's own doc
+// comment): Postgres has already decided the real outcome by the time this
+// runs, so re-running ServiceNow's own no-op-detection/event logic would be
+// redundant at best -- and for State/Severity specifically, would require
+// the very GetCaseByID read this mode must never perform, which is exactly
+// why State/Severity couldn't join the mirror before this method existed.
+//
+// Do not call this from UpdateCase itself -- that method's read-before-write
+// behavior is deliberate and unchanged for live DATA_SOURCE=servicenow
+// traffic. At most one of state/severity/workState is expected non-nil
+// (mirroring caseService.UpdateCase's own "exactly one" invariant), but this
+// method does not enforce that itself -- the caller already has.
+func (s *snCaseService) patchCaseFields(ctx context.Context, caseID string, state *domain.CaseState, severity *domain.CaseSeverity, workState *domain.CaseWorkState) (domain.UpdatedCase, error) {
+	payload := snUpdateCasePayload{}
+	if state != nil {
+		if !validCaseState[*state] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state contains invalid value: " + string(*state)}
+		}
+		id, ok := snStateIDMap[*state]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state " + string(*state) + " is not supported by ServiceNow"}
+		}
+		payload.StateKey = &id
+	}
+	if severity != nil {
+		if !validCaseSeverity[*severity] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity contains invalid value: " + string(*severity)}
+		}
+		id, ok := snSeverityIDMap[*severity]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity " + string(*severity) + " is not supported by ServiceNow"}
+		}
+		payload.SeverityKey = &id
+	}
+	if workState != nil {
+		if !validCaseWorkState[*workState] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(*workState)}
+		}
+		id, ok := snWorkStateIDMap[*workState]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState " + string(*workState) + " is not supported by ServiceNow"}
+		}
+		payload.WorkStateKey = &id
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	raw, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	var snResp snUpdateCaseResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse response: %w", err)
+	}
+
+	updatedOn, err := parseSNDateTime(ctx, "sn patch case fields", "updatedOn", snResp.Case.UpdatedOn)
+	if err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse updatedOn %q: %w", snResp.Case.UpdatedOn, err)
+	}
+
+	result := domain.UpdatedCase{ID: sysidToUUID(snResp.Case.ID), UpdatedOn: updatedOn, UpdatedBy: snResp.Case.UpdatedBy}
+	if snResp.Case.State != nil {
+		if st, err := snCaseStateLabelToEnum(snResp.Case.State); err == nil {
+			result.State = &st
+		}
+	}
+	if snResp.Case.Severity != nil {
+		sev := snSeverityToSeverity(snResp.Case.Severity)
+		result.Severity = &sev
+	}
+	result.WorkState = snWorkStateLabelToEnum(snResp.Case.WorkState)
+	return result, nil
 }
 
 type snCreateAttachmentPayload struct {
@@ -4520,6 +4389,122 @@ func snCaseStateLabelToEnum(state *snCaseState) (domain.CaseState, error) {
 		return v, nil
 	}
 	return "", fmt.Errorf("unknown case state %q from ServiceNow", state.Label)
+}
+
+// snAnnouncementStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for an announcement-typed case -- see
+// TestSNCaseService_CreateCase_Announcement's fixture, which returns
+// {"label": "Open"} for a fresh announcement, the same label case uses)
+// to announcement_state_enum's own literal values. Deliberately its own map
+// rather than reusing snCaseStateMap: announcement_state_enum only has two
+// values (OPEN/CLOSE, migration 000019) and spells the closed one CLOSE, not
+// CLOSED -- the same kind of label/enum spelling mismatch already handled
+// for case (CANCELLED->CANCELED) and incident (SITE_247->SITE_24_7), so this
+// is resolved by an explicit table instead of assumed to line up.
+var snAnnouncementStateMap = map[string]string{
+	"open":   "OPEN",
+	"closed": "CLOSE",
+}
+
+// snAnnouncementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created announcement into announcement_state_enum's
+// literal value, for CreateCaseFromServiceNow's announcement branch. Returns
+// an error rather than defaulting to "OPEN" for anything unrecognized: a
+// fresh announcement landing in neither OPEN nor CLOSE means ServiceNow
+// returned a label this integration doesn't understand yet, which should
+// fail loudly rather than silently mis-record the state.
+func snAnnouncementStateToEnum(label string) (string, error) {
+	if v, ok := snAnnouncementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown announcement state %q from ServiceNow", label)
+}
+
+// snCaseLikeStateLabels is the SN raw-label vocabulary this integration
+// understands for every case-like work_item type (case/service_request/
+// engagement/security_report_analysis) whose own state enum -- migrations
+// 000018 (case_state_enum) and 000019 (service_request_state_enum,
+// engagement_state_enum, security_report_analysis_state_enum) -- is spelled
+// identically: WORK_IN_PROGRESS, AWAITING_INFO, SOLUTION_PROPOSED, CLOSED,
+// OPEN, WAITING_ON_WSO2, REOPENED. ServiceNow's create-case response carries
+// state as the same generic {label} shape regardless of case type (see
+// CreateCase's shared stateLabel extraction above), so the raw label set
+// SN can return is the same set snCaseStateMap already documents for "case".
+// Deliberately its own map per type rather than one shared map, per this
+// change's own design brief -- but the source of truth is identical to
+// snCaseStateMap by construction: keep any future addition/edit to one in
+// sync with the others (announcement is the one exception -- its state enum
+// only has OPEN/CLOSE, see snAnnouncementStateMap).
+//
+// Unlike snCaseStateMap, "reopened" maps to its own literal (REOPENED) here
+// rather than to WAITING_ON_WSO2 -- snCaseStateMap's mapping of "reopened" to
+// WaitingOnWSO2 looks like a pre-existing bug in the case path, not
+// intentional behavior worth propagating into these three new maps.
+var snCaseLikeStateLabels = map[string]string{
+	"open":              "OPEN",
+	"work in progress":  "WORK_IN_PROGRESS",
+	"waiting on wso2":   "WAITING_ON_WSO2",
+	"awaiting info":     "AWAITING_INFO",
+	"reopened":          "REOPENED",
+	"solution proposed": "SOLUTION_PROPOSED",
+	"closed":            "CLOSED",
+}
+
+// snServiceRequestStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for a service_request-typed case) to
+// service_request_state_enum's own literal values (migration 000019) --
+// see snCaseLikeStateLabels's own doc comment for why this table is
+// identical to that one.
+var snServiceRequestStateMap = snCaseLikeStateLabels
+
+// snServiceRequestStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created service_request into service_request_state_enum's
+// literal value, for CreateCaseFromServiceNow's service_request branch.
+// Returns an error rather than defaulting to "OPEN" for anything unrecognized
+// -- same fail-closed discipline as snAnnouncementStateToEnum/
+// snCaseStateLabelToEnum.
+func snServiceRequestStateToEnum(label string) (string, error) {
+	if v, ok := snServiceRequestStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown service_request state %q from ServiceNow", label)
+}
+
+// snEngagementStateMap maps ServiceNow's raw state label to
+// engagement_state_enum's own literal values (migration 000019) -- see
+// snCaseLikeStateLabels's own doc comment for why this table is identical to
+// that one.
+var snEngagementStateMap = snCaseLikeStateLabels
+
+// snEngagementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created engagement into engagement_state_enum's literal
+// value, for CreateCaseFromServiceNow's engagement branch. Returns an error
+// rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snEngagementStateToEnum(label string) (string, error) {
+	if v, ok := snEngagementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown engagement state %q from ServiceNow", label)
+}
+
+// snSecurityReportAnalysisStateMap maps ServiceNow's raw state label to
+// security_report_analysis_state_enum's own literal values (migration
+// 000019) -- see snCaseLikeStateLabels's own doc comment for why this table
+// is identical to that one.
+var snSecurityReportAnalysisStateMap = snCaseLikeStateLabels
+
+// snSecurityReportAnalysisStateToEnum converts ServiceNow's raw
+// create-response state label for a newly created security_report_analysis
+// into security_report_analysis_state_enum's literal value, for
+// CreateCaseFromServiceNow's security_report_analysis branch. Returns an
+// error rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snSecurityReportAnalysisStateToEnum(label string) (string, error) {
+	if v, ok := snSecurityReportAnalysisStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown security_report_analysis state %q from ServiceNow", label)
 }
 
 // snSeverityLabel extracts the priority word from SN severity labels like

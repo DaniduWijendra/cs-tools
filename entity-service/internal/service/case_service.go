@@ -40,6 +40,43 @@ type caseService struct {
 	// case.billable_status_changed detection.
 	publisher EventPublisherService
 	access    AccessService
+	// snWriteback/snMirror back CreateCase, UpdateCase, and CreateCaseComment's
+	// ServiceNow-facing paths under DATA_SOURCE=postgres-servicenow-dual-write —
+	// both nil in every other mode. Set only via NewCaseServiceWithSNWriteback
+	// (see that constructor's own doc comment for why not here). snMirror
+	// serves three distinct purposes, all documented at their own call sites:
+	//   - UpdateCase dispatches a best-effort, asynchronous State/Severity/
+	//     WorkState mirror write onto it via snWriteback, through the
+	//     snFieldPatcher interface below (patchCaseFields, a bare PATCH with
+	//     none of UpdateCase's own read/no-op-detection/event-publish side
+	//     effects).
+	//   - CreateCaseComment dispatches a best-effort, asynchronous comment
+	//     mirror write onto it via snWriteback, through the snCommentMirror
+	//     interface below (CreateBareCaseComment, a bare POST with none of
+	//     CreateCaseComment's own state-transition/event side effects).
+	//   - CreateCase calls it directly, synchronously, BEFORE writing to
+	//     Postgres at all — see CreateCase's own doc comment for why create
+	//     is SN-first while update/comment are Postgres-first.
+	snWriteback *SNWritebackDispatcher
+	snMirror    CaseService
+}
+
+// snFieldPatcher is implemented by *snCaseService (see patchCaseFields's own
+// doc comment). A narrow interface — rather than adding patchCaseFields to
+// the full CaseService interface, which every implementer (including the
+// plain, Postgres-backed caseService itself) would then have to satisfy —
+// named exactly for what UpdateCase's mirror needs: a bare PATCH with none of
+// snCaseService.UpdateCase's own read-before-write behavior.
+type snFieldPatcher interface {
+	patchCaseFields(ctx context.Context, caseID string, state *domain.CaseState, severity *domain.CaseSeverity, workState *domain.CaseWorkState) (domain.UpdatedCase, error)
+}
+
+// snCommentMirror is implemented by *snCaseService (see
+// CreateBareCaseComment's own doc comment). A narrow interface for the same
+// reason snFieldPatcher is one: CreateCaseComment's mirror needs a bare
+// POST, not the full CommentService/CaseService surface.
+type snCommentMirror interface {
+	CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error)
 }
 
 // NewCaseService constructs a CaseService backed by the given repositories.
@@ -47,6 +84,28 @@ type caseService struct {
 // scopes GetCaseByID/SearchCases's reads (see AccessService).
 func NewCaseService(repo repository.CaseRepository, userRepo repository.UserRepository, publisher EventPublisherService, access AccessService) CaseService {
 	return &caseService{repo: repo, userRepo: userRepo, publisher: publisher, access: access}
+}
+
+// NewCaseServiceWithSNWriteback is NewCaseService plus the wiring
+// DATA_SOURCE=postgres-servicenow-dual-write needs for its case pilot (see
+// config.DataSourcePostgresServiceNowDualWrite): UpdateCase's best-effort,
+// asynchronous ServiceNow mirror write (WorkState only — see UpdateCase's
+// own doc comment for why), and CreateCase's synchronous, SN-first creation
+// (see CreateCase's own doc comment). A separate constructor rather than
+// extending NewCaseService's own signature: every other call site (every
+// existing test, plus every other DataSource branch in routes.go) keeps
+// working completely unchanged.
+//
+// mirror is the ServiceNow-backed CaseService (from NewServiceNowCaseService)
+// whose CreateCase/UpdateCase perform the real ServiceNow POST/PATCH. It is
+// never made the active CaseService here — reads always stay on Postgres in
+// this mode.
+func NewCaseServiceWithSNWriteback(repo repository.CaseRepository, userRepo repository.UserRepository, publisher EventPublisherService, access AccessService, dispatcher *SNWritebackDispatcher, mirror CaseService) CaseService {
+	return &caseService{
+		repo: repo, userRepo: userRepo, publisher: publisher, access: access,
+		snWriteback: dispatcher,
+		snMirror:    mirror,
+	}
 }
 
 var validCaseSortField = map[domain.CaseSortField]bool{
@@ -249,22 +308,66 @@ func validateCreateCaseRequest(req *domain.CreateCaseRequest) error {
 }
 
 // CreateCase implements CaseService.
+//
+// Under DATA_SOURCE=postgres-servicenow-dual-write (snMirror != nil), this
+// delegates to createCaseSNFirst instead of writing to Postgres directly —
+// see that method's own doc comment for why CREATE is ServiceNow-first and
+// synchronous, unlike UpdateCase's Postgres-first/async WorkState mirror.
 func (s *caseService) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
 	if err := validateCreateCaseRequest(&req); err != nil {
 		return domain.CreateCaseResponse{}, err
 	}
-	if req.Type != "case" {
-		return domain.CreateCaseResponse{}, &apierror.ValidationError{Msg: "only type \"case\" is supported for the Postgres data source"}
+	// announcement/service_request/engagement/security_report_analysis only
+	// exist on the SN-first path (s.snMirror != nil): case_repo's direct
+	// Postgres insert only knows how to write a "CASE" work_item row, so on
+	// a pure-Postgres data source (s.snMirror == nil) these four would either
+	// hit an untyped uuid cast error (announcement's empty deployment id) or
+	// a missing work_item.number generator, both surfacing as an opaque
+	// 500/503 instead of a clean validation error.
+	switch req.Type {
+	case "case":
+		// supported unconditionally
+	case "announcement", "service_request", "engagement", "security_report_analysis":
+		if s.snMirror == nil {
+			return domain.CreateCaseResponse{}, &apierror.ValidationError{Msg: "type \"" + req.Type + "\" is supported only for DATA_SOURCE=postgres-servicenow-dual-write"}
+		}
+	default:
+		return domain.CreateCaseResponse{}, &apierror.ValidationError{Msg: "only type \"case\", \"announcement\", \"service_request\", \"engagement\", or \"security_report_analysis\" is supported for the Postgres data source"}
 	}
 	if err := validateUUIDs("projectId", []string{req.ProjectID}); err != nil {
 		return domain.CreateCaseResponse{}, err
 	}
-	if err := validateUUIDs("deploymentId", []string{req.DeploymentID}); err != nil {
-		return domain.CreateCaseResponse{}, err
+	// Announcements have no deployment/deployed-product concept (same
+	// reasoning as validateCreateCaseRequest's own conditional) -- req.DeploymentID/
+	// req.DeployedProductID are "" for an announcement, which validateUUIDs
+	// would otherwise reject as an invalid UUID. None of the other four types
+	// supported here (case/service_request/engagement/security_report_analysis)
+	// omit deployment/deployed-product.
+	if req.Type != "announcement" {
+		if err := validateUUIDs("deploymentId", []string{req.DeploymentID}); err != nil {
+			return domain.CreateCaseResponse{}, err
+		}
+		if err := validateUUIDs("deployedProductId", []string{req.DeployedProductID}); err != nil {
+			return domain.CreateCaseResponse{}, err
+		}
 	}
-	if err := validateUUIDs("deployedProductId", []string{req.DeployedProductID}); err != nil {
-		return domain.CreateCaseResponse{}, err
+
+	if s.snMirror != nil {
+		return s.createCaseSNFirst(ctx, req)
 	}
+
+	// Only the pure-Postgres path below (no ServiceNow mirror at all) is
+	// genuinely limited to type "case" — it writes directly into the
+	// work_item+"case" tables, which have no equivalent extension table for
+	// engagement/service_request/security_report_analysis/announcement yet
+	// (see CaseRepository's own doc comment). This check used to run before
+	// the snMirror branch above, unconditionally rejecting "announcement"
+	// even when ServiceNow (which does support it — snCaseTypeMap has a real
+	// entry) was about to handle the actual create.
+	if req.Type != "case" {
+		return domain.CreateCaseResponse{}, &apierror.ValidationError{Msg: "only type \"case\" is supported for the Postgres data source"}
+	}
+
 	if req.CreatedBy == "" {
 		token := middleware.UserIDTokenFromContext(ctx)
 		if token == "" {
@@ -297,6 +400,111 @@ func (s *caseService) CreateCase(ctx context.Context, req domain.CreateCaseReque
 			CreatedBy:  c.CreatedBy,
 			CreatedOn:  c.CreatedOn,
 			State:      state,
+		},
+	}, nil
+}
+
+// createCaseSNFirst implements CreateCase's DATA_SOURCE=postgres-servicenow-dual-write
+// path: ServiceNow-FIRST and SYNCHRONOUS — the opposite order from
+// UpdateCase's WorkState mirror (Postgres-first, ServiceNow best-effort and
+// async afterward). That asymmetry is deliberate, not an inconsistency: an
+// async-after-commit CREATE can leave a Postgres row with no ServiceNow
+// counterpart if the background ServiceNow write then fails — a PERMANENT
+// orphan, since every later comment/attachment/state-change on that case has
+// no ServiceNow parent to attach to (ServiceNow is still the real backing
+// store this platform proxies most writes onto). Calling ServiceNow first,
+// and only writing to Postgres once that succeeds, makes that orphan
+// impossible: either both systems end up with the case, or neither does. An
+// UPDATE has no equivalent failure mode — the case already exists in both
+// systems either way, so a failed async mirror write just leaves one field
+// stale until retried, not orphaned.
+//
+// This call is made exactly once, with no internal retry: retrying here
+// risked a worse failure than the one it absorbed. If ServiceNow's create
+// actually succeeds server-side but the HTTP response back to
+// entity-service is lost (timeout/network blip), a retry sends a second
+// CREATE, producing a duplicate case in ServiceNow with Postgres only ever
+// learning about whichever attempt's response happened to come back — an
+// orphan duplicate in ServiceNow. Retry policy belongs to the caller, which
+// knows whether its own request was already reattempted upstream.
+//
+// On success, id/number/wso2ID/createdBy come from ServiceNow's own
+// response and are used AS-IS for the Postgres insert
+// (CaseRepository.CreateCaseFromServiceNow) rather than generated — see
+// that method's own doc comment. This is also what finally makes case
+// creation possible on Postgres at all in this mode:
+// CaseRepository.CreateCase's own doc comment explains why Postgres can't
+// generate work_item.number/wso2_id itself (no sequence was ever added, and
+// the intended format was never decided); ServiceNow being the identity
+// source here sidesteps that unresolved question rather than answering it,
+// which is exactly why this pilot could not have unblocked CreateCase any
+// other way.
+func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+	snResp, err := s.snMirror.CreateCase(ctx, req)
+	if err != nil {
+		// ServiceNow never accepted the case — nothing is written to
+		// Postgres at all, by construction (s.repo.CreateCaseFromServiceNow
+		// is simply never called on this path). No orphan gets created.
+		return domain.CreateCaseResponse{}, err
+	}
+
+	// state resolves ServiceNow's raw create-response state label
+	// (snResp.Case.State, e.g. "Open") to the target extension table's own
+	// state enum literal, for every type on this path other than "case" --
+	// see snAnnouncementStateToEnum/snServiceRequestStateToEnum/
+	// snEngagementStateToEnum/snSecurityReportAnalysisStateToEnum's own doc
+	// comments for why this can't just hardcode 'OPEN' the way the "case"
+	// insert does. Left "" for req.Type == "case", where the repository
+	// ignores it entirely (hardcodes OPEN itself, same as before this change).
+	var state string
+	switch req.Type {
+	case "announcement":
+		state, err = snAnnouncementStateToEnum(snResp.Case.State)
+	case "service_request":
+		state, err = snServiceRequestStateToEnum(snResp.Case.State)
+	case "engagement":
+		state, err = snEngagementStateToEnum(snResp.Case.State)
+	case "security_report_analysis":
+		state, err = snSecurityReportAnalysisStateToEnum(snResp.Case.State)
+	}
+	if err != nil {
+		// ServiceNow already has the record at this point (same drift
+		// concern CreateCaseFromServiceNow's own error path below
+		// documents) -- logged loudly since nothing else records it.
+		slog.ErrorContext(ctx, "sn create case: record created but its ServiceNow state could not be mapped",
+			"caseId", snResp.Case.ID, "snNumber", snResp.Case.Number, "type", req.Type, "snState", snResp.Case.State, "error", err)
+		return domain.CreateCaseResponse{}, err
+	}
+
+	c, err := s.repo.CreateCaseFromServiceNow(ctx, req, snResp.Case.ID, snResp.Case.Number, snResp.Case.InternalID, snResp.Case.CreatedBy, state)
+	if err != nil {
+		// ServiceNow already has the case at this point — this is now real
+		// drift (ServiceNow has it, Postgres doesn't) needing operator
+		// attention, not a safely-rejected request. Logged loudly rather
+		// than only returned, since nothing else records this particular
+		// failure shape (it is not a writeback failure — SNWritebackDispatcher
+		// is for the opposite direction, a Postgres row with no ServiceNow
+		// counterpart — so it has no sn_writeback_failures row either).
+		// Still returned as an error either way: the caller never gets a
+		// usable response from this request regardless.
+		slog.ErrorContext(ctx, "sn create case: ServiceNow case created but the Postgres insert failed",
+			"caseId", snResp.Case.ID, "snNumber", snResp.Case.Number, "error", err)
+		return domain.CreateCaseResponse{}, err
+	}
+
+	responseState := ""
+	if c.State != nil {
+		responseState = string(*c.State)
+	}
+	return domain.CreateCaseResponse{
+		Message: "Case created successfully.",
+		Case: domain.CreateCaseDetails{
+			ID:         c.ID,
+			InternalID: c.InternalID,
+			Number:     c.Number,
+			CreatedBy:  c.CreatedBy,
+			CreatedOn:  c.CreatedOn,
+			State:      responseState,
 		},
 	}, nil
 }
@@ -346,6 +554,42 @@ func (s *caseService) CreateCaseComment(ctx context.Context, req domain.CreateCa
 	if err != nil {
 		return domain.CreateCaseCommentResponse{}, err
 	}
+
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback/snMirror are both nil otherwise — see
+	// NewCaseServiceWithSNWriteback's own doc comment). Postgres has already
+	// committed by this point and is fully authoritative for the comment —
+	// this mirror's ONLY job is making sure ServiceNow's copy of the comment
+	// text exists too. It deliberately does NOT replicate
+	// snCaseService.CreateCaseComment's auto state-transition-on-reply
+	// (applyCustomerReplyStateTransition) or event publishing
+	// (publishCommentAdded) — Postgres already owns the real outcome for
+	// both (note: this Postgres-native CreateCaseComment does not currently
+	// implement state-transition-on-reply at all; that is a separate,
+	// larger feature-parity gap, out of scope here — see
+	// CreateBareCaseComment's own doc comment). Uses CreateBareCaseComment
+	// specifically (not the full CreateCaseComment) so neither side effect
+	// ever fires twice, or fires against ServiceNow for an outcome only
+	// Postgres actually decided.
+	// "activity" comments have no ServiceNow counterpart at all
+	// (CreateBareCaseComment rejects the type outright -- see its own doc
+	// comment) -- this is a permanent, 100%-guaranteed incompatibility, not
+	// a transient failure worth recording for backfill, so skip dispatch
+	// entirely rather than filling sn_writeback_failures with noise nobody
+	// can ever act on.
+	if s.snWriteback != nil && req.Type != domain.CommentTypeActivity {
+		if m, ok := s.snMirror.(snCommentMirror); ok {
+			mirrorCaseID, mirrorType, mirrorContent := req.CaseID, req.Type, req.Content
+			s.snWriteback.Dispatch(ctx, "case_comment", req.CaseID, "create",
+				map[string]any{"caseId": mirrorCaseID, "type": mirrorType, "content": mirrorContent},
+				func(writeCtx context.Context) error {
+					_, err := m.CreateBareCaseComment(writeCtx, mirrorCaseID, mirrorType, mirrorContent)
+					return err
+				},
+			)
+		}
+	}
+
 	return domain.CreateCaseCommentResponse{
 		Message: "Comment created successfully",
 		Comment: domain.CaseCommentDetail{
@@ -450,6 +694,64 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 		s.detectBillableStatusChange(ctx, req.ID, oldSeverity, c.Severity)
 	}
 
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback/snMirror are both nil otherwise — see
+	// NewCaseServiceWithSNWriteback's own doc comment). Postgres has already
+	// committed by this point; this fires after, asynchronously, and never
+	// affects this response. UPDATE stays Postgres-first/async — unlike
+	// CreateCase (see that method's own doc comment for why create is
+	// SN-first/synchronous instead): a failed async mirror write here just
+	// means ServiceNow's copy of an EXISTING, already-created case is stale
+	// on one field until retried by hand, not a permanent orphan the way a
+	// failed async case CREATE would be.
+	//
+	// Covers State/Severity/WorkState — fieldCount above guarantees at most
+	// one of the three is set on req, so exactly one of these three branches
+	// ever fires per call. State/Severity joined this mirror later than
+	// WorkState did: snCaseService.UpdateCase (the ServiceNow-mode method
+	// WorkState originally mirrored through) performs a live GetCaseByID
+	// read against ServiceNow before its PATCH whenever State or Severity is
+	// set, which this mode must never do. patchCaseFields (sn_case_service.go)
+	// is the fix — a bare PATCH with none of UpdateCase's read/no-op-detection/
+	// event-publish behavior — reached here through the snFieldPatcher
+	// interface rather than the full snMirror.UpdateCase this method used to
+	// call for WorkState. Each branch builds its own single-field mirror
+	// request/payload rather than forwarding req itself, so this can never
+	// accidentally carry a second field into the mirror call.
+	if s.snWriteback != nil {
+		if patcher, ok := s.snMirror.(snFieldPatcher); ok {
+			switch {
+			case req.State != nil:
+				state := *req.State
+				s.snWriteback.Dispatch(ctx, "case", req.ID, "update",
+					map[string]any{"id": req.ID, "state": state},
+					func(writeCtx context.Context) error {
+						_, err := patcher.patchCaseFields(writeCtx, req.ID, &state, nil, nil)
+						return err
+					},
+				)
+			case req.Severity != nil:
+				severity := *req.Severity
+				s.snWriteback.Dispatch(ctx, "case", req.ID, "update",
+					map[string]any{"id": req.ID, "severity": severity},
+					func(writeCtx context.Context) error {
+						_, err := patcher.patchCaseFields(writeCtx, req.ID, nil, &severity, nil)
+						return err
+					},
+				)
+			case req.WorkState != nil:
+				workState := *req.WorkState
+				s.snWriteback.Dispatch(ctx, "case", req.ID, "update",
+					map[string]any{"id": req.ID, "workState": workState},
+					func(writeCtx context.Context) error {
+						_, err := patcher.patchCaseFields(writeCtx, req.ID, nil, nil, &workState)
+						return err
+					},
+				)
+			}
+		}
+	}
+
 	return domain.UpdateCaseResponse{
 		Message: "Case updated successfully",
 		Case: domain.UpdatedCase{
@@ -535,6 +837,49 @@ func (s *caseService) detectBillableStatusChange(ctx context.Context, caseID str
 	slog.InfoContext(ctx, "case update: severity crossed the billable boundary, event hub publish not yet enabled", "caseId", caseID, "isBillable", isBillable)
 }
 
+// validateCaseFieldValues rejects malformed ids and unknown enum spellings in the
+// fields a case search accepts both at the top level and inside an anyOf branch,
+// so they fail as a validation error instead of reaching SQL as a cast error.
+func validateCaseFieldValues(g domain.CaseFilterGroup) error {
+	if err := validateUUIDs("projectId", g.ProjectIDs); err != nil {
+		return err
+	}
+	if err := validateUUIDs("deploymentId", g.DeploymentIDs); err != nil {
+		return err
+	}
+	for _, t := range g.Types {
+		if !validCaseType[t] {
+			return &apierror.ValidationError{Msg: "type contains invalid value: " + t}
+		}
+	}
+	for _, st := range g.States {
+		if !validCaseState[st] {
+			return &apierror.ValidationError{Msg: "state contains invalid value: " + string(st)}
+		}
+	}
+	for _, sv := range g.Severities {
+		if !validCaseSeverity[sv] {
+			return &apierror.ValidationError{Msg: "severity contains invalid value: " + string(sv)}
+		}
+	}
+	for _, it := range g.IssueTypes {
+		if !validCaseIssueType[it] {
+			return &apierror.ValidationError{Msg: "issueType contains invalid value: " + string(it)}
+		}
+	}
+	for _, et := range g.EngagementTypes {
+		if !validEngagementType[et] {
+			return &apierror.ValidationError{Msg: "engagementType contains invalid value: " + string(et)}
+		}
+	}
+	for _, ws := range g.WorkStates {
+		if !validCaseWorkState[ws] {
+			return &apierror.ValidationError{Msg: "workState contains invalid value: " + string(ws)}
+		}
+	}
+	return validateUUIDs("assignedUserId", g.AssignedUserIDs)
+}
+
 // SearchCases implements CaseService.
 func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesRequest) (domain.SearchCasesResponse, error) {
 	if err := normalizePagination(&req.Pagination); err != nil {
@@ -551,49 +896,32 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 		return domain.SearchCasesResponse{}, err
 	}
 
-	if err := validateUUIDs("projectId", parsed.ProjectIDs); err != nil {
-		return domain.SearchCasesResponse{}, err
-	}
 	if err := validateUUIDs("projectId", parsed.ExcludeProjectIDs); err != nil {
 		return domain.SearchCasesResponse{}, err
 	}
-	if err := validateUUIDs("deploymentId", parsed.DeploymentIDs); err != nil {
+	// The same checks apply to the top-level fields and to each anyOf branch, so
+	// they live in one function.
+	if err := validateCaseFieldValues(domain.CaseFilterGroup{
+		Types: parsed.Types, States: parsed.States, Severities: parsed.Severities,
+		EngagementTypes: parsed.EngagementTypes, IssueTypes: parsed.IssueTypes,
+		WorkStates: parsed.WorkStates, ProjectIDs: parsed.ProjectIDs,
+		DeploymentIDs: parsed.DeploymentIDs, AssignedUserIDs: parsed.AssignedUserIDs,
+	}); err != nil {
 		return domain.SearchCasesResponse{}, err
 	}
 
-	for _, t := range parsed.Types {
-		if !validCaseType[t] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "type contains invalid value: " + t}
-		}
-	}
-	for _, st := range parsed.States {
-		if !validCaseState[st] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "state contains invalid value: " + string(st)}
-		}
-	}
-	for _, sv := range parsed.Severities {
-		if !validCaseSeverity[sv] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "severity contains invalid value: " + string(sv)}
-		}
-	}
-	for _, it := range parsed.IssueTypes {
-		if !validCaseIssueType[it] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "issueType contains invalid value: " + string(it)}
-		}
-	}
-	for _, et := range parsed.EngagementTypes {
-		if !validEngagementType[et] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "engagementType contains invalid value: " + string(et)}
-		}
-	}
-	for _, ws := range parsed.WorkStates {
-		if !validCaseWorkState[ws] {
-			return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(ws)}
-		}
-	}
-	if err := validateUUIDs("assignedUserId", parsed.AssignedUserIDs); err != nil {
+	// anyOf branches: parse into OR groups (only the ServiceNow adapter did this
+	// before) and validate each branch's values exactly like the top level.
+	orGroups, err := ParseCaseFieldFilterGroups(req.Filters.AnyOf)
+	if err != nil {
 		return domain.SearchCasesResponse{}, err
 	}
+	for _, g := range orGroups {
+		if err := validateCaseFieldValues(g); err != nil {
+			return domain.SearchCasesResponse{}, err
+		}
+	}
+	parsed.OrGroups = orGroups
 
 	if parsed.CreatedByMe {
 		parsed.CreatedBy = append(parsed.CreatedBy, callerEmail)
@@ -620,16 +948,11 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "resolvedOn" is not supported by this data source`}
 	}
 
-	// These fields dot-walk into ServiceNow-specific concepts (tags,
-	// project-onboarding-status, integration-CS-team, etc.) that have no
-	// equivalent in the Postgres schema and no repository query support today.
-	// Reject rather than silently drop the predicate and widen the result set.
-	if len(parsed.Tags) > 0 {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "tag" is not supported by this data source`}
-	}
-	if len(parsed.ExcludeTags) > 0 {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "tag" (notIn) is not supported by this data source`}
-	}
+	// These fields dot-walk into ServiceNow-specific concepts (product family,
+	// project type, integration-CS/SRE team, etc.) that caseRepo.SearchCases has
+	// no query for today. Reject rather than silently drop the predicate and
+	// widen the result set. (tag, projectOnboardingStatus and
+	// taskSLABusinessElapsedPercent are implemented there, so are absent here.)
 	// state+in is supported here; state+notIn has no repository query support,
 	// and dropping an exclusion silently would widen the result set.
 	if len(parsed.ExcludeStates) > 0 {
@@ -640,9 +963,6 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 	}
 	if len(parsed.ProductNames) > 0 {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "product" is not supported by this data source`}
-	}
-	if len(parsed.ProjectOnboardingStatuses) > 0 {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "projectOnboardingStatus" is not supported by this data source`}
 	}
 	if len(parsed.ProjectTypeNames) > 0 {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "projectType" is not supported by this data source`}
@@ -667,30 +987,21 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "resolutionNotes" is not supported by this data source`}
 	}
 
-	// Task-SLA and escalation predicates, OR groups, and grouped counts are
+	// The slaBreached and account-escalation predicates and grouped counts are
 	// implemented only in the ServiceNow case service (snCaseService.SearchCases);
-	// caseRepo.SearchCases models none of them. ParseCaseFieldFilters accepts them
+	// caseRepo.SearchCases models none of them (tag, projectOnboardingStatus,
+	// taskSLABusinessElapsedPercent, escalationLevel, escalation and anyOf, by
+	// contrast, are implemented there and so are deliberately absent from these
+	// guards). ParseCaseFieldFilters accepts them
 	// because it is shared by both data sources, so without these guards a
 	// Postgres deployment would drop the predicate and answer 200 with a wider
 	// result set than the caller asked for. These stay ServiceNow-only by design:
 	// reject loudly rather than implement them here.
-	if parsed.TaskSLAFilter != nil {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "taskSLABusinessElapsedPercent" is not supported by this data source`}
-	}
-	if len(parsed.EscalationLevels) > 0 {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "escalationLevel" is not supported by this data source`}
-	}
-	if parsed.HasActiveEscalation != nil {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "escalation" is not supported by this data source`}
-	}
 	if parsed.HasBreachedSLA != nil {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "slaBreached" is not supported by this data source`}
 	}
 	if parsed.HasActiveAccountEscalation != nil {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "accountEscalationActive" is not supported by this data source`}
-	}
-	if len(req.Filters.AnyOf) > 0 {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "anyOf is not supported by this data source"}
 	}
 	if req.GroupBy != "" {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "groupBy is not supported by this data source"}

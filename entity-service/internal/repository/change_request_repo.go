@@ -64,6 +64,12 @@ import (
 // comment. GetChangeRequestApprovals/DecideChangeRequestApproval also have
 // none: they need per-stage, per-approver approval records, and this schema
 // only has one summary change_request.approval column.
+//
+// CreateChangeRequestFromServiceNow (below) is the exception, same as
+// CaseRepository.CreateCaseFromServiceNow/IncidentRepository.CreateIncidentFromServiceNow:
+// it backs DATA_SOURCE=postgres-servicenow-dual-write's SN-first change
+// request creation, where identity comes from ServiceNow rather than being
+// generated here.
 type ChangeRequestRepository interface {
 	// SearchChangeRequests returns a filtered, sorted, paginated slice of
 	// change requests together with the total count of matching rows
@@ -88,6 +94,55 @@ type ChangeRequestRepository interface {
 	// identified by id, using actorEmail as work_item.updated_by. Returns a
 	// NotFoundError if id does not exist.
 	PatchChangeRequest(ctx context.Context, id string, req domain.PatchChangeRequestRequest, actorEmail string) (domain.ChangeRequest, error)
+	// CreateChangeRequestFromServiceNow inserts a new change request row
+	// (both work_item and change_request), for
+	// DATA_SOURCE=postgres-servicenow-dual-write's SN-first change request
+	// creation (see changeRequestService.createChangeRequestSNFirst's own doc
+	// comment). Unlike CaseRepository.CreateCaseFromServiceNow, no wso2ID
+	// parameter exists here: work_item.wso2_id is only required (by the
+	// work_item_wso2_id_required_by_type CHECK constraint, migration 000016)
+	// for CASE/SERVICE_REQUEST/ANNOUNCEMENT/ENGAGEMENT/
+	// SECURITY_REPORT_ANALYSIS -- CHANGE_REQUEST is deliberately excluded
+	// from that list (the same table's own inline comment: "change_request
+	// work items have no wso2_id data"), and ServiceNow's own change-request
+	// create response (snCreateChangeRequestResponse) has no equivalent
+	// field to supply one from anyway. id/number/createdBy are exactly what
+	// ServiceNow already returned for the change request it just created.
+	// id must be a canonical UUID (sysidToUUID(sn sys_id)). Returns a
+	// ValidationError if id is not a valid UUID, if req.Type has no
+	// change_model equivalent, or if a row already exists for id/number
+	// (unique violation) -- the latter should not happen in practice since
+	// ServiceNow only just generated these, but is reported precisely
+	// rather than as an opaque infrastructure error if it ever does.
+	//
+	// change_request.state is deliberately left NULL (the column has no
+	// NOT NULL/DEFAULT, unlike incident_state_enum's NOT NULL DEFAULT
+	// 'NEW'): snCreateChangeRequestResponse carries no state field at all,
+	// so unlike req.Category/Priority/Risk/Impact (plain request-supplied
+	// values ServiceNow's create payload already forwards verbatim and this
+	// method can echo back with equal confidence), the state ServiceNow's
+	// workflow engine actually assigned after evaluating req.State (if any)
+	// is never confirmed by the response -- writing req.State straight
+	// through would risk recording a value ServiceNow silently overrode.
+	// See CreateProblemFromServiceNow's own doc comment for the contrasting
+	// case, where the response DOES return a confirmed, identity-matching
+	// state.
+	//
+	// Only fields with an unambiguous, already-established column/enum
+	// mapping are written. Deliberately NOT applied, for the same
+	// no-backing-column/no-confirmed-mapping reasons this file's own
+	// package doc comment and changeRequestWhereClause's already give:
+	// req.ConfigurationItemID (no CMDB table), req.GroupID (no
+	// assignment-group mapping established for change_request -- see this
+	// file's own package doc comment on AssignedTeamID), req.Category (four
+	// of ChangeRequestCategory's thirteen values -- RegularReleaseCloud/
+	// HotfixReleaseCloud/DevOps/CloudComputing -- have no
+	// change_request_category_enum label, and PatchChangeRequest itself
+	// does not attempt this mapping either), req.EnvironmentIDs/
+	// req.DeploymentProductIDs (no M2M join tables exist for either), and
+	// req.Comment/req.WorkNote (ServiceNow journal entries, no backing
+	// column).
+	CreateChangeRequestFromServiceNow(ctx context.Context, req domain.CreateChangeRequestRequest, id, number, createdBy string) (domain.CreateChangeRequestResponse, error)
 }
 
 type changeRequestRepo struct {
@@ -158,6 +213,15 @@ var changeRequestTypeToChangeModel = func() map[domain.ChangeRequestType]string 
 	}
 	return m
 }()
+
+// ChangeRequestTypeSupported reports whether t has a change_model label,
+// i.e. whether CreateChangeRequestFromServiceNow can persist it. Exported so
+// the service layer can reject an unsupported type before, not after, the
+// ServiceNow-first create -- see createChangeRequestSNFirst's own comment.
+func ChangeRequestTypeSupported(t domain.ChangeRequestType) bool {
+	_, ok := changeRequestTypeToChangeModel[t]
+	return ok
+}
 
 // scanChangeRequestView scans changeRequestSelectColumns into a
 // SearchChangeRequestView. Duration is never set here -- see this file's
@@ -731,4 +795,109 @@ func (r *changeRequestRepo) PatchChangeRequest(ctx context.Context, id string, r
 	}
 
 	return r.GetChangeRequestByID(ctx, wiID)
+}
+
+// createChangeRequestFromServiceNowQuery inserts both halves of a change
+// request row (work_item + change_request, the same shared-primary-key
+// pattern createCaseFromServiceNowQuery/createIncidentFromServiceNowQuery
+// document) in one round trip via a CTE, using caller-supplied identity
+// (id/number/createdBy) rather than generating any of it -- see
+// CreateChangeRequestFromServiceNow's own doc comment for why, and for which
+// req fields are deliberately left unwritten. type is hardcoded to
+// 'CHANGE_REQUEST'::work_item_type_enum. change_request.state is left NULL
+// -- see CreateChangeRequestFromServiceNow's own doc comment for why, unlike
+// incident's reliance on a NOT NULL DEFAULT column.
+//
+// Column/output order matches the trailing SELECT exactly.
+const createChangeRequestFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, subject, description, type, assigned_to_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, $5, 'CHANGE_REQUEST'::work_item_type_enum, $6::uuid
+		)
+		RETURNING id, number, subject, created_on, updated_on, created_by
+	),
+	inserted_change_request AS (
+		INSERT INTO change_request (
+			id, service_id, service_offering_id, impact, risk, priority, change_model,
+			justification, implementation_plan, risk_impact_analysis, backout_plan, test_plan,
+			start_on, end_on, requested_by_user_id, customer_group_id,
+			is_planning_visible_to_customers, affected_services, affected_component, rollback_duration
+		)
+		VALUES (
+			$1, $7::uuid, $8::uuid, $9::change_request_impact_enum, $10::change_request_risk_enum,
+			$11::change_request_priority_enum, $12::change_request_change_model_enum,
+			$13, $14, $15, $16, $17,
+			$18::text::timestamptz, $19::text::timestamptz, $20::uuid, $21::uuid,
+			$22, $23, $24, $25
+		)
+		RETURNING id
+	)
+	SELECT iwi.id, iwi.number, iwi.subject, iwi.created_on, iwi.updated_on, iwi.created_by
+	FROM inserted_work_item iwi
+	JOIN inserted_change_request icr ON icr.id = iwi.id`
+
+// CreateChangeRequestFromServiceNow implements ChangeRequestRepository.
+func (r *changeRequestRepo) CreateChangeRequestFromServiceNow(ctx context.Context, req domain.CreateChangeRequestRequest, id, number, createdBy string) (domain.CreateChangeRequestResponse, error) {
+	var changeModel *string
+	if req.Type != nil {
+		v, ok := changeRequestTypeToChangeModel[*req.Type]
+		if !ok {
+			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("type %q is not supported on the PostgreSQL data source", *req.Type)}
+		}
+		changeModel = &v
+	}
+
+	var impact, risk, priority *string
+	if req.Impact != nil {
+		v := strings.ToUpper(string(*req.Impact))
+		impact = &v
+	}
+	if req.Risk != nil {
+		v := strings.ToUpper(string(*req.Risk))
+		risk = &v
+	}
+	if req.Priority != nil {
+		v := strings.ToUpper(string(*req.Priority))
+		priority = &v
+	}
+
+	var (
+		outID, outNumber, outSubject, outCreatedBy string
+		outCreatedOn, outUpdatedOn                 time.Time
+	)
+	err := r.db.QueryRow(ctx, createChangeRequestFromServiceNowQuery,
+		id, createdBy,
+		number, req.Subject, req.Description, req.AssignedEngineerID,
+		req.ServiceID, req.ServiceOfferingID, impact, risk, priority, changeModel,
+		req.Justification, req.ImplementationPlan, req.RiskImpactAnalysis, req.BackoutPlan, req.TestPlan,
+		req.PlannedStartDate, req.PlannedEndDate, req.RequestedByID, req.CustomerGroupID,
+		req.IsPlanningVisibleToCustomers, req.AffectedServicesText, req.AffectedComponentsText, req.RollbackDurationText,
+	).Scan(&outID, &outNumber, &outSubject, &outCreatedOn, &outUpdatedOn, &outCreatedBy)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505": // unique_violation on id/number -- see this method's own doc comment for why this "shouldn't" happen
+				return domain.CreateChangeRequestResponse{}, &apierror.ConflictError{Msg: "a change request already exists for this ServiceNow id/number: " + pgErr.Detail}
+			case "22P02": // invalid_text_representation -- id (or another uuid/enum-typed field) was not valid
+				return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "id is not a valid UUID: " + id}
+			case "23503": // foreign_key_violation -- one of the referenced IDs does not exist
+				return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "one or more referenced IDs do not exist: " + pgErr.Detail}
+			case "P0001": // raise_exception from integrity triggers
+				return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: pgErr.Message}
+			}
+		}
+		return domain.CreateChangeRequestResponse{}, fmt.Errorf("create change request from servicenow: %w", err)
+	}
+
+	resp := domain.CreateChangeRequestResponse{Message: "Change request created successfully."}
+	resp.ChangeRequest.ID = outID
+	resp.ChangeRequest.Number = outNumber
+	resp.ChangeRequest.CreatedOn = outCreatedOn.UTC().Format(time.RFC3339)
+	resp.ChangeRequest.CreatedBy = outCreatedBy
+	return resp, nil
 }

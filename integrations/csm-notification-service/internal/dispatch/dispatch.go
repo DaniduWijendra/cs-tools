@@ -330,13 +330,16 @@ func (d *Dispatcher) Handle(ctx context.Context, record eventbus.Record) error {
 		return d.handleCRApprovalRequested(ctx, record, env.Payload)
 	case events.TypeCRPlanDateNotice:
 		return d.handleCRPlanDateNotice(ctx, record, env.Payload)
-	case events.TypeSLAClockRegister, events.TypeSLATierReached:
-		// internal/slaengine's own consumer group (a different group ID, so
-		// it gets its own full copy of this same topic) is what reacts to
-		// these — nothing for the notification dispatcher to do. Returning
-		// nil (not an error) is required here: erroring would burn this
-		// consumer's retries and dead-letter an event that was never broken,
-		// just not this consumer's concern.
+	case events.TypeSLATierReached:
+		// Published by internal/slaengine's own Engine.Tick (a poller, not
+		// a consumer of this topic) — nothing here reacts to it yet; it
+		// exists for whatever future notification or other system consumes
+		// it. Declared in KnownTypes/Validate so a malformed one is still
+		// rejected, but this dispatcher's own main/DLQ consumers get a full
+		// copy of this topic too and must not dead-letter a record that
+		// simply isn't their concern — returning nil (not an error) is
+		// required here: erroring would burn this consumer's retries for an
+		// event that was never broken.
 		return nil
 	case events.TypeCaseBillableStatusChanged:
 		// internal/timecardengine's own consumer group (a different group

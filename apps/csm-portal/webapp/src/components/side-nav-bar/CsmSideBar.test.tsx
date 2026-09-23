@@ -40,6 +40,14 @@ function lastActiveItem(): string | undefined {
 }
 
 const navigateMock = vi.fn();
+vi.mock("@context/current-user/CurrentUserContext", () => ({
+  useCurrentUser: () => ({
+    user: { roles: ["support_engineer"] },
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
+}));
 vi.mock("@hooks/useNavTransition", () => ({
   useNavTransition: () => navigateMock,
 }));

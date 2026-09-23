@@ -139,15 +139,18 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 
 // authorizeProject refuses a caller who may not act on this project.
 //
-// The scoped reads in this package push the caller's AccessScope down into the
-// query, so the scope predicate and the row lookup happen together. That works
-// for a read; it does not for a write or for a call that leaves the service
-// entirely (the Choreo provisioning sequence), which have no such predicate to
-// attach to. Those check membership here instead, before doing anything.
+// Two kinds of endpoint need this. A by-id read takes the project id straight
+// from the request path, so validating only that the project EXISTS lets
+// anyone read any project's data by id -- an IDOR. And a write, or a call that
+// leaves the service entirely (the Choreo provisioning sequence), has nothing
+// to attach a scope predicate to in the first place. Scoped list endpoints get
+// this for free by folding the caller's AccessScope into their WHERE clause;
+// these check membership here instead, before doing anything.
 //
-// Refused as not-found, not forbidden: a caller who cannot see a project must
-// not be able to learn it exists by comparing 403 against 404 — the same
-// reasoning as the scope predicates in the project and case repositories.
+// Refused as NotFound, never Forbidden, matching GetProjectByID/GetCaseByID: a
+// 403 would confirm the project exists to someone not entitled to know that.
+// Scope is resolved before any existence lookup, so the two cases are not
+// distinguishable by timing either.
 //
 // projectID is compared case-insensitively. Postgres renders uuid values in
 // lower case, but the id here comes from the request path, and a caller who

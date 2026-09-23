@@ -43,14 +43,18 @@ const (
 // User represents a single user entity as stored in the database.
 // Phone and Timezone are optional and omitted from JSON when absent.
 type User struct {
-	ID        string    `json:"id"`
-	UserName  string    `json:"userName"`
-	FirstName string    `json:"firstName"`
-	LastName  string    `json:"lastName"`
-	Email     string    `json:"email"`
-	Phone     *string   `json:"phone"`
-	Timezone  *string   `json:"timezone"`
-	UserType  UserType  `json:"userType"`
+	ID        string   `json:"id"`
+	UserName  string   `json:"userName"`
+	FirstName string   `json:"firstName"`
+	LastName  string   `json:"lastName"`
+	Email     string   `json:"email"`
+	Phone     *string  `json:"phone"`
+	Timezone  *string  `json:"timezone"`
+	UserType  UserType `json:"userType"`
+	// Roles are the names of the roles assigned through user_role, sorted, and
+	// always non-nil ([] when none) in a user search result. Only user search
+	// fills it in; other lookups leave it nil.
+	Roles     []string  `json:"roles"`
 	CreatedOn time.Time `json:"createdOn"`
 	UpdatedOn time.Time `json:"updatedOn"`
 }
@@ -133,6 +137,59 @@ type SearchUsersResponse struct {
 	HasMore bool   `json:"hasMore"`
 }
 
+// SavedFilterListKey identifies which CSM list a filter belongs to.
+// The frontend owns the query-string codec per list; this service only
+// isolates stores so filters never leak across lists.
+type SavedFilterListKey string
+
+const (
+	SavedFilterListKeyCases          SavedFilterListKey = "cases"
+	SavedFilterListKeyIncidents      SavedFilterListKey = "incidents"
+	SavedFilterListKeyChangeRequests SavedFilterListKey = "change_requests"
+	SavedFilterListKeyProblems       SavedFilterListKey = "problems"
+)
+
+// MaxSavedFilterViews is the cap per (user, list_key), matching the
+// previous localStorage client.
+const MaxSavedFilterViews = 50
+
+// SavedFilterMoveDirection is up/down in display order (filter_position 0 is first).
+type SavedFilterMoveDirection string
+
+const (
+	SavedFilterMoveUp   SavedFilterMoveDirection = "up"
+	SavedFilterMoveDown SavedFilterMoveDirection = "down"
+)
+
+// SavedFilterView is a named bookmark of a list URL query string. qs is
+// opaque — the frontend already serializes/parses it; this service must not
+// interpret filter fields.
+type SavedFilterView struct {
+	Name string `json:"name"`
+	Qs   string `json:"qs"`
+}
+
+// SavedFilterViewList is the ordered list of filters for one list_key
+// (array order is display order; filter_position 0 is first).
+type SavedFilterViewList struct {
+	Views []SavedFilterView `json:"views"`
+}
+
+// SaveSavedFilterViewRequest is PUT /users/me/saved-filter-views. Same-name
+// overwrite is case-insensitive; a new name is inserted at the front.
+type SaveSavedFilterViewRequest struct {
+	ListKey SavedFilterListKey `json:"listKey"`
+	Name    string             `json:"name"`
+	Qs      string             `json:"qs"`
+}
+
+// ReorderSavedFilterViewRequest is POST /users/me/saved-filter-views/reorder.
+type ReorderSavedFilterViewRequest struct {
+	ListKey   SavedFilterListKey       `json:"listKey"`
+	Name      string                   `json:"name"`
+	Direction SavedFilterMoveDirection `json:"direction"`
+}
+
 // SNUser is the user view returned by the ServiceNow data source.
 type SNUser struct {
 	ID       string  `json:"id"`
@@ -204,6 +261,57 @@ type UserProjectAccess struct {
 	NotificationsEnabled bool     `json:"notificationsEnabled"`
 	Roles                []string `json:"roles"`
 	GrantsCaseAccess     bool     `json:"grantsCaseAccess"`
+}
+
+// UserDetail is a single user's profile on the Postgres data source: the user row
+// plus role, group and (for customers) project-contact information.
+//
+// It is deliberately not SNUserDetail. That type always sends lockedOut, timeZone
+// and per-project notificationsEnabled, which this schema has no column for, and
+// the CSM page shows "Locked out: No" whenever lockedOut is present, so reusing it
+// would state something this data source cannot know. Those fields are omitted
+// here instead.
+type UserDetail struct {
+	ID       string   `json:"id"`
+	UserName string   `json:"userName"`
+	Name     string   `json:"name"`
+	Email    string   `json:"email"`
+	UserType UserType `json:"userType,omitempty"`
+	// Active is false only when user.is_active is explicitly FALSE (a NULL counts
+	// as active, matching how the rest of this schema treats an unset flag).
+	Active    bool      `json:"active"`
+	CreatedOn time.Time `json:"createdOn"`
+	UpdatedOn time.Time `json:"updatedOn"`
+	Roles     []string  `json:"roles"`
+	// Groups are the teams the user belongs to (team_member). Which of them are
+	// registry teams is the caller's determination.
+	Groups []UserGroupRef `json:"groups"`
+	// ProjectAccess is populated for customers (user_type EXTERNAL) only.
+	ProjectAccess []UserContactAccess `json:"projectAccess,omitempty"`
+}
+
+// UserContactAccess is one project_contact row for a customer, reported as stored
+// rather than as filtered, so a caller can see why a contact does or does not
+// reach a project's cases.
+type UserContactAccess struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	ProjectKey  string `json:"projectKey"`
+	// ContactEmail is the email the row was invited under.
+	ContactEmail string `json:"contactEmail"`
+	// ContactRecordPresent is false when the row has no account_contact linked.
+	ContactRecordPresent bool `json:"contactRecordPresent"`
+	// ContactRecordEmail is the linked account_contact's own user name (its
+	// login email), which can differ from ContactEmail (20 of 357 rows in staging).
+	ContactRecordEmail string `json:"contactRecordEmail,omitempty"`
+	// RegistrationState is project_contact.state (INVITED, REGISTERED, ...).
+	RegistrationState string `json:"registrationState"`
+	// Roles are the contact's project roles (PORTAL_USER, SECURITY_CONTACT, ...),
+	// through project_contact_group -> project_group_role -> project_role.
+	Roles []string `json:"roles"`
+	// GrantsCaseAccess is the rule this service actually enforces when it scopes a
+	// customer's projects and cases: the contact is REGISTERED.
+	GrantsCaseAccess bool `json:"grantsCaseAccess"`
 }
 
 // SearchSNUsersResponse is the paginated result of a ServiceNow user search.
@@ -361,7 +469,13 @@ const (
 	SalesforceEventRestored  = "RESTORED"
 	SalesforceEventUndefined = "UNDEFINED"
 	SalesforceEntityAccount  = "Account"
-	SalesforceSyncActor      = "salesforce-sync"
+	// SalesforceEntityProjectContact is the Project_Contact__c custom object
+	// (a contact's membership of a project). SalesforceEntityProjectContactAlt
+	// is accepted too in case the publisher drops the __c suffix.
+	SalesforceEntityProjectContact    = "Project_Contact__c"
+	SalesforceEntityProjectContactAlt = "Project_Contact"
+	SalesforceEntityContact           = "Contact"
+	SalesforceSyncActor               = "salesforce-sync"
 )
 
 // SalesforceEventRequest is the ASB envelope POSTed to /salesforce/events.
@@ -390,6 +504,159 @@ type SalesforceAccountUpsert struct {
 	Classification            *string
 	TechnicalOwnerID          *string
 	SecondaryTechnicalOwnerID *string
+}
+
+// Salesforce Project_Contact__c states, as stored in Salesforce State__c and
+// in project_contact.state (project_contact_state_enum).
+const (
+	MembershipStateInvited     = "INVITED"
+	MembershipStateRegistered  = "REGISTERED"
+	MembershipStateReInvited   = "RE-INVITED"
+	MembershipStateDeactivated = "DEACTIVATED"
+)
+
+// Salesforce Contact_Type__c values on Project_Contact__c.
+const (
+	MembershipTypeOwnContact     = "OWN CONTACT"
+	MembershipTypePartnerContact = "PARTNER CONTACT"
+)
+
+// SalesforceMembershipUpsert is one Salesforce Project_Contact__c, mapped and
+// resolved by the ingest service, ready to be written by
+// repository.ProjectMembershipRepository.Upsert. The repository resolves the
+// existing rows by natural keys (project key / sf_id, account sf_id, contact
+// email) and stamps every Salesforce id it touches, so a replay of the same
+// membership is idempotent. GlobalRoles / ProjectGroups / ManagedAdminRoles
+// are already mapped from the Salesforce roles by the service (see
+// mapGlobalRoles / mapProjectGroups) — the repository only resolves names to
+// rows.
+type SalesforceMembershipUpsert struct {
+	MembershipSfID string
+	State          string
+	Type           string
+	// Email is the invited address stored on project_contact.email.
+	Email string
+
+	ContactSfID         string
+	ContactEmail        string
+	ContactName         string
+	ContactFirstName    string
+	ContactLastName     string
+	ContactAccountSfID  string
+	IsCsAdmin           bool
+	IsCsIntegrationUser bool
+
+	ProjectSfID string
+	ProjectKey  string
+
+	// GlobalRoles are the role.name values the user must hold after the upsert
+	// (e.g. external, customer, customer_admin). Roles not listed here and not
+	// in ManagedAdminRoles are left untouched.
+	GlobalRoles []string
+	// ManagedAdminRoles are the role.name values the ingest owns exclusively
+	// (customer_admin, partner_admin): any of these the user holds but which
+	// are absent from GlobalRoles are revoked.
+	ManagedAdminRoles []string
+	// ProjectGroups are the project_group."group" names the membership must be
+	// in after the upsert; every other group membership of this project
+	// contact is removed.
+	ProjectGroups []string
+}
+
+// SalesforceMembershipUpsertResult reports what the upsert resolved or created.
+type SalesforceMembershipUpsertResult struct {
+	ProjectID             string
+	AccountID             string
+	UserID                string
+	AccountContactID      string
+	ProjectContactID      string
+	CreatedUser           bool
+	CreatedAccountContact bool
+	CreatedProjectContact bool
+}
+
+// OnboardingStepName is the onboarding_step.step enum: one row per membership
+// per step, the latest outcome of that step.
+type OnboardingStepName string
+
+const (
+	OnboardingStepIdentity     OnboardingStepName = "IDENTITY"
+	OnboardingStepDatabase     OnboardingStepName = "DATABASE"
+	OnboardingStepEmail        OnboardingStepName = "EMAIL"
+	OnboardingStepRegistration OnboardingStepName = "REGISTRATION"
+)
+
+// OnboardingStepStatus is the onboarding_step.status enum.
+type OnboardingStepStatus string
+
+const (
+	OnboardingStepSucceeded OnboardingStepStatus = "SUCCEEDED"
+	OnboardingStepFailed    OnboardingStepStatus = "FAILED"
+	OnboardingStepSkipped   OnboardingStepStatus = "SKIPPED"
+)
+
+// OnboardingStep is one row of onboarding_step — see migration
+// 000075_onboarding_step_table for the column semantics.
+type OnboardingStep struct {
+	ID               string               `json:"id"`
+	MembershipSfID   string               `json:"membershipSfId"`
+	ContactSfID      *string              `json:"contactSfId"`
+	Email            string               `json:"email"`
+	ProjectID        *string              `json:"projectId"`
+	ProjectContactID *string              `json:"projectContactId"`
+	Step             OnboardingStepName   `json:"step"`
+	Status           OnboardingStepStatus `json:"status"`
+	AttemptCount     int                  `json:"attemptCount"`
+	LastError        *string              `json:"lastError"`
+	EventType        string               `json:"eventType"`
+	EventModifiedOn  time.Time            `json:"eventModifiedOn"`
+	CreatedOn        time.Time            `json:"createdOn"`
+	UpdatedOn        time.Time            `json:"updatedOn"`
+}
+
+// UpsertOnboardingStepRequest is the body of
+// PUT /onboarding-steps/{membershipSfId}/{step}. The membership id and the
+// step come from the path (json:"-"). Repeating the call for the same
+// membership + step updates the row and increments attemptCount.
+type UpsertOnboardingStepRequest struct {
+	MembershipSfID   string               `json:"-"`
+	Step             OnboardingStepName   `json:"-"`
+	Status           OnboardingStepStatus `json:"status"`
+	LastError        *string              `json:"lastError"`
+	EventType        string               `json:"eventType"`
+	EventModifiedOn  time.Time            `json:"eventModifiedOn"`
+	Email            string               `json:"email"`
+	ContactSfID      *string              `json:"contactSfId"`
+	ProjectID        *string              `json:"projectId"`
+	ProjectContactID *string              `json:"projectContactId"`
+	// UpdatedBy is set by the service, not the caller.
+	UpdatedBy string `json:"-"`
+}
+
+// OnboardingStepFilters narrows POST /onboarding-steps/search.
+type OnboardingStepFilters struct {
+	ProjectID       *string                `json:"projectId"`
+	MembershipSfIDs []string               `json:"membershipSfIds"`
+	Statuses        []OnboardingStepStatus `json:"statuses"`
+}
+
+// SearchOnboardingStepsRequest is the body of POST /onboarding-steps/search.
+type SearchOnboardingStepsRequest struct {
+	Filters    OnboardingStepFilters `json:"filters"`
+	Pagination Pagination            `json:"pagination"`
+}
+
+// SearchOnboardingStepsResponse is the paginated result of a step search.
+type SearchOnboardingStepsResponse struct {
+	Steps  []OnboardingStep `json:"steps"`
+	Total  int              `json:"total"`
+	Limit  int              `json:"limit"`
+	Offset int              `json:"offset"`
+}
+
+// GetOnboardingStepsResponse is the body of GET /onboarding-steps/{membershipSfId}.
+type GetOnboardingStepsResponse struct {
+	Steps []OnboardingStep `json:"steps"`
 }
 
 // SubscriptionType classifies the subscription type of a project.
@@ -607,6 +874,37 @@ type SearchProjectsRequest struct {
 	// SubRegion filters to projects whose linked account is in this sub-region
 	// (ServiceNow data source only).
 	SubRegion string `json:"subRegion"`
+	// ExcludeClosureStates filters out projects whose closure state (see
+	// ProjectClosureFields.ClosureState — "Open"/"Suspended"/"Restricted") is
+	// any of the given values, e.g. ["Restricted", "Suspended"]. Unlike
+	// ClosureStatus above, there is no upstream ServiceNow filter parameter for
+	// excluding a set of states, so the ServiceNow data source applies this by
+	// paging through every match and filtering in Go, not by passing it through
+	// as a request filter. The Postgres data source applies it as a real SQL
+	// filter instead, against the project.wso2_closure_state column (case-
+	// insensitive — see project_repo.go's SearchProjects).
+	ExcludeClosureStates []string `json:"excludeClosureStates,omitempty"`
+	// ExcludeSubscriptionTypes filters out projects whose subscription type is
+	// any of the given values, e.g. ["cloud_support", "cloud_evaluation_support"].
+	// Same "no upstream filter, applied in Go" caveat as ExcludeClosureStates
+	// for the ServiceNow data source. The Postgres data source applies it as a
+	// real SQL filter against project_type.name (migrations 000026/000027,
+	// joined via project.project_type_id -- the same ServiceNow project
+	// "type" reference field, normalized the same way
+	// snTypeNameToSubscriptionType normalizes it) -- a project with no
+	// project_type_id set is never excluded, same NULL-permissive
+	// semantics as ExcludeClosureStates (see project_repo.go's
+	// SearchProjects).
+	ExcludeSubscriptionTypes []SubscriptionType `json:"excludeSubscriptionTypes,omitempty"`
+	// ExcludeProjectKeys filters out projects whose Key (see ProjectView.Key)
+	// is any of the given values, e.g. ["APEXIA", "VERIDIAN"] — a caller-
+	// supplied denylist by project key, unrelated to closure state or
+	// subscription type. Same "no upstream filter, applied in Go" caveat as
+	// ExcludeClosureStates for the ServiceNow data source; the Postgres data
+	// source applies it as a real SQL filter against project.key instead.
+	// Matching is exact and case-sensitive (project keys are opaque
+	// identifiers, not display text).
+	ExcludeProjectKeys []string `json:"excludeProjectKeys,omitempty"`
 }
 
 // ProjectSearchAccountRef is the account reference embedded in a project
@@ -1274,6 +1572,44 @@ type SearchDeployedProductsResponse struct {
 	Limit            int                   `json:"limit"`
 	Offset           int                   `json:"offset"`
 	HasMore          bool                  `json:"hasMore"`
+}
+
+// SearchProjectsByProductVersionRequest resolves which projects are running a
+// given product version — the reverse of SearchDeployedProductsRequest's own
+// DeploymentIDs filter, which starts from already-known deployments rather
+// than a product/version. Needed for EOL/product-version-targeted
+// announcements: there is no existing query path from "product X, version Y"
+// back to the projects running it. Supported on both data sources: Postgres
+// resolves it directly via deployed_product.project_id (migration 000014's
+// FK straight to project), ServiceNow via a platform-wide deployment scan
+// (see that data source's own implementation).
+//
+// The result is always restricted to projects eligible for an announcement
+// at all (excluding Restricted/Suspended closure states and Cloud Support/
+// Cloud Evaluation Support subscriptions) — this is not a caller-supplied
+// filter. It mirrors the real ServiceNow flow this replaces ("DRY RUN -
+// Create [EOL] Product Announcements"), whose own first step applies this
+// exact same exclusion unconditionally, with no way for whoever triggers
+// the flow to opt out of it. See SearchProjectsByProductVersion's own doc
+// comment in the service layer for how it's applied.
+type SearchProjectsByProductVersionRequest struct {
+	Pagination       Pagination `json:"pagination"`
+	ProductID        string     `json:"productId"`
+	ProductVersionID string     `json:"productVersionId"`
+}
+
+// SearchProjectsByProductVersionResponse is the paginated result. Each
+// project is only {id, name} — the deployment-to-project join this resolves
+// from only ever carries that much. A caller needing key/account/tier for
+// display can resolve those separately per project id via
+// SearchProjectsRequest/GetProjectByID; enriching them here would require a
+// second, more expensive call per result.
+type SearchProjectsByProductVersionResponse struct {
+	Projects []EntityRef `json:"projects"`
+	Total    int         `json:"total"`
+	Limit    int         `json:"limit"`
+	Offset   int         `json:"offset"`
+	HasMore  bool        `json:"hasMore"`
 }
 
 // CreateDeployedProductRequest is the input for POST /deployed-products.
@@ -6216,117 +6552,464 @@ type SearchEventPublishFailuresResponse struct {
 	HasMore  bool                  `json:"hasMore"`
 }
 
-// SLAClock is the durable record of one SLA timer running against a case —
-// e.g. a "response" or "resolution" clock started when the case was created
-// (or last had its severity change reset it), due at a fixed point, with up
-// to three tier-crossing timestamps recorded as an SLA timer engine (see
-// integrations/csm-notification-service's internal/slaengine) observes 50%,
-// 75%, and 100% of the duration elapse. ClockType is a caller-defined string,
-// not a fixed enum here — which clock types exist, and what duration each
-// gets, is a policy decision made entirely by whatever publishes the
-// triggering sla.clock.register event; this service only stores the result.
+// SNWritebackFailure is the durable record of one failed best-effort
+// ServiceNow mirror write under DATA_SOURCE=postgres-servicenow-dual-write
+// (see config.DataSourcePostgresServiceNowDualWrite and
+// service.SNWritebackDispatcher). Postgres has already committed by the
+// time this is written — this table exists purely so an operator can see,
+// and manually replay, exactly what ServiceNow is missing before treating
+// it as a live rollback target. No retry logic reads this table today; it
+// is triage bookkeeping, the same role EventPublishFailure plays for Event
+// Hub.
 //
 // Like EventPublishFailure, this has no ServiceNow equivalent and is always
-// backed by Postgres regardless of DATA_SOURCE (see internal/db/postgres.go)
-// — CaseID is a plain string, not a foreign key to a local cases row, since a
-// ServiceNow-backed case has none.
-type SLAClock struct {
-	CaseID    string    `json:"caseId"`
-	ClockType string    `json:"clockType"`
-	StartedOn time.Time `json:"startedOn"`
-	DueOn     time.Time `json:"dueOn"`
-	// PausedOn is currently never set by any endpoint below — the column and
-	// this field exist so a future pause/resume feature has somewhere to
-	// land, and so SLATimerEngine's tier-scan can already skip a paused
-	// clock once one exists, without a schema change at that point. No
-	// omitempty: absent must serialize as JSON null, not be omitted.
-	PausedOn     *time.Time `json:"pausedOn"`
-	Reached50On  *time.Time `json:"reached50On"`
-	Reached75On  *time.Time `json:"reached75On"`
-	Reached100On *time.Time `json:"reached100On"`
-	// The eight fields below are display-only, populated once at
-	// registration time from the case's own state then — not re-derived
-	// later, so State/Priority in particular can go stale relative to the
-	// case's actual current values by the time a breach fires. Nothing here
-	// participates in scheduling or breach logic; they exist purely so
-	// GET .../sla-clocks/{clockType} can supply everything
-	// csm-notification-service's slaengine needs to build a Google Chat
-	// breach card without a second lookup at tick time, since that service
-	// has no other way to reach case data.
-	CaseNumber string `json:"caseNumber,omitempty"`
-	WSO2CaseID string `json:"wso2CaseId,omitempty"`
-	CaseTitle  string `json:"caseTitle,omitempty"`
-	CaseType   string `json:"caseType,omitempty"`
-	Product    string `json:"product,omitempty"`
-	Team       string `json:"team,omitempty"`
-	Priority   string `json:"priority,omitempty"`
-	State      string `json:"state,omitempty"`
+// backed by Postgres regardless of DATA_SOURCE (see internal/db/postgres.go).
+type SNWritebackFailure struct {
+	ID         string          `json:"id"`
+	EntityType string          `json:"entityType"`
+	EntityID   string          `json:"entityId"`
+	Operation  string          `json:"operation"`
+	Payload    json.RawMessage `json:"payload"`
+	// Error is the writeFn-returned reason the ServiceNow mirror write
+	// failed (e.g. a timeout or a downstream error message) — for a human
+	// triaging this table, not machine-parsed by anything.
+	Error     string    `json:"error"`
+	CreatedOn time.Time `json:"createdOn"`
 }
 
-// RegisterSLAClockRequest is the request body for
-// POST /cases/{caseId}/sla-clocks. CaseID is injected from the path, not
-// supplied in the body. Registering a clock that already exists for this
-// (caseId, clockType) pair resets it from scratch — started_at/due_at are
-// overwritten and paused_at/reached_*_at are all cleared — mirroring the
-// rule that a severity change (or any other reason to re-baseline a clock)
-// wipes and rebuilds it rather than adjusting it in place.
-type RegisterSLAClockRequest struct {
-	CaseID    string    `json:"-"`
-	ClockType string    `json:"clockType"`
-	StartedAt time.Time `json:"startedAt"`
-	DueAt     time.Time `json:"dueAt"`
-	// The eight fields below are optional display data — see SLAClock's own
-	// doc comment for what they're for and why they're a point-in-time
-	// snapshot, not kept live.
-	CaseNumber string `json:"caseNumber,omitempty"`
-	WSO2CaseID string `json:"wso2CaseId,omitempty"`
-	CaseTitle  string `json:"caseTitle,omitempty"`
-	CaseType   string `json:"caseType,omitempty"`
-	Product    string `json:"product,omitempty"`
-	Team       string `json:"team,omitempty"`
-	Priority   string `json:"priority,omitempty"`
-	State      string `json:"state,omitempty"`
+// CreateSNWritebackFailureRequest is the input to
+// SNWritebackFailureRepository.Create.
+type CreateSNWritebackFailureRequest struct {
+	EntityType string          `json:"entityType"`
+	EntityID   string          `json:"entityId"`
+	Operation  string          `json:"operation"`
+	Payload    json.RawMessage `json:"payload"`
+	Error      string          `json:"error"`
 }
 
-// SLATierStatus is the value of SetSLAClockTierRequest.Status.
-// SLATierStatusReached is the only valid value today — modeled as an enum
-// rather than a bare boolean or an action verb in the URL so a future
-// status (e.g. a manual override) can be added without a breaking change
-// to this request's shape.
-type SLATierStatus string
-
-const SLATierStatusReached SLATierStatus = "reached"
-
-// SetSLAClockTierRequest is the request body for
-// PATCH /cases/{caseId}/sla-clocks/{clockType}/tiers/{tier}.
-type SetSLAClockTierRequest struct {
-	Status SLATierStatus `json:"status"`
-}
-
-// SetSLAClockTierReachedResponse is the response body for
-// PATCH /cases/{caseId}/sla-clocks/{clockType}/tiers/{tier}.
-// ReachedOn is the timestamp now stored for that tier — either just written
-// by this call, or the pre-existing value if the tier was already reached
-// (the operation is idempotent; see the repository's SetTierReachedIfUnset).
-// AlreadyReached distinguishes those two cases: false means this call is
-// the one that just wrote ReachedOn; true means it was already set by an
-// earlier call.
+// SLAStatus is one case-like work item's current standing against one SLA
+// policy target (response/workaround/resolution), read live from the "sla"
+// table ServiceNow's own SLA engine populates via sync — not a value this
+// service computes or schedules itself. Replaces the old, hand-registered
+// "sla_clocks" table (a stand-in built before real SLA data existed in
+// Postgres, using a hardcoded severity->duration guess): see CLAUDE.md's
+// "SLA status now reads the real sla table" section for the full history.
 //
-// AlreadyReached reflects only the database claim, not whether any
-// caller's downstream reaction to winning that claim (e.g. publishing a
-// notification) ever actually succeeded. Gating a reaction on
-// AlreadyReached being false is a real, valid choice when duplicate-free
-// behavior matters more than guaranteed delivery — integrations/csm-notification-service's
-// internal/slaengine.Engine does exactly this (see that repo's CLAUDE.md
-// for its full reasoning) — but it's a trade-off: a caller whose own
-// reaction failed after it won the claim will, on retry, see
-// AlreadyReached=true and skip the reaction forever, having never
-// completed it once. Only rely on this field to gate a reaction if that
-// residual risk is acceptable, or if the reaction's own completion is
-// tracked durably and separately instead.
-type SetSLAClockTierReachedResponse struct {
-	ReachedOn      time.Time `json:"reachedOn"`
-	AlreadyReached bool      `json:"alreadyReached"`
+// ClockType is "response"/"workaround"/"resolution" — sla_policy.target
+// lower-cased, kept as a plain string (not a fixed Go enum) so it stays the
+// same wire vocabulary integrations/csm-notification-service's own
+// clockType handling already expects.
+type SLAStatus struct {
+	CaseID                 string  `json:"caseId"`
+	ClockType              string  `json:"clockType"`
+	BusinessElapsedPercent float64 `json:"businessElapsedPercent"`
+	// HasBreached mirrors sla.has_breached, ServiceNow's own verdict — not
+	// re-derived from BusinessElapsedPercent here, even though the two agree
+	// in every row checked so far (>=100% exactly where has_breached is
+	// true): this field is what should be trusted if that ever changes.
+	HasBreached bool `json:"hasBreached"`
+	// IsPaused is sla.stage = 'PAUSED' (is_active stays true while paused —
+	// see the "sla" table's own migration comment on the stage enum).
+	IsPaused bool `json:"isPaused"`
+	// StartedOn is sla.start_on — nullable because ServiceNow leaves it unset
+	// on some real rows. No omitempty: absent must serialize as JSON null.
+	StartedOn *time.Time `json:"startedOn"`
+	// The eight fields below are the same display-only shape SLAClock's
+	// retired display fields carried, still populated live off the case's
+	// current data (not a point-in-time snapshot, unlike the old design) —
+	// see SearchSLAStatusResponse's own doc comment for why csm-notification-service
+	// still needs them supplied here rather than looking them up itself.
+	CaseNumber string `json:"caseNumber,omitempty"`
+	WSO2CaseID string `json:"wso2CaseId,omitempty"`
+	CaseTitle  string `json:"caseTitle,omitempty"`
+	CaseType   string `json:"caseType,omitempty"`
+	Product    string `json:"product,omitempty"`
+	Team       string `json:"team,omitempty"`
+	Priority   string `json:"priority,omitempty"`
+	State      string `json:"state,omitempty"`
+}
+
+// SearchSLAStatusResponse is the response for GET /sla-status — every
+// currently-active (sla.is_active = true) clock across every case-like work
+// item, paginated. integrations/csm-notification-service polls this
+// periodically and diffs BusinessElapsedPercent against what it already
+// alerted on (see that repo's internal/slaengine) rather than this service
+// pushing individual tier-crossing notifications — this service has no
+// scheduling of its own now that there's nothing to schedule: the "sla" row
+// this reads already reflects ServiceNow's own SLA computation, pauses
+// included, with no separate due-date arithmetic to get out of sync.
+type SearchSLAStatusResponse struct {
+	Statuses []SLAStatus `json:"statuses"`
+	Total    int         `json:"total"`
+	Limit    int         `json:"limit"`
+	Offset   int         `json:"offset"`
+}
+
+// AnnouncementRequestState is the lifecycle state of an announcement_requests
+// row. Like SLAClock and EventPublishFailure, this entity has no ServiceNow
+// equivalent and is always backed by Postgres regardless of DATA_SOURCE.
+//
+//	draft             Editable. May have a recorded dry run (see
+//	                   AnnouncementRequest.DryRunCaseID) but nothing has been
+//	                   sent for approval yet.
+//	pending_approval  Content locked; ResolvedProjectIDs is frozen (taken at
+//	                   the moment of submission — not re-resolved later).
+//	                   Approval itself happens entirely outside this
+//	                   service, over email; this state only means "waiting
+//	                   for that reply." Editing while in this state reverts
+//	                   to draft (see AnnouncementRequestService.Update) —
+//	                   the content is out for real review, so a silent
+//	                   change under the reviewer isn't safe.
+//	approved          A human has said yes over email and whoever is
+//	                   working the request called Approve. Unlike
+//	                   pending_approval, editing here does NOT revert state
+//	                   — subject/description may still be tweaked in place
+//	                   (the frozen ResolvedProjectIDs snapshot never
+//	                   changes) since the decision has already been made.
+//	published         MarkPublished has been called. This service never
+//	                   creates the real per-project cases itself — that
+//	                   fan-out is the caller's job, unchanged from before
+//	                   this entity existed. This state only records that it
+//	                   happened, by whom, and when.
+type AnnouncementRequestState string
+
+const (
+	AnnouncementRequestStateDraft           AnnouncementRequestState = "draft"
+	AnnouncementRequestStatePendingApproval AnnouncementRequestState = "pending_approval"
+	AnnouncementRequestStateApproved        AnnouncementRequestState = "approved"
+	AnnouncementRequestStatePublished       AnnouncementRequestState = "published"
+)
+
+// AnnouncementRequestKind distinguishes which of the two announcement create
+// flows an announcement_requests row backs — the audience is resolved
+// completely differently for each (see AnnouncementRequest.AudienceDefinition),
+// but the state machine and every other field is shared.
+type AnnouncementRequestKind string
+
+const (
+	AnnouncementRequestKindCustomer AnnouncementRequestKind = "customer"
+	AnnouncementRequestKindEOL      AnnouncementRequestKind = "eol"
+)
+
+// AnnouncementRequest is a draft, in-review, or approved announcement that
+// has not yet been published. It exists purely to carry an announcement
+// through draft -> pending_approval -> approved -> published while the real
+// approval decision happens over email, outside this service entirely (see
+// AnnouncementRequestState's own doc comment for the full state machine).
+//
+// AudienceDefinition is whichever shape the caller's own create form
+// already builds — {scope, excludeCloudTypes, excludeClosedStates,
+// projectIds} for the customer flow, {productId, productVersionId} for EOL
+// — stored opaquely (this service does not interpret it) so a draft can be
+// re-opened and re-edited without re-deriving anything. ResolvedProjectIDs
+// is a *different* thing: the actual resolved project id list, computed and
+// frozen by the caller (with whatever exclusions it applies) at the moment
+// of Submit — never re-resolved later, since that's the version the
+// dry-run link and the approval email actually describe.
+type AnnouncementRequest struct {
+	ID                     string                   `json:"id"`
+	Kind                   AnnouncementRequestKind  `json:"kind"`
+	State                  AnnouncementRequestState `json:"state"`
+	Subject                string                   `json:"subject"`
+	Description            string                   `json:"description"`
+	IsSecurityAnnouncement bool                     `json:"isSecurityAnnouncement"`
+	AudienceDefinition     json.RawMessage          `json:"audienceDefinition"`
+	// ResolvedProjectIDs and ResolvedProjectCount are nil/unset until Submit
+	// has been called — see the struct's own doc comment.
+	ResolvedProjectIDs   []string   `json:"resolvedProjectIds,omitempty"`
+	ResolvedProjectCount *int       `json:"resolvedProjectCount,omitempty"`
+	DryRunCaseID         *string    `json:"dryRunCaseId,omitempty"`
+	DryRunAt             *time.Time `json:"dryRunAt,omitempty"`
+	DryRunBy             *string    `json:"dryRunBy,omitempty"`
+	CreatedBy            string     `json:"createdBy"`
+	// CreatedByEmail/SubmittedByEmail/ApprovedByEmail/PublishedByEmail are
+	// display-only companions to their own *By id field (the IdP's stable
+	// per-account "userid", opaque and not human-readable — see
+	// csm-portal-backend's middleware.UserInfo.UserID) — captured from that
+	// same actor's resolved email at the moment of each action, purely so
+	// the portal can show something readable instead of that raw id. The
+	// *By field itself remains the actual identity used for every
+	// creator-only check (Publish/AddUpdate) and must never be replaced by
+	// email — an address can change ownership or get reused in a way a
+	// stable account id can't. Nil for any row written before this field
+	// existed, or if the caller didn't supply one.
+	CreatedByEmail   *string    `json:"createdByEmail,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	SubmittedBy      *string    `json:"submittedBy,omitempty"`
+	SubmittedByEmail *string    `json:"submittedByEmail,omitempty"`
+	SubmittedAt      *time.Time `json:"submittedAt,omitempty"`
+	ApprovedBy       *string    `json:"approvedBy,omitempty"`
+	ApprovedByEmail  *string    `json:"approvedByEmail,omitempty"`
+	ApprovedAt       *time.Time `json:"approvedAt,omitempty"`
+	PublishedBy      *string    `json:"publishedBy,omitempty"`
+	PublishedByEmail *string    `json:"publishedByEmail,omitempty"`
+	PublishedAt      *time.Time `json:"publishedAt,omitempty"`
+	// PublishedCaseIDs is nil/unset until MarkPublished — the real case id
+	// created for each project in ResolvedProjectIDs, self-reported by the
+	// same creator-only caller MarkPublished restricts this transition to
+	// (see that method's own doc comment). This is what lets a later update
+	// (see AnnouncementRequestUpdate) target the exact cases this
+	// announcement actually created, instead of re-deriving them.
+	PublishedCaseIDs []string `json:"publishedCaseIds,omitempty"`
+	// DueOn is set once, automatically, by Submit (now + one month) — purely
+	// informational display in this slice, never enforced or acted on by
+	// this service. Nil for any row that hasn't been submitted yet.
+	DueOn *time.Time `json:"dueOn,omitempty"`
+	// ScheduledFor is set/cleared only via Schedule, never by Update — when
+	// non-nil and this row is approved, operations/csm-scheduled-tasks'
+	// "publish_scheduled_announcements" sub-cron publishes it automatically
+	// once this time arrives, exactly as if a human had clicked Publish.
+	// Left as-is after MarkPublished (a harmless historical value — the
+	// ReadyForScheduledPublish search filter already excludes anything not
+	// approved).
+	ScheduledFor *time.Time `json:"scheduledFor,omitempty"`
+}
+
+// CreateAnnouncementRequestRequest creates a new announcement_requests row
+// in state draft. CreatedBy is the caller-resolved actor id — this service
+// is called server-to-server (by csm-portal-backend, which is the one that
+// actually authenticates the browser user), so unlike the CSM-native
+// entities reachable directly from a browser (cases, comments, attachments),
+// there is no token to resolve an actor from here; the caller supplies it
+// directly, the same convention SLAClock/ScheduledTaskRun/EventPublishFailure
+// already established for this class of entity.
+type CreateAnnouncementRequestRequest struct {
+	Kind                   AnnouncementRequestKind `json:"kind"`
+	Subject                string                  `json:"subject"`
+	Description            string                  `json:"description"`
+	IsSecurityAnnouncement bool                    `json:"isSecurityAnnouncement"`
+	AudienceDefinition     json.RawMessage         `json:"audienceDefinition"`
+	CreatedBy              string                  `json:"createdBy"`
+	// CreatedByEmail is optional — see AnnouncementRequest.CreatedByEmail's
+	// own doc comment for what it's for. A caller that can't resolve one
+	// (or an older caller not yet updated for this field) simply leaves it
+	// empty; CreatedBy remains the real, required identity.
+	CreatedByEmail string `json:"createdByEmail,omitempty"`
+}
+
+// UpdateAnnouncementRequestRequest edits an announcement_requests row's own
+// content. Every field is optional — only non-nil fields are applied. What
+// actually happens depends entirely on the row's *current* state when this
+// arrives (see AnnouncementRequestService.Update's own doc comment); the
+// caller does not choose the behavior, the current state does.
+type UpdateAnnouncementRequestRequest struct {
+	Subject                *string         `json:"subject,omitempty"`
+	Description            *string         `json:"description,omitempty"`
+	IsSecurityAnnouncement *bool           `json:"isSecurityAnnouncement,omitempty"`
+	AudienceDefinition     json.RawMessage `json:"audienceDefinition,omitempty"`
+	// ActorID is who performed this edit — recorded nowhere on the row
+	// itself today (there's no "last edited by" field), but required so a
+	// future audit addition doesn't need a wire-contract change, and so a
+	// pending_approval -> draft revert (see Update's doc comment) has a
+	// consistent actor-required shape with every other transition below.
+	ActorID string `json:"actorId"`
+}
+
+// ScheduleAnnouncementRequestRequest sets or clears an approved request's
+// automatic-publish time — a dedicated action endpoint, not folded into the
+// generic Update, so it never interacts with that method's own
+// state-branching logic (see AnnouncementRequestService.Update's doc
+// comment). ScheduledFor nil unambiguously means "clear the schedule" here,
+// since setting/clearing that one field is this endpoint's entire job —
+// unlike Update, where nil already means "leave unchanged" for every field.
+type ScheduleAnnouncementRequestRequest struct {
+	ScheduledFor *time.Time `json:"scheduledFor"`
+	ActorID      string     `json:"actorId"`
+	ActorEmail   string     `json:"actorEmail,omitempty"`
+}
+
+// RecordAnnouncementDryRunRequest records that a dry run has been completed
+// for this request — CaseID is the real case id the caller's own dry-run
+// mechanism already created (this service does not create it, does not
+// validate that it exists, and does not know what "dry run" even means
+// beyond "a case id the caller is vouching for"). Recording one is what
+// Submit's own precondition checks for (see AnnouncementRequestService.Submit).
+type RecordAnnouncementDryRunRequest struct {
+	CaseID  string `json:"caseId"`
+	ActorID string `json:"actorId"`
+}
+
+// SubmitAnnouncementRequestRequest moves a draft to pending_approval.
+// ResolvedProjectIDs is the audience snapshot to freeze — computed and
+// exclusion-filtered by the caller (see the BFF's own submit handler, which
+// applies the mandatory excluded-project-key denylist before calling this),
+// never re-derived by this service from AudienceDefinition. An empty slice
+// is rejected (a submission with nothing to send to is not a valid state).
+type SubmitAnnouncementRequestRequest struct {
+	ResolvedProjectIDs []string `json:"resolvedProjectIds"`
+	ActorID            string   `json:"actorId"`
+	// ActorEmail is optional — see AnnouncementRequest.CreatedByEmail's own
+	// doc comment for what it's for.
+	ActorEmail string `json:"actorEmail,omitempty"`
+}
+
+// AnnouncementRequestActorRequest is the minimal request shape for a
+// transition that needs nothing but who's performing it — Approve uses
+// this. MarkPublished does not (see PublishAnnouncementRequestRequest):
+// it needs the created case ids too.
+type AnnouncementRequestActorRequest struct {
+	ActorID string `json:"actorId"`
+	// ActorEmail is optional — see AnnouncementRequest.CreatedByEmail's own
+	// doc comment for what it's for.
+	ActorEmail string `json:"actorEmail,omitempty"`
+}
+
+// PublishAnnouncementRequestRequest moves approved -> published.
+// CaseIDs is the real case id created for each project in the request's own
+// ResolvedProjectIDs, from the caller's own fan-out (see
+// domain.AnnouncementRequest.PublishedCaseIDs's own doc comment for the
+// trust model). A ValidationError is returned if it's empty — a "published"
+// request this service can't later target with an update is not a useful
+// state to be in.
+type PublishAnnouncementRequestRequest struct {
+	ActorID string   `json:"actorId"`
+	CaseIDs []string `json:"caseIds"`
+	// ActorEmail is optional — see AnnouncementRequest.CreatedByEmail's own
+	// doc comment for what it's for.
+	ActorEmail string `json:"actorEmail,omitempty"`
+}
+
+// AnnouncementRequestUpdate is one dated follow-up comment applied, after
+// the fact, to every case a published announcement request created — e.g.
+// a correction the CS/Security team asks to have appended. Mirrors
+// ServiceNow's own "Announcement Update with Comments" flow (see that
+// flow's own doc reference), except targeting AnnouncementRequest's real,
+// stored PublishedCaseIDs instead of a fragile short-description/
+// created-date-range match. Append-only — there is no edit/delete for one
+// of these once posted, the same audit-log shape comment/work_item_activity
+// already use elsewhere in this schema.
+type AnnouncementRequestUpdate struct {
+	ID                    string `json:"id"`
+	AnnouncementRequestID string `json:"announcementRequestId"`
+	Content               string `json:"content"`
+	CreatedBy             string `json:"createdBy"`
+	// CreatedByEmail is optional — see AnnouncementRequest.CreatedByEmail's
+	// own doc comment for what it's for.
+	CreatedByEmail *string `json:"createdByEmail,omitempty"`
+	// CreatedOn (not CreatedAt) -- this is a new type, added after this
+	// codebase's timestamp fields were standardized on the "On" suffix for
+	// both the DB column and the JSON wire field (see CLAUDE.md's "Domain
+	// types" section) -- unlike AnnouncementRequest's own older CreatedAt
+	// etc., which only got the DB-column half of that fix to avoid an
+	// unrelated wire-contract break.
+	CreatedOn time.Time `json:"createdOn"`
+}
+
+// CreateAnnouncementRequestUpdateRequest posts a new AnnouncementRequestUpdate.
+// This only records that the update happened, by whom and when, and what it
+// said — same "does not itself create any cases/comments" separation of
+// concerns as MarkPublished; the caller's own fan-out is what actually
+// applies Content as a comment on every PublishedCaseIDs case, separately,
+// after this call succeeds.
+type CreateAnnouncementRequestUpdateRequest struct {
+	Content string `json:"content"`
+	ActorID string `json:"actorId"`
+	// ActorEmail is optional — see AnnouncementRequest.CreatedByEmail's own
+	// doc comment for what it's for.
+	ActorEmail string `json:"actorEmail,omitempty"`
+}
+
+// SearchAnnouncementRequestUpdatesResponse lists every update posted for one
+// announcement request, newest first. No pagination: an announcement
+// realistically receives at most a handful of these over its lifetime, not
+// a volume that needs paging through.
+type SearchAnnouncementRequestUpdatesResponse struct {
+	Updates []AnnouncementRequestUpdate `json:"updates"`
+}
+
+// SearchAnnouncementRequestsRequest filters announcement_requests. State and
+// CreatedBy are both optional; omitting both returns every row (subject to
+// pagination) — there is no default filter, unlike some other search
+// endpoints in this service, since every caller of this endpoint so far
+// (the registry page's "Pending" tab) needs to choose its own filter
+// explicitly rather than inherit an implicit one.
+type SearchAnnouncementRequestsRequest struct {
+	State     *AnnouncementRequestState `json:"state,omitempty"`
+	CreatedBy *string                   `json:"createdBy,omitempty"`
+	// ReadyForScheduledPublish, when true, ignores State and instead matches
+	// every approved row whose ScheduledFor is set and has already arrived
+	// (scheduled_for <= now()) — the one query
+	// operations/csm-scheduled-tasks' "publish_scheduled_announcements"
+	// sub-cron needs. Mutually exclusive with State (ambiguous otherwise).
+	ReadyForScheduledPublish bool       `json:"readyForScheduledPublish,omitempty"`
+	Pagination               Pagination `json:"pagination"`
+}
+
+type SearchAnnouncementRequestsResponse struct {
+	Requests []AnnouncementRequest `json:"requests"`
+	Total    int                   `json:"total"`
+	Limit    int                   `json:"limit"`
+	Offset   int                   `json:"offset"`
+	HasMore  bool                  `json:"hasMore"`
+}
+
+// AnnouncementRequestDeliveryStatus is the outcome of one project's attempt
+// within an announcement request's Publish fan-out. There is no "pending"
+// value — a project with no recorded delivery yet simply has no row (see
+// AnnouncementRequestDelivery's own doc comment).
+type AnnouncementRequestDeliveryStatus string
+
+const (
+	// AnnouncementRequestDeliveryStatusSucceeded means the case was created
+	// and (for a security announcement) its mandatory tag attached.
+	AnnouncementRequestDeliveryStatusSucceeded AnnouncementRequestDeliveryStatus = "succeeded"
+	// AnnouncementRequestDeliveryStatusTagFailed means the case was created
+	// but attaching the mandatory security-announcement tag failed — the
+	// case is real (CaseID is set), but a retry must reattach the tag
+	// directly rather than creating a second case for the same project.
+	AnnouncementRequestDeliveryStatusTagFailed AnnouncementRequestDeliveryStatus = "tag_failed"
+	// AnnouncementRequestDeliveryStatusFailed means the case itself was
+	// never created — a retry must attempt case creation again.
+	AnnouncementRequestDeliveryStatusFailed AnnouncementRequestDeliveryStatus = "failed"
+)
+
+// AnnouncementRequestDelivery is the durable record of one project's outcome
+// within an announcement request's own Publish fan-out — see this table's
+// own migration (000081) doc comment for the full "why" (replacing purely
+// in-memory retry tracking that was lost if the dialog closed mid-retry).
+// No ServiceNow equivalent — always backed by Postgres.
+type AnnouncementRequestDelivery struct {
+	ID                    string `json:"id"`
+	AnnouncementRequestID string `json:"announcementRequestId"`
+	ProjectID             string `json:"projectId"`
+	// CaseID is set for Succeeded and TagFailed (the case is real either
+	// way), nil for Failed.
+	CaseID       *string                           `json:"caseId,omitempty"`
+	Status       AnnouncementRequestDeliveryStatus `json:"status"`
+	ErrorMessage *string                           `json:"errorMessage,omitempty"`
+	CreatedOn    time.Time                         `json:"createdOn"`
+	UpdatedOn    time.Time                         `json:"updatedOn"`
+}
+
+// RecordAnnouncementRequestDeliveryInput is one project's outcome within a
+// RecordAnnouncementRequestDeliveriesRequest batch.
+type RecordAnnouncementRequestDeliveryInput struct {
+	ProjectID    string                            `json:"projectId"`
+	CaseID       *string                           `json:"caseId,omitempty"`
+	Status       AnnouncementRequestDeliveryStatus `json:"status"`
+	ErrorMessage *string                           `json:"errorMessage,omitempty"`
+}
+
+// RecordAnnouncementRequestDeliveriesRequest records (upserts) the outcome
+// of one Publish fan-out pass — one input per project attempted in that
+// pass, not the full resolved audience (a pass that only retried failures
+// need not resend every already-succeeded project's own unchanged row).
+// Batched into one call per pass (not one call per project) because the
+// scenario this exists to fix is the dialog closing *between* passes, not a
+// mid-pass browser crash — see the hook using this for the full reasoning.
+type RecordAnnouncementRequestDeliveriesRequest struct {
+	ActorID    string                                   `json:"actorId"`
+	Deliveries []RecordAnnouncementRequestDeliveryInput `json:"deliveries"`
+}
+
+// SearchAnnouncementRequestDeliveriesResponse lists every delivery recorded
+// for one announcement request — at most one row per resolved project, no
+// particular order guaranteed beyond what the repository returns. No
+// pagination: a request's own resolved audience is already bounded by
+// whatever practical limit an announcement's project count has.
+type SearchAnnouncementRequestDeliveriesResponse struct {
+	Deliveries []AnnouncementRequestDelivery `json:"deliveries"`
 }
 
 // ScheduledTaskRun is the durable record of one attempted period of a
@@ -6507,7 +7190,7 @@ type LookupAlertIncidentMappingsRequest struct {
 
 // LookupAlertIncidentMappingsResponse is the response body for
 // POST /alert-incident-mappings/lookup. Mappings is most-recent-first
-// (ORDER BY created_at DESC) and empty (never null) when nothing matches —
+// (ORDER BY created_on DESC) and empty (never null) when nothing matches —
 // absence is a valid result for a lookup, not a 404.
 type LookupAlertIncidentMappingsResponse struct {
 	Mappings []AlertIncidentMappingView `json:"mappings"`

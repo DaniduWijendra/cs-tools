@@ -845,7 +845,23 @@ func (s *snIncidentService) CreateIncident(ctx context.Context, req domain.Creat
 // Any failure is logged and does not fail CreateIncident itself: the
 // incident already exists in ServiceNow by this point.
 func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req domain.CreateIncidentRequest, incidentID string) {
-	if s.publisher == nil {
+	publishIncidentCreatedEvent(ctx, s.publisher, req, incidentID)
+}
+
+// publishIncidentCreatedEvent is publishIncidentCreated's actual body,
+// factored out to a package-level function so
+// incidentService.createIncidentSNFirst (DATA_SOURCE=postgres-servicenow-dual-write)
+// can call it too, AFTER its own Postgres insert succeeds, rather than
+// relying on snIncidentService's own automatic publish -- which fires right
+// after the ServiceNow POST returns, before that Postgres insert has even
+// been attempted. A consumer could otherwise receive incident.created for an
+// incident the Postgres-backed read API (the only one live in this mode)
+// cannot yet, or ever, return -- CodeRabbit correctly flagged this on PR
+// #1922. publisher may be nil (e.g. the dual-write mirror instance is
+// constructed with publisher=nil specifically so its own CreateIncident
+// never double-publishes -- see routes.go's incident DataSource wiring).
+func publishIncidentCreatedEvent(ctx context.Context, publisher EventPublisherService, req domain.CreateIncidentRequest, incidentID string) {
+	if publisher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishIncidentCreatedTimeout)
@@ -864,7 +880,7 @@ func (s *snIncidentService) publishIncidentCreated(ctx context.Context, req doma
 		slog.ErrorContext(ctx, "sn create incident: encode incident.created payload failed", "incidentId", incidentID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeIncidentCreated, incidentID, payload); err != nil {
+	if err := publisher.Publish(ctx, events.TypeIncidentCreated, incidentID, payload); err != nil {
 		// Not logging err itself: it can carry a raw Event Hub client error
 		// (potentially including connection/broker details), and this
 		// service's own convention is to log only ids and sanitised

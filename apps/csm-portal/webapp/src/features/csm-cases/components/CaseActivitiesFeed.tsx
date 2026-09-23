@@ -24,6 +24,7 @@ import {
   Menu,
   MenuItem,
   Paper,
+  Tooltip,
   Typography,
 } from "@wso2/oxygen-ui";
 import {
@@ -627,17 +628,28 @@ export default function CaseActivitiesFeed({
                             Preview
                           </Button>
                         )}
-                      {onDownloadAttachment && (
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          startIcon={<Download size={14} />}
-                          onClick={() => onDownloadAttachment(e.attachment)}
-                          aria-label={`Download ${e.attachment.filename}`}
-                        >
-                          Download
-                        </Button>
-                      )}
+                      <Tooltip
+                        title={
+                          onDownloadAttachment
+                            ? ""
+                            : "You don't have permission to download attachments."
+                        }
+                      >
+                        <Box component="span">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<Download size={14} />}
+                            onClick={() =>
+                              onDownloadAttachment?.(e.attachment)
+                            }
+                            disabled={!onDownloadAttachment}
+                            aria-label={`Download ${e.attachment.filename}`}
+                          >
+                            Download
+                          </Button>
+                        </Box>
+                      </Tooltip>
                     </Box>
                   </Box>
                 </Paper>

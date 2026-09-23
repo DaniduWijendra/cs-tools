@@ -151,6 +151,76 @@ func TestConfig_Validate_InvalidDataSource(t *testing.T) {
 	}
 }
 
+// baseValidPostgresServiceNowDualWriteConfig returns a minimally valid Config
+// for DATA_SOURCE=postgres-servicenow-dual-write: both a full database (reads
+// and writes are always Postgres-authoritative in this mode) AND full
+// ServiceNow integration service credentials (the best-effort mirror write
+// goes there) are required.
+func baseValidPostgresServiceNowDualWriteConfig() Config {
+	c := baseValidConfig()
+	c.DataSource = DataSourcePostgresServiceNowDualWrite
+	c.ServiceNowIntegrationServiceBaseURL = "https://example.com"
+	c.ServiceNowIntegrationServiceTokenURL = "https://example.com/token"
+	c.ServiceNowIntegrationServiceClientID = "client-id"
+	c.ServiceNowIntegrationServiceClientSecret = "client-secret"
+	return c
+}
+
+func TestConfig_Validate_PostgresServiceNowDualWriteIsValid(t *testing.T) {
+	c := baseValidPostgresServiceNowDualWriteConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected error for a fully configured postgres-servicenow-dual-write source: %v", err)
+	}
+}
+
+// TestConfig_Validate_PostgresServiceNowDualWriteRequiresDBFields guards the
+// "Postgres is authoritative" half of the new mode: unlike plain
+// DATA_SOURCE=servicenow, the DB cannot be dropped here.
+func TestConfig_Validate_PostgresServiceNowDualWriteRequiresDBFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+	}{
+		{"missing DBUser", func(c *Config) { c.DBUser = "" }},
+		{"missing DBPassword", func(c *Config) { c.DBPassword = "" }},
+		{"missing DBName", func(c *Config) { c.DBName = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := baseValidPostgresServiceNowDualWriteConfig()
+			tt.mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("Validate() = nil, want an error when %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestConfig_Validate_PostgresServiceNowDualWriteRequiresIntegrationServiceFields
+// guards the "ServiceNow mirror write" half: unlike plain
+// DATA_SOURCE=postgres, the SN integration service credentials cannot be
+// dropped here — Dispatch has nowhere to send the mirror write without them.
+func TestConfig_Validate_PostgresServiceNowDualWriteRequiresIntegrationServiceFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+	}{
+		{"missing base URL", func(c *Config) { c.ServiceNowIntegrationServiceBaseURL = "" }},
+		{"missing token URL", func(c *Config) { c.ServiceNowIntegrationServiceTokenURL = "" }},
+		{"missing client ID", func(c *Config) { c.ServiceNowIntegrationServiceClientID = "" }},
+		{"missing client secret", func(c *Config) { c.ServiceNowIntegrationServiceClientSecret = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := baseValidPostgresServiceNowDualWriteConfig()
+			tt.mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("Validate() = nil, want an error when %s", tt.name)
+			}
+		})
+	}
+}
+
 func TestConfig_Validate_RequiresDBFields(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -280,7 +350,7 @@ func TestConfig_Validate_ServiceNowDatabaseIsOptional(t *testing.T) {
 
 // TestConfig_Validate_ServiceNowAcceptsAFullDatabase covers the other valid
 // servicenow shape — a database IS configured, so event_publish_failures and
-// sla_clocks stay available.
+// sla-status stay available.
 func TestConfig_Validate_ServiceNowAcceptsAFullDatabase(t *testing.T) {
 	c := baseValidServiceNowConfig()
 	c.DBUser, c.DBPassword, c.DBName = "user", "password", "db"

@@ -30,14 +30,18 @@ import (
 )
 
 // ProjectRepository defines the persistence operations for the project
-// table (migration 000009). domain.Project.SubscriptionType/ClosureStatus
-// and domain.ProjectAccountRef.Tier have no corresponding column anywhere in
-// the migrations (SubscriptionType/ClosureStatus are ServiceNow vocabulary
-// with values -- e.g. "managed_cloud_subscription", "read_only" -- that
-// don't match any of project's several different closure-state columns;
-// account has no tier-like column at all), so they are left as their zero
-// value rather than guessed at. AgentEnabled/KbReferencesEnabled DO have a
-// clear real-column match (account.ai_gen_response_enabled/
+// table (migration 000009). domain.Project.SubscriptionType is populated
+// from project.project_type_id's linked project_type.name (migrations
+// 000026/000027) -- the same ServiceNow project "type" reference field
+// sn_project_service.go's own snTypeNameToSubscriptionType converts, mirrored
+// here as projectTypeNameToSubscriptionType for this data source (see that
+// function's own doc comment). ClosureStatus and domain.ProjectAccountRef.Tier
+// still have no corresponding column anywhere in the migrations (ClosureStatus
+// is ServiceNow vocabulary -- e.g. "read_only" -- that doesn't match any of
+// project's several different closure-state columns; account has no
+// tier-like column at all), so they are left as their zero value rather than
+// guessed at. AgentEnabled/KbReferencesEnabled DO have a clear real-column
+// match (account.ai_gen_response_enabled/
 // smart_knowledge_base_suggestions_enabled) despite the name difference and
 // are populated from them.
 type ProjectRepository interface {
@@ -66,12 +70,17 @@ func (r *projectRepo) SearchProjects(ctx context.Context, req domain.SearchProje
 	filterArgs := []any{}
 	argIdx := 1
 
+	// p/pt aliases (rather than the unaliased "project" this query used
+	// before project_type joined in) are required the moment a second table
+	// with its own id/name columns is in scope -- every column reference
+	// below is qualified accordingly, including inside scopePredicate/
+	// SearchQuery's ILIKE, which used to be able to say plain "id"/"name".
 	where := "WHERE 1=1"
 
 	// See CaseRepository.SearchCases's identical scope clause for why this is
 	// independent of any project filter the request itself may carry.
 	if !scope.Unrestricted {
-		where += " AND " + scopePredicate("id", argIdx)
+		where += " AND " + scopePredicate("p.id", argIdx)
 		filterArgs = append(filterArgs, scope.ProjectIDs)
 		argIdx++
 	}
@@ -79,18 +88,70 @@ func (r *projectRepo) SearchProjects(ctx context.Context, req domain.SearchProje
 	if req.SearchQuery != "" {
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(req.SearchQuery)
 		pattern := "%" + escaped + "%"
-		where += fmt.Sprintf(" AND (name ILIKE $%d ESCAPE '\\' OR key ILIKE $%d ESCAPE '\\')", argIdx, argIdx)
+		where += fmt.Sprintf(" AND (p.name ILIKE $%d ESCAPE '\\' OR p.key ILIKE $%d ESCAPE '\\')", argIdx, argIdx)
 		filterArgs = append(filterArgs, pattern)
 		argIdx++
 	}
 
-	countQuery := "SELECT COUNT(*) FROM project " + where
+	// key (migration 000009) matches domain.SearchProjectsRequest.ExcludeProjectKeys
+	// directly — same column SearchQuery's own ILIKE already matches against
+	// above. Exact, case-sensitive per that field's own doc comment.
+	if len(req.ExcludeProjectKeys) > 0 {
+		where += fmt.Sprintf(" AND p.key <> ALL($%d::text[])", argIdx)
+		filterArgs = append(filterArgs, req.ExcludeProjectKeys)
+		argIdx++
+	}
+
+	// wso2_closure_state_enum's values ('OPEN', 'READ_ONLY', 'CLOSED',
+	// 'RESTRICTED', 'SUSPENDED', migration 000009) are the same vocabulary as
+	// ExcludeClosureStates' ServiceNow-sourced values ("Open"/"Suspended"/
+	// "Restricted"), just differently cased, so this upper-cases the caller's
+	// values rather than requiring them to match casing they have no way to
+	// know. A NULL wso2_closure_state never matches any exclude value (a
+	// project with no recorded closure state can't be excluded by one).
+	if len(req.ExcludeClosureStates) > 0 {
+		upper := make([]string, len(req.ExcludeClosureStates))
+		for i, s := range req.ExcludeClosureStates {
+			upper[i] = strings.ToUpper(s)
+		}
+		where += fmt.Sprintf(" AND (p.wso2_closure_state IS NULL OR p.wso2_closure_state::text <> ALL($%d::text[]))", argIdx)
+		filterArgs = append(filterArgs, upper)
+		argIdx++
+	}
+
+	// project_type.name (migrations 000026/000027, LEFT JOINed below via
+	// p.project_type_id) holds the raw ServiceNow project "type" label (e.g.
+	// "Cloud Support") -- normalized in SQL the same way
+	// snTypeNameToSubscriptionType normalizes it in Go
+	// (lower-cased, spaces to underscores) so it can be compared directly
+	// against the caller's already-lowercase-underscore SubscriptionType
+	// values without needing a reverse mapping back to ServiceNow's display
+	// casing. A NULL pt.name (no project_type_id set, or an orphaned
+	// reference) never matches any exclude value, same NULL-permissive
+	// semantics as ExcludeClosureStates above. An unrecognized label (e.g.
+	// "Regular", "Cloud Support - Platformer" -- both real project_type rows
+	// with no SubscriptionType match) simply never equals any requested
+	// value either, so it's never excluded by this filter -- consistent with
+	// snTypeNameToSubscriptionType's own "never fails" resilience.
+	if len(req.ExcludeSubscriptionTypes) > 0 {
+		types := make([]string, len(req.ExcludeSubscriptionTypes))
+		for i, t := range req.ExcludeSubscriptionTypes {
+			types[i] = string(t)
+		}
+		where += fmt.Sprintf(" AND (pt.name IS NULL OR lower(replace(pt.name, ' ', '_')) <> ALL($%d::text[]))", argIdx)
+		filterArgs = append(filterArgs, types)
+		argIdx++
+	}
+
+	countQuery := "SELECT COUNT(*) FROM project p LEFT JOIN project_type pt ON pt.id = p.project_type_id " + where
 
 	dataQuery := fmt.Sprintf(
-		`SELECT id, account_id, sf_id, name, key,
-		        start_date, end_date, created_on, updated_on
-		 FROM project %s
-		 ORDER BY created_on DESC, id
+		`SELECT p.id, p.account_id, p.sf_id, p.name, p.key, pt.name,
+		        p.start_date, p.end_date, p.created_on, p.updated_on
+		 FROM project p
+		 LEFT JOIN project_type pt ON pt.id = p.project_type_id
+		 %s
+		 ORDER BY p.created_on DESC, p.id
 		 LIMIT $%d OFFSET $%d`,
 		where, argIdx, argIdx+1,
 	)
@@ -118,18 +179,29 @@ func (r *projectRepo) SearchProjects(ctx context.Context, req domain.SearchProje
 		result := make([]domain.Project, 0, req.Pagination.Limit)
 		for rows.Next() {
 			var p domain.Project
-			// account_id/start_date/end_date are nullable (migration 000009);
-			// domain.Project's fields are pointers to match -- see that
-			// struct's own doc comment. A non-pointer scan here used to
-			// error "cannot scan NULL into *time.Time" the moment any of the
-			// 13-14 (of 1956) rows with a NULL date reached this query.
+			// account_id/start_date/end_date are nullable (migration
+			// 000009); pt.name is nullable via the LEFT JOIN (no
+			// project_type_id set, or set to a row that no longer exists).
+			// domain.Project.SubscriptionType is a non-pointer field though
+			// (its zero value, "", already means "unknown/unset" -- no
+			// separate pointer needed the way AccountID/StartDate/EndDate
+			// need one), so it's scanned into a *string temp var and
+			// converted below rather than scanned directly. A non-pointer
+			// scan here used to error "cannot scan NULL into *time.Time" the
+			// moment any of the 13-14 (of 1956) rows with a NULL date
+			// reached this query -- same class of bug this guards against
+			// for pt.name too.
+			var projectTypeName *string
 			if err := rows.Scan(
-				&p.ID, &p.AccountID, &p.SfID, &p.Name, &p.Key,
+				&p.ID, &p.AccountID, &p.SfID, &p.Name, &p.Key, &projectTypeName,
 				&p.StartDate, &p.EndDate, &p.CreatedOn, &p.UpdatedOn,
 			); err != nil {
 				return fmt.Errorf("scan project: %w", err)
 			}
-			// SubscriptionType/ClosureStatus have no real column -- see this
+			if projectTypeName != nil {
+				p.SubscriptionType = projectTypeNameToSubscriptionType(*projectTypeName)
+			}
+			// ClosureStatus still has no real column -- see this
 			// repository's own doc comment.
 			result = append(result, p)
 		}
@@ -166,6 +238,10 @@ func (r *projectRepo) GetProjectByID(ctx context.Context, id string, scope Searc
 	// so they tolerate NULL (whether from a real account or a LEFT JOIN
 	// producing no row at all) without a separate local var.
 	var aID, aName *string
+	// project_type is a LEFT JOIN for the same reason account is: a project
+	// with no project_type_id set (or one pointing at a deleted row) must
+	// still resolve, just with SubscriptionType left at its zero value below.
+	var projectTypeName *string
 	// Same "existence never revealed to a caller who can't see it" reasoning
 	// as CaseRepository.GetCaseByID.
 	scopeClause, scopeArgs := "", []any{id}
@@ -177,18 +253,21 @@ func (r *projectRepo) GetProjectByID(ctx context.Context, id string, scope Searc
 		`SELECT p.id, p.sf_id, p.name, p.key,
 		        p.start_date, p.end_date, p.created_on, p.updated_on,
 		        a.id, a.name, a.activation_date, a.region,
-		        a.ai_gen_response_enabled, a.smart_knowledge_base_suggestions_enabled
+		        a.ai_gen_response_enabled, a.smart_knowledge_base_suggestions_enabled,
+		        pt.name
 		 FROM project p
 		 LEFT JOIN account a ON p.account_id = a.id
+		 LEFT JOIN project_type pt ON pt.id = p.project_type_id
 		 WHERE p.id = $1`+scopeClause, scopeArgs...,
 	).Scan(
 		&v.ID, &v.SfID, &v.Name, &v.Key,
 		&v.StartDate, &v.EndDate, &v.CreatedOn, &v.UpdatedOn,
 		&aID, &aName, &v.Account.ActivationDate, &v.Account.Region,
 		&agentEnabled, &kbReferencesEnabled,
+		&projectTypeName,
 	)
-	// v.SubscriptionType and v.Account.Tier have no real column -- see this
-	// repository's own doc comment; left as their zero value.
+	// v.Account.Tier still has no real column -- see this repository's own
+	// doc comment; left at its zero value.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ProjectDetailsView{}, &apierror.NotFoundError{Msg: "project not found"}
 	}
@@ -203,5 +282,25 @@ func (r *projectRepo) GetProjectByID(ctx context.Context, id string, scope Searc
 	}
 	v.Account.AgentEnabled = agentEnabled != nil && *agentEnabled
 	v.Account.KbReferencesEnabled = kbReferencesEnabled != nil && *kbReferencesEnabled
+	if projectTypeName != nil {
+		v.SubscriptionType = projectTypeNameToSubscriptionType(*projectTypeName)
+	}
 	return v, nil
+}
+
+// projectTypeNameToSubscriptionType converts a project_type.name label (e.g.
+// "Cloud Support", migrations 000026/000027) to the domain SubscriptionType
+// enum (e.g. "cloud_support") -- the same transform
+// sn_project_service.go's snTypeNameToSubscriptionType applies to the same
+// underlying ServiceNow field, duplicated here rather than shared because
+// the repository package cannot import the service package (the reverse
+// import already exists). Never fails, same as that function: an
+// unrecognized label (a real project_type row like "Regular" or "Cloud
+// Support - Platformer" with no SubscriptionType match, or a future label
+// added on the ServiceNow side) still returns a best-effort derived value
+// instead of erroring -- callers that filter against a known
+// SubscriptionType value simply never match it, rather than the whole query
+// failing.
+func projectTypeNameToSubscriptionType(name string) domain.SubscriptionType {
+	return domain.SubscriptionType(strings.ToLower(strings.ReplaceAll(name, " ", "_")))
 }

@@ -65,10 +65,14 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 //
 // It is deliberately NOT gated on DATA_SOURCE. Product consumption keeps its
 // provisioning state in Postgres and dual-writes it alongside ServiceNow, so a
-// DATA_SOURCE=servicenow deployment — which is what staging and production run
-// — still needs a pool. A deployment with no DB_* set gets no pool and starts
-// exactly as it did before, which is what keeps local ServiceNow-mode startups
-// working without a database.
+// DATA_SOURCE=servicenow deployment -- which is what staging and production
+// run -- still needs a pool. A deployment with no DB_* set gets no pool and
+// starts exactly as it did before, which is what keeps local ServiceNow-mode
+// startups working without a database.
+//
+// Side tables (event_publish_failures, sla_clocks, scheduled_task_run) have no
+// ServiceNow equivalent and are registered in routes.go only when a pool is
+// available, so they never block an SN-mode startup that has no database.
 func NewPoolIfNeeded(cfg *config.Config) (*pgxpool.Pool, error) {
 	if !cfg.HasDatabase() {
 		return nil, nil

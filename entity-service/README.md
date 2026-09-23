@@ -29,7 +29,7 @@ entity-service/
 │   │   ├── interfaces.go        # CaseRepository and CaseService interfaces
 │   │   ├── entity_service.go    # Business logic — pagination, validation
 │   │   ├── event_publisher_service.go # EventPublisherService.Publish — builds the envelope, publishes it, records a failure if Event Hub doesn't ack (wired in via routes.go; called from snCaseService.CreateCase and snIncidentService.CreateIncident)
-│   │   └── sla_clock_service.go # SLAClockService — register/get/mark-tier-reached for a case's SLA clocks
+│   │   └── sla_status_service.go # SLAStatusService — lists currently-active SLA clocks, read live from the "sla" table
 │   ├── repository/
 │   │   ├── entity_repo.go       # SQL queries against the "case" table
 │   │   └── tx.go                # Transaction helper
@@ -193,7 +193,6 @@ rather than async.
 | `AUTH_USER_TOKEN_AUDIENCES` | Comma-separated client ids an ID token's `aud` must contain to count as a user token; required |
 | `AUTH_CLOCK_SKEW` | Leeway for `exp` (default `30s`) |
 | `AUTH_INTERNAL_CLIENT_IDS` | Comma-separated Asgardeo application client ids trusted with unconditional full access to every project and case (checked against a client-credentials `Authorization: Bearer` token), regardless of any `x-user-id-token` the same request also carries. A caller not in this list is resolved purely from its `x-user-id-token` instead. Which real client ids go here is a deployment decision, but a service that calls the scoped endpoints directly with only a client-credentials token gets a 401 unless it is listed (optional) |
-| `SUPPORT_ENGINEER_ROLE` | ServiceNow role name whose presence on a case comment's author completes the case's "response" SLA clock — see "SLA clocks" below. No default; unset means that specific completion path never fires (optional) |
 | `CUSTOMER_ROLES` | Comma-separated ServiceNow role names whose presence on a case comment's author marks it a customer reply — see "Customer reply state transition" below. No default; unset means that path never fires (optional) |
 
 ### Product-consumption provisioning state
@@ -257,54 +256,38 @@ Moving issuance out of ServiceNow is not in scope here. It is gated on a licence
 plan, since changing the payload changes the signature and invalidates every licence a deployed
 customer product already holds.
 
-### SLA clocks
+### SLA status
 
-`sla_clocks` (migration `000042`, display columns added in `000046`) durably tracks per-case SLA
-timers — `caseId`/`clockType`, `startedAt`/`dueAt`, up to three tier-crossing timestamps
-(`reached50At`/`reached75At`/`reached100At`), `pausedAt`, and eight display-only fields (case
-number/WSO2 case id/title/type/product/team/priority/state, a point-in-time snapshot from
-registration). Has no ServiceNow equivalent — always backed by Postgres regardless of
-`DATA_SOURCE`, same as `event_publish_failures`. `clockType` is a caller-defined string, not a
-fixed enum, but only three are actually used: `response`, `workaround`, `resolution`.
+`GET /sla-status` reads SLA state live from the `sla` table (migration `000052`), which
+ServiceNow's own SLA engine populates via sync — real `businessElapsedPercent`/`hasBreached`/
+`stage` per `(work_item, sla_policy)`. Has no ServiceNow equivalent of its own — always backed
+by Postgres regardless of `DATA_SOURCE`, same as `event_publish_failures`. `clockType` is
+`response`/`workaround`/`resolution`, lower-cased from `sla_policy.target`.
 
-Durations come from WSO2's own [support policy](https://wso2.com/licenses/support-policy/6.0)
-(Enterprise plan), keyed by the case's severity — see `internal/service/sla_policy.go`. Every
-case gets a `response` clock; `LOW` severity gets only that one (no fixed
-Workaround/Resolution SLA, "best efforts"). `sn_case_service.go`'s `CreateCase` publishes
-`sla.clock.register` (consumed by `csm-notification-service`'s SLA timer engine,
-`internal/slaengine`, which registers the clock via `POST /cases/{caseId}/sla-clocks` and starts
-tracking 50/75/100% elapsed) unconditionally — independent of whether the case has any watchers
-to email.
+Returns every currently-active clock across every case-like work item in one paginated list
+(default limit `500`, max `2000` — much higher than this service's other paginated endpoints,
+since the one real caller is `csm-notification-service` polling periodically, not a UI list).
+There is no registration step and nothing for this service to schedule or track in-process any
+more: the synced `sla` row already reflects pauses, completions, and breaches, because
+ServiceNow's own SLA engine reacted to those events on its own side. This replaces an earlier
+`sla_clocks` design (a hand-registered clock per case, using a hardcoded severity->duration
+guess) that existed before the `sla` table did — see `CLAUDE.md`'s "SLA status" section for
+the full history.
 
-Pause/resume/completion are direct, in-process calls from `sn_case_service.go` to
-`SLAClockService` — no Event Hub round trip:
-
-- A case state change to `Awaiting Info`/`Solution Proposed` pauses `workaround`+`resolution`;
-  any other state resumes both.
-- The case closing completes `resolution` (claims all three tiers via
-  `SetSLAClockTierReached`) and pauses `workaround` — `workaround` has no completion trigger
-  wired up yet (see the `// TODO` in `applyCaseStateSLAEffects`).
-- A customer-visible comment (not a work note) from a user holding the `SUPPORT_ENGINEER_ROLE`
-  role (looked up via `SNUserService.SearchUsers`, filtered by the comment author's email)
-  completes `response`.
-
-`csm-notification-service`'s SLA timer engine reads a clock back via
-`GET /cases/{caseId}/sla-clocks/{clockType}` to check `pausedOn` before firing a tier, and
-records a crossed tier idempotently via `PATCH /cases/{caseId}/sla-clocks/{clockType}/tiers/{tier}`
-with `{"status": "reached"}` — the same endpoint "complete early" reuses to pre-claim all three
-tiers at once, which is what suppresses a later spurious breach alert for an already-satisfied
-clock. On a genuine breach it sends a Google Chat card directly (not routed through this
-service).
+`csm-notification-service`'s SLA engine polls `GET /sla-status` periodically and diffs
+`businessElapsedPercent` against what it already alerted on itself (its own Redis state, not
+anything this service tracks), sending a Google Chat card directly on a newly-crossed tier —
+not routed through this service.
 
 ### Customer reply state transition
 
 When a customer-visible comment (not a work note) from a user holding one of the `CUSTOMER_ROLES`
-roles (looked up the same way as `SUPPORT_ENGINEER_ROLE`, via `SNUserService.SearchUsers` filtered
-by the comment author's email) arrives while the case is `Awaiting Info`/`Solution Proposed`,
-`sn_case_service.go`'s `applyCustomerReplyStateTransition` moves it back to `Waiting on WSO2` — a
-customer reply means it's WSO2's turn to act again. Implemented as a plain in-process call to this
-service's own `UpdateCase`, not a separate ServiceNow PATCH — so it gets `case.status_changed`
-publishing and the SLA pause/resume side effects above for free, with no duplicated logic.
+roles (looked up via `SNUserService.SearchUsers`, filtered by the comment author's email) arrives
+while the case is `Awaiting Info`/`Solution Proposed`, `sn_case_service.go`'s
+`applyCustomerReplyStateTransition` moves it back to `Waiting on WSO2` — a customer reply means
+it's WSO2's turn to act again. Implemented as a plain in-process call to this service's own
+`UpdateCase`, not a separate ServiceNow PATCH — so it gets `case.status_changed` publishing for
+free, with no duplicated logic.
 
 ### Scheduled task runs
 

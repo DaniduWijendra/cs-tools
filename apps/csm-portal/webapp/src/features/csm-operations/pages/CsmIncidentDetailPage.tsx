@@ -42,6 +42,7 @@ import { BackendApiError } from "@api/backend/client";
 import ExportPdfButton from "@components/ExportPdfButton";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useEngineerDisplayName } from "@hooks/useEngineerDisplayName";
 import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import { useRecordRecentView } from "@features/csm-recent/hooks/useRecentViews";
@@ -233,6 +234,9 @@ export default function CsmIncidentDetailPage(): JSX.Element {
   // uses for its own watch list.
   const { user: currentUser } = useCurrentUser();
   const currentUserEmail = useIdTokenClaims()?.email;
+  // UX only — the backend 403s attachment downloads the same regardless of
+  // this flag, so hiding the control here is never the enforcement.
+  const { canDownloadAttachment } = usePortalAccess();
 
   const {
     data: comments,
@@ -792,7 +796,9 @@ export default function CsmIncidentDetailPage(): JSX.Element {
             comments={comments ?? []}
             audit={activityAudit ?? []}
             attachments={attachmentList}
-            onDownloadAttachment={onDownloadAttachment}
+            onDownloadAttachment={
+              canDownloadAttachment ? onDownloadAttachment : undefined
+            }
             preview={{
               onGetPreviewContent: getAttachmentPreviewContent,
               previewTarget,
@@ -939,7 +945,9 @@ export default function CsmIncidentDetailPage(): JSX.Element {
                 : null
             }
             onUpload={onUploadAttachment}
-            onDownload={onDownloadAttachment}
+            onDownload={
+              canDownloadAttachment ? onDownloadAttachment : undefined
+            }
             preview={{
               onGetPreviewContent: getAttachmentPreviewContent,
               previewTarget,

@@ -15,6 +15,7 @@
 // under the License.
 
 import {
+  Alert,
   Button,
   Dialog,
   DialogActions,
@@ -38,7 +39,7 @@ import {
   Trash2,
 } from "@wso2/oxygen-ui-icons-react";
 import { useState, type JSX } from "react";
-import type { SavedFilterViewsStore } from "@features/csm-operations/utils/savedFilterViews";
+import { useSavedFilterViews, type SavedFilterListKey } from "@features/saved-filter-views/useSavedFilterViews";
 
 interface SavedViewsMenuProps {
   /** This tab's own serialized-filters query string right now (no leading
@@ -65,10 +66,8 @@ interface SavedViewsMenuProps {
    * filter shape and feeds it through the same `onChange` the filter bar
    * already has. */
   onApply: (qs: string) => void;
-  /** The tab-scoped saved-views store (its own `localStorage` key) — see
-   * `changeRequestsSavedViews.ts` / `incidentsSavedViews.ts` /
-   * `problemsSavedViews.ts`. */
-  store: SavedFilterViewsStore;
+  /** Which CSM list this menu persists views for. */
+  listKey: SavedFilterListKey;
 }
 
 /**
@@ -76,9 +75,7 @@ interface SavedViewsMenuProps {
  * Problems filter bars — a named, reusable filter set for high-volume
  * triage, same UI shape as the Cases list's own saved-views block
  * (`CasesFilterBar.tsx`, search for "Saved views") for consistency. Each
- * caller supplies its own tab-scoped `store` so views never leak across
- * tabs (or into/out of the separate Cases list feature, which keeps its own
- * inline implementation untouched).
+ * caller supplies its own `listKey` so views never leak across lists.
  */
 export default function SavedViewsMenu({
   currentQs,
@@ -86,9 +83,17 @@ export default function SavedViewsMenu({
   activeCount,
   hasSearch,
   onApply,
-  store,
+  listKey,
 }: SavedViewsMenuProps): JSX.Element {
-  const savedViews = store.useSavedFilterViews();
+  const {
+    views: savedViews,
+    saveFilterView,
+    deleteFilterView,
+    moveFilterView,
+    isSaving,
+    saveError,
+    resetSaveError,
+  } = useSavedFilterViews(listKey);
   const currentCanonical = canonicalizeQs(currentQs);
   const isActiveView = (qs: string): boolean => canonicalizeQs(qs) === currentCanonical;
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -102,10 +107,16 @@ export default function SavedViewsMenu({
 
   const handleSaveView = (): void => {
     if (!newViewName.trim()) return;
-    store.saveFilterView(newViewName, currentQs);
-    setNewViewName("");
-    setSaveDialogOpen(false);
-    setAnchor(null);
+    void (async () => {
+      try {
+        await saveFilterView(newViewName, currentQs);
+        setNewViewName("");
+        setSaveDialogOpen(false);
+        setAnchor(null);
+      } catch {
+        // Keep the dialog and name so the caller can retry after saveError.
+      }
+    })();
   };
 
   return (
@@ -131,6 +142,7 @@ export default function SavedViewsMenu({
         <MenuItem
           onClick={() => {
             setAnchor(null);
+            resetSaveError();
             setSaveDialogOpen(true);
           }}
         >
@@ -164,7 +176,7 @@ export default function SavedViewsMenu({
                 disabled={i === 0}
                 onClick={(e) => {
                   e.stopPropagation();
-                  store.moveFilterView(v.name, "up");
+                  moveFilterView(v.name, "up");
                 }}
                 sx={{ ml: 1 }}
               >
@@ -177,7 +189,7 @@ export default function SavedViewsMenu({
                 disabled={i === savedViews.length - 1}
                 onClick={(e) => {
                   e.stopPropagation();
-                  store.moveFilterView(v.name, "down");
+                  moveFilterView(v.name, "down");
                 }}
               >
                 <ChevronDown size={15} />
@@ -188,7 +200,7 @@ export default function SavedViewsMenu({
                 aria-label={`Delete saved view ${v.name}`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  store.deleteFilterView(v.name);
+                  deleteFilterView(v.name);
                 }}
               >
                 <Trash2 size={15} />
@@ -206,6 +218,11 @@ export default function SavedViewsMenu({
       >
         <DialogTitle>Save current view</DialogTitle>
         <DialogContent>
+          {saveError ? (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              Couldn&apos;t save this view. Try again.
+            </Alert>
+          ) : null}
           <TextField
             autoFocus
             fullWidth
@@ -214,7 +231,10 @@ export default function SavedViewsMenu({
             label="View name"
             placeholder="e.g. My open records"
             value={newViewName}
-            onChange={(e) => setNewViewName(e.target.value)}
+            onChange={(e) => {
+              resetSaveError();
+              setNewViewName(e.target.value);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -234,7 +254,7 @@ export default function SavedViewsMenu({
           <Button color="inherit" onClick={() => setSaveDialogOpen(false)}>
             Cancel
           </Button>
-          <Button variant="contained" onClick={handleSaveView} disabled={!newViewName.trim()}>
+          <Button variant="contained" onClick={handleSaveView} disabled={!newViewName.trim() || isSaving}>
             Save
           </Button>
         </DialogActions>

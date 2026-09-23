@@ -80,9 +80,19 @@ vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: showErrorMock }),
 }));
 const CURRENT_USER_ID = "00000000-0000-0000-0000-00000000000c";
+// The signed-in user's portal roles. Defaults to a support engineer, who can
+// do everything, so every test that isn't about role gating sees every control;
+// the role-gating describe below overrides it per test.
+const { currentUserRoles } = vi.hoisted(() => ({
+  currentUserRoles: { value: ["support_engineer"] as string[] },
+}));
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   useCurrentUser: () => ({
-    user: { id: CURRENT_USER_ID, email: "jane.doe@example.com" },
+    user: {
+      id: CURRENT_USER_ID,
+      email: "jane.doe@example.com",
+      roles: currentUserRoles.value,
+    },
     isLoading: false,
     isError: false,
     error: null,
@@ -488,7 +498,15 @@ vi.mock("@features/csm-cases/components/LinkedIncidentsListWidget", () => ({
   LinkedIncidentsListWidget: () => null,
 }));
 vi.mock("@features/csm-cases/components/LinkedServiceRequestsWidget", () => ({
-  LinkedServiceRequestsWidget: () => null,
+  // A probe, not a stub: whether createDisabled reflects canWrite (alongside
+  // isClosed) is exactly what a CodeRabbit review caught missing once before
+  // — see "gates the service-request create control on canWrite" below.
+  LinkedServiceRequestsWidget: ({ createDisabled }: { createDisabled?: boolean }) => (
+    <div
+      data-testid="linked-service-requests-widget-probe"
+      data-create-disabled={createDisabled ? "true" : "false"}
+    />
+  ),
 }));
 vi.mock("@features/csm-cases/components/LinkedChangeRequestsWidget", () => ({
   LinkedChangeRequestsWidget: () => (
@@ -1481,6 +1499,99 @@ describe("CsmCaseDetailPage — announcement comment composer", () => {
       name: /this case is closed — comments and work notes are read-only/i,
     });
     expect(toggle).toBeDisabled();
+  });
+});
+
+describe("CsmCaseDetailPage — role-based controls", () => {
+  afterEach(() => {
+    currentUserRoles.value = ["support_engineer"];
+  });
+
+  it("a support engineer sees the action bar and the reply composer", () => {
+    renderPage();
+    expect(screen.getByRole("button", { name: /stub request info/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("a viewer sees neither the action bar nor the reply composer", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("an escalator role alone does not unlock replying or changing the case", () => {
+    currentUserRoles.value = ["escalator"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the Time tracking tab needs support engineer, admin or the time-card approver role", () => {
+    for (const role of ["viewer", "escalator", "attachment_downloader"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      expect(screen.queryByRole("tab", { name: /time tracking/i })).not.toBeInTheDocument();
+      unmount();
+    }
+    for (const role of ["support_engineer", "admin", "timecard_approver"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      expect(screen.getByRole("tab", { name: /time tracking/i })).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("a ?tab=time deep link falls back to Activities for a user without time-card access", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPageAt("/cases/case-1?tab=time");
+    expect(screen.queryByRole("tab", { name: /time tracking/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /activities/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("a ?tab=time deep link stays on Time tracking for a user with time-card access", () => {
+    for (const role of ["support_engineer", "timecard_approver"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPageAt("/cases/case-1?tab=time");
+      expect(screen.getByRole("tab", { name: /time tracking/i })).toHaveAttribute("aria-selected", "true");
+      unmount();
+    }
+  });
+
+  it("a user with no roles sees no controls", () => {
+    currentUserRoles.value = [];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("gates Export as PDF on canWrite", () => {
+    currentUserRoles.value = ["support_engineer"];
+    const { unmount } = renderPage();
+    expect(screen.getByRole("button", { name: /export as pdf/i })).toBeInTheDocument();
+    unmount();
+
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /export as pdf/i })).not.toBeInTheDocument();
+  });
+
+  it("gates the service-request create control on canWrite, not just isClosed", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /linked items/i }));
+    expect(screen.getByTestId("linked-service-requests-widget-probe")).toHaveAttribute(
+      "data-create-disabled",
+      "true",
+    );
   });
 });
 

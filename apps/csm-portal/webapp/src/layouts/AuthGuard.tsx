@@ -26,6 +26,7 @@ import {
   CurrentUserProvider,
   useCurrentUser,
 } from "@context/current-user/CurrentUserContext";
+import { getPortalAccess } from "@context/current-user/portalAccess";
 import RouteSuspenseFallback from "@components/route-fallback/RouteSuspenseFallback";
 import NoPortalAccessPage from "@components/error/NoPortalAccessPage";
 import { useLogger } from "@hooks/useLogger";
@@ -166,9 +167,16 @@ function SignInRedirect({ bare = false }: { bare?: boolean }): JSX.Element {
  * page, or the "not authorized" page in its content area.
  */
 function AuthorizedAppShell(): JSX.Element {
-  const { isLoading, isError, error } = useCurrentUser();
+  const { user, isLoading, isError, error } = useCurrentUser();
+  // `GET /users/me` deliberately succeeds for a signed-in user who holds no
+  // portal role (so this page can be shown rather than an error), while every
+  // other endpoint 403s them. `roles` absent means an older backend or a
+  // profile that failed to parse, which must not lock anyone out.
+  const holdsNoPortalRole =
+    !!user && Array.isArray(user.roles) && !getPortalAccess(user.roles).hasAnyRole;
   const notAuthorized =
-    isError && (isUnauthorizedError(error) || isForbiddenError(error));
+    holdsNoPortalRole ||
+    (isError && (isUnauthorizedError(error) || isForbiddenError(error)));
 
   if (isLoading) {
     return (

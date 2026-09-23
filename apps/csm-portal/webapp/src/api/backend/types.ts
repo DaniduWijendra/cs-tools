@@ -37,6 +37,31 @@ export interface BeErrorPayload {
   message?: string;
 }
 
+/** CSM list that owns a saved filter view. Isolated so views never leak across lists. */
+export type BeSavedFilterListKey = "cases" | "incidents" | "change_requests" | "problems";
+
+/** Named bookmark of a list URL query string. `qs` is opaque. */
+export interface BeSavedFilterView {
+  name: string;
+  qs: string;
+}
+
+export interface BeSavedFilterViewList {
+  views: BeSavedFilterView[];
+}
+
+export interface BeSaveSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  qs: string;
+}
+
+export interface BeReorderSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  direction: "up" | "down";
+}
+
 export interface BeSearchResponseBase {
   total: number;
   limit: number;
@@ -1739,6 +1764,8 @@ export interface BeProject {
   sfId?: string;
   name?: string;
   projectKey?: string;
+  /** The project's short key, e.g. "WSO2-1000" (ServiceNow/entity-service field name: `key`). */
+  key?: string;
   subscriptionType?: BeSubscriptionType;
   /** Whether this project is eligible to raise service requests, as
    *  precomputed by the backing data source. Distinct from
@@ -1746,6 +1773,8 @@ export interface BeProject {
    *  viewer-permission flag rather than a project eligibility flag — gate SR
    *  creation on both. */
   hasSr?: boolean;
+  /** "Open" | "Suspended" | "Restricted" (ServiceNow data source only). */
+  closureState?: string | null;
   startDate?: string | null;
   endDate?: string | null;
   createdAt?: string;
@@ -1757,6 +1786,12 @@ export interface BeProjectSearchPayload {
   searchQuery?: string;
   /** Filter to projects belonging to this account (ServiceNow data source only). */
   accountId?: string;
+  /** Excludes projects whose closure state is any of the given values, e.g.
+   *  ["Restricted", "Suspended"] (ServiceNow data source only). */
+  excludeClosureStates?: string[];
+  /** Excludes projects whose subscription type is any of the given values
+   *  (ServiceNow data source only). */
+  excludeSubscriptionTypes?: BeSubscriptionType[];
 }
 
 export interface BeProjectSearchResponse extends BeSearchResponseBase {
@@ -1990,6 +2025,24 @@ export interface BeProductVersionSearchPayload {
 
 export interface BeProductVersionSearchResponse extends BeSearchResponseBase {
   productVersions: BeProductVersion[];
+}
+
+/**
+ * `POST /deployed-products/projects/search` — resolves which projects are
+ * running a given product version, for the EOL/product-version announcement
+ * flow's audience. The result already excludes Restricted/Suspended projects
+ * and Cloud Support/Cloud Evaluation Support subscriptions unconditionally
+ * (see entity-service's own doc comment on this endpoint) — there is
+ * deliberately no exclude filter on this payload for the caller to set.
+ */
+export interface BeProjectsByProductVersionSearchPayload {
+  pagination?: BePagination;
+  productId: string;
+  productVersionId: string;
+}
+
+export interface BeProjectsByProductVersionSearchResponse extends BeSearchResponseBase {
+  projects: BeEntityRef[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2270,6 +2323,17 @@ export interface BeGithubIssueRepoOption {
  */
 export interface BeMetadataResponse {
   githubIssueRepoOptions: BeGithubIssueRepoOption[];
+}
+
+/**
+ * `GET /announcements/audience/excluded-project-keys` response: the
+ * read-only, backend-configured denylist of project keys that never receive
+ * an "All customer projects" customer announcement (see
+ * CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS). Never null, even when nothing is
+ * configured — always a real (possibly empty) array.
+ */
+export interface BeExcludedProjectKeysResponse {
+  excludedProjectKeys: string[];
 }
 
 /** `POST /cases/{id}/call-requests/search` request body. */

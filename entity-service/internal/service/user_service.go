@@ -173,6 +173,30 @@ func NewUserService(repo repository.UserRepository) UserService {
 	return &userService{repo: repo}
 }
 
+// GetUser implements UserService.
+func (s *userService) GetUser(ctx context.Context, id string) (domain.UserDetail, error) {
+	if err := validateUUIDs("id", []string{id}); err != nil {
+		return domain.UserDetail{}, err
+	}
+	u, err := s.repo.GetUserDetail(ctx, id)
+	if err != nil {
+		return domain.UserDetail{}, err
+	}
+	if u.Roles, err = s.repo.GetUserRoles(ctx, id); err != nil {
+		return domain.UserDetail{}, err
+	}
+	if u.Groups, err = s.repo.GetUserGroups(ctx, id); err != nil {
+		return domain.UserDetail{}, err
+	}
+	// Project access is a customer concept: staff have no project-contact rows.
+	if u.UserType == domain.UserTypeCustomer && u.Email != "" {
+		if u.ProjectAccess, err = s.repo.GetUserProjectAccess(ctx, u.Email); err != nil {
+			return domain.UserDetail{}, err
+		}
+	}
+	return u, nil
+}
+
 // SearchUsers implements UserService.
 func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersRequest) (domain.SearchUsersResponse, error) {
 	if err := normalizeUserPagination(&req.Pagination); err != nil {
@@ -188,8 +212,14 @@ func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersReq
 	if req.Filters.Active != nil {
 		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "active filter is only supported for the ServiceNow data source"}
 	}
-	if req.SortBy.Field != "" {
-		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy is only supported for the ServiceNow data source"}
+	if req.SortBy.Field != "" && !validUserSortField[req.SortBy.Field] {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.field contains invalid value: " + string(req.SortBy.Field)}
+	}
+	if req.SortBy.Order != "" && req.SortBy.Field == "" {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.order requires sortBy.field to be set"}
+	}
+	if req.SortBy.Order != "" && !validUserSortOrder[req.SortBy.Order] {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.order contains invalid value: " + string(req.SortBy.Order)}
 	}
 	if len(req.Filters.UserNames) > 50 {
 		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "userNames cannot contain more than 50 values"}

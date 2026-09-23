@@ -50,6 +50,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "rea
 import { useLocation } from "react-router";
 import { useGetCsmCaseDetail } from "@features/csm-cases/api/useGetCsmCaseDetail";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import {
   usePatchCsmCase,
   usePatchCsmCaseById,
@@ -364,6 +365,10 @@ export default function CsmCaseDetailPage(): JSX.Element {
   // The signed-in engineer's platform UUID — the id the watch list's write
   // side is keyed by — so the Watchers tab can self-subscribe/unsubscribe.
   const { user: currentUser } = useCurrentUser();
+  // What this user's roles let them do. UX only — the backend 403s the same
+  // actions regardless, so hiding a control here is never the enforcement.
+  const { canEscalate, canDownloadAttachment, canWrite, canUseTimeCardsAndUpdates } =
+    usePortalAccess();
   const routedCaseId = useNormalizedIdParam("caseId");
   const routedNavigate = useNavTransition();
   const routedLocation = useLocation();
@@ -563,8 +568,10 @@ export default function CsmCaseDetailPage(): JSX.Element {
   const { data: caseTasks } = useSearchCaseTasks(
     isAnnouncement ? undefined : caseId,
   );
+  // The backend only serves time cards to roles that can use them, so the query
+  // is skipped (undefined id disables it) rather than left to 403.
   const { data: caseTimeCards } = useCaseTimeCards(
-    isAnnouncement ? undefined : caseId,
+    isAnnouncement || !canUseTimeCardsAndUpdates ? undefined : caseId,
   );
   const { data: linkedIncidents } = useSearchLinkedIncidents(
     isAnnouncement ? undefined : caseId,
@@ -821,19 +828,24 @@ export default function CsmCaseDetailPage(): JSX.Element {
   // through the router (`useQueryParamTabs`), and a router write during
   // render risks updating the Router's state while this component is still
   // rendering — so it's an effect instead.
+  //
+  // The Time tracking tab gets the same treatment for a user without time-card
+  // access: its tab and panel are hidden, but a `?tab=time` deep link would
+  // otherwise leave nothing selected.
   useEffect(() => {
     if (
-      isAnnouncement &&
-      (activeTab === "related" ||
-        activeTab === "watchers" ||
-        activeTab === "sla" ||
-        activeTab === "time" ||
-        activeTab === "call-requests" ||
-        activeTab === "tasks")
+      (isAnnouncement &&
+        (activeTab === "related" ||
+          activeTab === "watchers" ||
+          activeTab === "sla" ||
+          activeTab === "time" ||
+          activeTab === "call-requests" ||
+          activeTab === "tasks")) ||
+      (activeTab === "time" && !canUseTimeCardsAndUpdates)
     ) {
       setActiveTab("activities");
     }
-  }, [isAnnouncement, activeTab, setActiveTab]);
+  }, [isAnnouncement, activeTab, setActiveTab, canUseTimeCardsAndUpdates]);
 
   // Twitter-style permalinks: when the URL has a fragment matching an entry id,
   // jump to the Activities tab and hand off to `scrollToFragmentWithRetry`,
@@ -2205,21 +2217,23 @@ export default function CsmCaseDetailPage(): JSX.Element {
         >
           Back
         </Button>
-        <ExportPdfButton
-          onExport={handleExportCasePdf}
-          disabled={
-            isCommentsLoading ||
-            isActivityLoading ||
-            isAttachmentsLoading ||
-            isFeedbackLoading ||
-            isChatLoading ||
-            isCommentsError ||
-            isActivityError ||
-            isAttachmentsError ||
-            isFeedbackError ||
-            isChatError
-          }
-        />
+        {canWrite && (
+          <ExportPdfButton
+            onExport={handleExportCasePdf}
+            disabled={
+              isCommentsLoading ||
+              isActivityLoading ||
+              isAttachmentsLoading ||
+              isFeedbackLoading ||
+              isChatLoading ||
+              isCommentsError ||
+              isActivityError ||
+              isAttachmentsError ||
+              isFeedbackError ||
+              isChatError
+            }
+          />
+        )}
       </Box>
 
       <Box
@@ -2362,7 +2376,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
           </Box>
           <Typography variant="h5">{c.subject}</Typography>
         </Box>
-        {!isAnnouncement && (
+        {!isAnnouncement && canWrite && (
           <Box
             className="csm-print-hide"
             sx={{ flexShrink: 0, alignSelf: { xs: "stretch", md: "flex-start" } }}
@@ -2425,6 +2439,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
           {TAB_DEFS.filter(
             (t) =>
               !t.hidden &&
+              (t.id !== "time" || canUseTimeCardsAndUpdates) &&
               (!isAnnouncement ||
                 (t.id !== "related" &&
                   t.id !== "watchers" &&
@@ -2486,7 +2501,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
               comment types there), despite the hidden CaseActionBar above —
               that hides case-lifecycle patch actions, which don't apply to an
               announcement, not the ability to reply to one. */}
-          {composerOpen ? (
+          {!canWrite ? null : composerOpen ? (
             <Card
               className="csm-print-hide"
               sx={{ p: 2.5, display: "flex", flexDirection: "column", gap: 1.5 }}
@@ -2514,7 +2529,8 @@ export default function CsmCaseDetailPage(): JSX.Element {
               <CsmCaseCommentInput
                 disabled={!caseId || isClosed}
                 publicCommentDisabledReason={publicReplyGateReason}
-                canResumeToUnlockPublicReply={canResumeToUnlockPublicReply}
+                canResumeToUnlockPublicReply={canWrite && canResumeToUnlockPublicReply}
+                attachmentsDisabled={!canWrite}
                 onResumeWork={() => onAction({ secondary: "toggle_work_state" })}
                 isResumingWork={patchCase.isPending}
                 autoFocus
@@ -2667,7 +2683,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
                   attachments={attachmentList}
                   feedback={caseFeedback ?? []}
                   callRequests={callRequests ?? []}
-                  onDownloadAttachment={onDownloadAttachment}
+                  onDownloadAttachment={canDownloadAttachment ? onDownloadAttachment : undefined}
                   preview={{
                     onGetPreviewContent: getAttachmentPreviewContent,
                     previewTarget,
@@ -2759,8 +2775,8 @@ export default function CsmCaseDetailPage(): JSX.Element {
           />
           <TagsWidget
             tags={c.tags}
-            onAdd={isClosed ? undefined : () => setAddTagOpen(true)}
-            onRemove={isClosed ? undefined : (t) => onRemoveTag(t.id)}
+            onAdd={isClosed || !canWrite ? undefined : () => setAddTagOpen(true)}
+            onRemove={isClosed || !canWrite ? undefined : (t) => onRemoveTag(t.id)}
             removingId={removeTag.isPending ? removeTag.variables : null}
           />
           <EscalationWidget
@@ -2772,11 +2788,12 @@ export default function CsmCaseDetailPage(): JSX.Element {
               // Visibility is level-eligibility only -- isClosed disables
               // via actionDisabledReason below instead of hiding the button,
               // so its tooltip still has something to anchor to.
-              canEscalateFurther(c.escalationLevel)
+              canEscalate && canEscalateFurther(c.escalationLevel)
                 ? () => setEscalationDialogAction("ESCALATE")
                 : undefined
             }
             onDeescalate={
+              canEscalate &&
               canDeescalate(c.escalationLevel) &&
               callerIsNotifiedOnCurrentEscalation
                 ? () => setEscalationDialogAction("DEESCALATE")
@@ -2811,7 +2828,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
                   variant="outlined"
                   startIcon={<LinkIcon size={14} />}
                   onClick={() => setLinkCaseOpen(true)}
-                  disabled={isClosed}
+                  disabled={isClosed || !canWrite}
                 >
                   Link to another case
                 </Button>
@@ -2840,7 +2857,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
               caseId={c.id}
               parentCase={c.parentCase}
               onLinkIncident={() => setLinkIncidentOpen(true)}
-              linkDisabled={isClosed}
+              linkDisabled={isClosed || !canWrite}
             />
             <LinkedIncidentsListWidget caseId={c.id} />
             {/* Change requests are only ever raised from a service request,
@@ -2855,7 +2872,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
             <LinkedServiceRequestsWidget
               caseId={c.id}
               linkedServiceRequests={c.linkedServiceRequests}
-              createDisabled={isClosed}
+              createDisabled={isClosed || !canWrite}
               onCreateServiceRequest={() => {
                 const navState: CreateServiceRequestFromCaseNavState = {
                   projectId: c.projectId,
@@ -2881,7 +2898,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
           <WatchersWidget
             entityKind="case"
             watchers={c.watchers}
-            onReplace={onReplaceWatchers}
+            onReplace={canWrite ? onReplaceWatchers : undefined}
             isSaving={patchCase.isPending}
             onRefresh={() => void refetchCaseDetail()}
             isRefreshing={isFetchingCaseDetail}
@@ -2923,10 +2940,10 @@ export default function CsmCaseDetailPage(): JSX.Element {
                   "Could not upload the attachment.")
                 : null
             }
-            onUpload={isClosed ? undefined : onUploadAttachment}
-            onDownloadAll={onDownloadAllAttachments}
-            onDownload={onDownloadAttachment}
-            onDelete={setPendingDelete}
+            onUpload={isClosed || !canWrite ? undefined : onUploadAttachment}
+            onDownloadAll={canDownloadAttachment ? onDownloadAllAttachments : undefined}
+            onDownload={canDownloadAttachment ? onDownloadAttachment : undefined}
+            onDelete={canWrite ? setPendingDelete : undefined}
             deletingId={deleteAttachment.isPending ? pendingDelete?.id : null}
             preview={{
               onGetPreviewContent: getAttachmentPreviewContent,
@@ -2937,7 +2954,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
         </Box>
       )}
 
-      {activeTab === "time" && (
+      {activeTab === "time" && canUseTimeCardsAndUpdates && (
         <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: "1fr" }}>
           <CaseTimeCardsPanel
             caseId={c.id}

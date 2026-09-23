@@ -41,6 +41,22 @@ type UserService interface {
 	// is missing; a ValidationError when the token cannot be decoded; a
 	// NotFoundError when no user row matches the email.
 	GetMe(ctx context.Context) (domain.GetUserMeResponse, error)
+	// GetUser returns one user's profile: the user row, roles, groups, and for a
+	// customer the project-contact rows with whether each grants access. A
+	// ValidationError is returned for a malformed id and a NotFoundError when no
+	// user has it.
+	GetUser(ctx context.Context, id string) (domain.UserDetail, error)
+}
+
+// SavedFilterViewService is the caller's own named list-filter bookmarks
+// (CSM portal saved views). Postgres-only; the caller is always the
+// authenticated user resolved from x-user-id-token — never a client-supplied
+// user id.
+type SavedFilterViewService interface {
+	List(ctx context.Context, listKey domain.SavedFilterListKey) (domain.SavedFilterViewList, error)
+	Save(ctx context.Context, req domain.SaveSavedFilterViewRequest) (domain.SavedFilterViewList, error)
+	Delete(ctx context.Context, listKey domain.SavedFilterListKey, name string) (domain.SavedFilterViewList, error)
+	Reorder(ctx context.Context, req domain.ReorderSavedFilterViewRequest) (domain.SavedFilterViewList, error)
 }
 
 // SNUserService defines the user operations backed by the ServiceNow data source.
@@ -120,31 +136,30 @@ type EventPublisherService interface {
 	Close()
 }
 
-// SLAClockService defines the operations available on the sla_clocks
-// entity — see domain.SLAClock's doc comment for what it's for.
-type SLAClockService interface {
-	// RegisterSLAClock (re)creates the clock for req.CaseID/req.ClockType. A
-	// ValidationError is returned if caseId, clockType is missing, or dueAt
-	// is not after startedAt.
-	RegisterSLAClock(ctx context.Context, req domain.RegisterSLAClockRequest) (domain.SLAClock, error)
-	// GetSLAClock returns the clock for caseID/clockType. A NotFoundError is
-	// returned if no such clock has been registered.
-	GetSLAClock(ctx context.Context, caseID, clockType string) (domain.SLAClock, error)
-	// SetSLAClockTierReached marks tier ("50"/"75"/"100") reached for
-	// caseID/clockType if it isn't already (req.Status must be
-	// domain.SLATierStatusReached), and returns the (possibly pre-existing)
-	// reached timestamp. A ValidationError is returned for an unrecognized
-	// tier or status; a NotFoundError if no such clock has been registered.
-	SetSLAClockTierReached(ctx context.Context, caseID, clockType, tier string, req domain.SetSLAClockTierRequest) (domain.SetSLAClockTierReachedResponse, error)
-	// Pause/Resume set or clear the clock's paused_at — called directly,
-	// in-process, from snCaseService's case-state handling (see
-	// sn_case_service.go's applyCaseStateSLAEffects), not exposed over HTTP:
-	// no caller outside this service needs them. Both are idempotent
-	// (pausing an already-paused clock, or resuming an already-running
-	// one, is a no-op that still returns the current row) and return a
-	// NotFoundError if no such clock has been registered.
-	Pause(ctx context.Context, caseID, clockType string) (domain.SLAClock, error)
-	Resume(ctx context.Context, caseID, clockType string) (domain.SLAClock, error)
+// SLAStatusService defines the operations available on SLA status — see
+// domain.SLAStatus's doc comment for what it's for and what it replaced.
+type SLAStatusService interface {
+	// SearchActiveSLAStatuses returns every currently-active SLA clock across
+	// every case-like work item, paginated. A ValidationError is returned for
+	// an invalid pagination limit.
+	SearchActiveSLAStatuses(ctx context.Context, req domain.Pagination) (domain.SearchSLAStatusResponse, error)
+}
+
+// OnboardingStepService records and reads the per-membership status ledger
+// of the customer onboarding flow (onboarding_step). The DATABASE step is
+// written in-process by the Salesforce membership ingest; IDENTITY, EMAIL
+// and REGISTRATION are written over HTTP by csm-notification-service and
+// the customer portal backend.
+type OnboardingStepService interface {
+	// Upsert writes the latest outcome of one step. MembershipSfID and Step
+	// come from the path; a repeat for the same pair updates the row and
+	// increments attemptCount.
+	Upsert(ctx context.Context, req domain.UpsertOnboardingStepRequest) (domain.OnboardingStep, error)
+	// GetByMembership returns every recorded step for a membership (an empty
+	// list for an unknown membership, never a 404).
+	GetByMembership(ctx context.Context, membershipSfID string) (domain.GetOnboardingStepsResponse, error)
+	// Search returns a filtered, paginated list of steps, newest first.
+	Search(ctx context.Context, req domain.SearchOnboardingStepsRequest) (domain.SearchOnboardingStepsResponse, error)
 }
 
 // ScheduledTaskRunService defines the operations available on the
@@ -190,6 +205,93 @@ type AlertIncidentMappingService interface {
 	// An empty (never nil) Mappings slice, not an error, is returned when
 	// nothing matches.
 	LookupAlertIncidentMappings(ctx context.Context, req domain.LookupAlertIncidentMappingsRequest) (domain.LookupAlertIncidentMappingsResponse, error)
+}
+
+// AnnouncementRequestService defines the operations available on the
+// announcement_requests entity — see domain.AnnouncementRequest's own doc
+// comment for the full state machine (draft -> pending_approval -> approved
+// -> published) and what each transition does and doesn't allow.
+type AnnouncementRequestService interface {
+	// CreateDraft creates a new request in state draft. A ValidationError is
+	// returned if kind isn't "customer"/"eol" or createdBy is missing.
+	CreateDraft(ctx context.Context, req domain.CreateAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
+	// Get returns the request by id. A NotFoundError is returned if it
+	// doesn't exist.
+	Get(ctx context.Context, id string) (domain.AnnouncementRequest, error)
+	// Search returns requests matching req's optional state/createdBy
+	// filters, paginated.
+	Search(ctx context.Context, req domain.SearchAnnouncementRequestsRequest) (domain.SearchAnnouncementRequestsResponse, error)
+	// Update edits the request's own content — what actually happens
+	// (plain edit, edit-and-revert-to-draft, or edit-in-place) depends
+	// entirely on the request's current state; see the service's own
+	// implementation doc comment for the full breakdown. A ConflictError is
+	// returned if the request is published; a ValidationError if an
+	// audience change is attempted while approved (the approved snapshot
+	// is frozen — this is a rejected request shape, not a state conflict).
+	Update(ctx context.Context, id string, req domain.UpdateAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
+	// RecordDryRun records that a dry run (created by the caller's own
+	// mechanism, not this service) has completed for this request. A
+	// ConflictError is returned unless the current state is draft.
+	RecordDryRun(ctx context.Context, id string, req domain.RecordAnnouncementDryRunRequest) (domain.AnnouncementRequest, error)
+	// Submit moves draft -> pending_approval, freezing req.ResolvedProjectIDs
+	// as the audience snapshot. A ConflictError is returned unless the
+	// current state is draft and a dry run has already been recorded; a
+	// ValidationError if resolvedProjectIds is empty.
+	Submit(ctx context.Context, id string, req domain.SubmitAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
+	// Approve moves pending_approval -> approved. A ConflictError is
+	// returned unless the current state is pending_approval. There is no
+	// approver-role check — see the interface's own doc comment.
+	Approve(ctx context.Context, id, actorID, actorEmail string) (domain.AnnouncementRequest, error)
+	// MarkPublished moves approved -> published, storing caseIDs (the real
+	// case created for each resolved project, from the caller's own
+	// fan-out) as PublishedCaseIDs. Does not itself create any cases. A
+	// ConflictError is returned unless the current state is approved; a
+	// ValidationError if caseIDs is empty. Unlike Approve, this IS
+	// restricted: a ForbiddenError is returned unless actorID matches the
+	// request's own CreatedBy -- an approver's job is only to approve, not
+	// to also trigger the real send to customers.
+	MarkPublished(ctx context.Context, id, actorID, actorEmail string, caseIDs []string) (domain.AnnouncementRequest, error)
+	// Schedule sets or clears (nil) scheduledFor for an approved request —
+	// once set, operations/csm-scheduled-tasks' publish_scheduled_announcements
+	// sub-cron publishes it automatically once that time arrives. A
+	// ConflictError is returned unless the current state is approved; a
+	// ForbiddenError unless actorID matches the request's own CreatedBy
+	// (same creator-only restriction as MarkPublished — scheduling is
+	// choosing when Publish happens); a ValidationError if scheduledFor is
+	// non-nil and not strictly in the future.
+	Schedule(ctx context.Context, id, actorID, actorEmail string, scheduledFor *time.Time) (domain.AnnouncementRequest, error)
+	// AutoPublish runs the entire Publish fan-out in-process (create a case
+	// per unresolved project, attach the security tag, record deliveries,
+	// mark published) for one already-due scheduled request — the automatic
+	// counterpart to the webapp's own manual Publish flow, callable only by
+	// an internal service (a ForbiddenError otherwise). A ConflictError is
+	// returned if the request isn't approved, its scheduled time hasn't
+	// arrived yet, it has no resolved audience, or a pass still has
+	// outstanding case-creation/tag failures (safe to call again — it
+	// resumes from the delivery ledger exactly like a manual retry would).
+	AutoPublish(ctx context.Context, id string) (domain.AnnouncementRequest, error)
+	// AddUpdate posts a new AnnouncementRequestUpdate for a published
+	// request. Does not itself apply Content as a comment anywhere -- the
+	// caller's own fan-out does that, separately, after this call succeeds
+	// (same separation as MarkPublished). A ConflictError is returned
+	// unless the current state is published; a ForbiddenError unless
+	// actorID matches the request's own CreatedBy (same creator-only
+	// restriction as MarkPublished, for the same reason).
+	AddUpdate(ctx context.Context, id, actorID, actorEmail, content string) (domain.AnnouncementRequestUpdate, error)
+	// ListUpdates returns every update posted for id, newest first. A
+	// NotFoundError is returned if the request itself doesn't exist.
+	ListUpdates(ctx context.Context, id string) (domain.SearchAnnouncementRequestUpdatesResponse, error)
+	// RecordDeliveries upserts one Publish fan-out pass's worth of
+	// per-project outcomes for id. Same creator-only restriction as
+	// MarkPublished, and for the same reason: this is bookkeeping for the
+	// real send, which only the request's own creator can drive. A
+	// ConflictError is returned unless the current state is approved (a
+	// delivery only means anything mid-fan-out, before the request reaches
+	// published); a ValidationError if deliveries is empty.
+	RecordDeliveries(ctx context.Context, id, actorID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) (domain.SearchAnnouncementRequestDeliveriesResponse, error)
+	// ListDeliveries returns every delivery recorded for id. A NotFoundError
+	// is returned if the request itself doesn't exist.
+	ListDeliveries(ctx context.Context, id string) (domain.SearchAnnouncementRequestDeliveriesResponse, error)
 }
 
 // SNAccountService defines the account operations backed by the ServiceNow data source.
@@ -238,10 +340,31 @@ type ProjectMetadataService interface {
 	GetProjectMetadata(ctx context.Context, projectID string) (domain.ProjectMetadataResponse, error)
 }
 
+// ProjectCaseStatsService is the GetProjectCaseStats slice of
+// ProjectStatsService, split out for the same reason ProjectMetadataService
+// is: it has a Postgres-backed implementation (projectCaseStatsService) as
+// well as the ServiceNow one, so it is wired and registered independently of
+// the remaining stats methods, which stay ServiceNow-only. In ServiceNow mode
+// snProjectStatsService satisfies this interface structurally, so the same
+// concrete value backs both. See ProjectCaseStatsHandler.
+type ProjectCaseStatsService interface {
+	// GetProjectCaseStats returns the case statistics for a project,
+	// optionally narrowed by case type and creator. A ValidationError is
+	// returned for a malformed UUID or an unrecognised case type; a
+	// NotFoundError if no project matches.
+	GetProjectCaseStats(ctx context.Context, projectID string, req domain.ProjectCaseStatsRequest) (domain.ProjectCaseStatsResponse, error)
+}
+
 // ProjectStatsService defines the project-scoped metadata and statistics
-// operations. GetProjectMetadata also has a Postgres-backed implementation --
-// see ProjectMetadataService. The remaining stats methods require the
-// ServiceNow data source; there is no Postgres fallback for them yet.
+// operations. Every method has both a ServiceNow implementation
+// (snProjectStatsService) and a Postgres one (projectStatsService), so all of
+// these routes are registered regardless of the data source.
+//
+// GetProjectMetadata and GetProjectCaseStats additionally have their own
+// narrower interfaces (ProjectMetadataService, ProjectCaseStatsService):
+// each was portable to Postgres before the rest of the bundle was, and the
+// Postgres projectStatsService composes them rather than reimplementing
+// either.
 type ProjectStatsService interface {
 	// GetProjectMetadata returns the reference data (choice lists, feature
 	// flags) needed to build the project's UI.
@@ -409,6 +532,12 @@ type DeployedProductService interface {
 	// optional deployment IDs. A ValidationError is returned for invalid input; any other
 	// error indicates an infrastructure failure.
 	SearchDeployedProducts(ctx context.Context, req domain.SearchDeployedProductsRequest) (domain.SearchDeployedProductsResponse, error)
+	// SearchProjectsByProductVersion returns the paginated, deduplicated set
+	// of projects running the given product version — the reverse of
+	// SearchDeployedProducts' own DeploymentIDs-scoped lookup. A
+	// ValidationError is returned for invalid input. Supported by the
+	// ServiceNow data source only.
+	SearchProjectsByProductVersion(ctx context.Context, req domain.SearchProjectsByProductVersionRequest) (domain.SearchProjectsByProductVersionResponse, error)
 	// CreateDeployedProduct creates a new deployed product in ServiceNow.
 	// Supported by the ServiceNow data source only.
 	CreateDeployedProduct(ctx context.Context, req domain.CreateDeployedProductRequest) (domain.CreateDeployedProductResponse, error)

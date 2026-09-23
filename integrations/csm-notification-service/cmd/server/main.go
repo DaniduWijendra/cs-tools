@@ -312,11 +312,17 @@ func main() {
 	crConsumers := startConsumers(ctx, "cr", crCfg, crConsumerGroup, crConsumerCount, dispatcher.Handle, crToDeadLetter)
 	crDLQConsumers := startConsumers(ctx, "cr-dlq", crDLQCfg, crDLQConsumerGroup, crDLQConsumerCount, dispatcher.Handle, nil)
 
-	// The SLA timer engine is optional per deployment, gated on REDIS_ADDR or
-	// REDIS_URL being set — unset means this engine neither consumes
-	// sla.clock.register nor ticks, matching the "unset means don't run"
-	// convention used elsewhere in this repo's own services for an optional
-	// capability (e.g. apps/csm-portal/backend's EVENT_HUB_BROKER gate).
+	// The SLA breach-alerting engine is optional per deployment, gated on
+	// REDIS_ADDR or REDIS_URL being set — unset means this engine never
+	// polls, matching the "unset means don't run" convention used elsewhere
+	// in this repo's own services for an optional capability (e.g.
+	// apps/csm-portal/backend's EVENT_HUB_BROKER gate). Unlike the design
+	// this replaced, it is no longer a Kafka consumer at all — see
+	// internal/slaengine's own CLAUDE.md section ("SLA breach alerting")
+	// for the full redesign: it polls entity-service's GET /sla-status
+	// (backed by the real, ServiceNow-synced "sla" table, not a value this
+	// service used to compute itself) on a plain ticker instead.
+	//
 	// REDIS_URL (a rediss://:<password>@<host>:<port> connection string,
 	// parsed via redis.ParseURL) is how a managed Redis with TLS — Azure
 	// Managed Redis, Azure Cache for Redis — gets configured: the "rediss"
@@ -334,11 +340,10 @@ func main() {
 	// to follow MOVED/ASK redirects, which nothing here constructs. Confirm
 	// the target Redis resource's clustering policy is Enterprise/
 	// non-clustered before pointing REDIS_URL at it; OSS Cluster policy will
-	// fail unpredictably (WakeIndex's ZSET operations landing on the wrong
+	// fail unpredictably (TierStore's key operations landing on the wrong
 	// shard) rather than at this construction site.
 	var redisClient *redis.Client
 	var slaProducer *eventbus.Producer
-	var slaConsumers []*eventbus.Consumer
 	redisURL := os.Getenv("REDIS_URL")
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisURL != "" || redisAddr != "" {
@@ -374,9 +379,7 @@ func main() {
 		// warns-and-degrades on a missing config), mustEnv is used for all
 		// four values here: once REDIS_ADDR opts into this engine, every one
 		// of them is required for it to do anything at all — a missing
-		// credential would otherwise silently fail every entity-service call
-		// this engine makes, with each sla.clock.register record retried and
-		// dead-lettered for a reason invisible from the DLQ topic alone.
+		// credential would otherwise silently fail every poll.
 		slaEntityClient := slaengine.NewEntityClient(slaengine.EntityConfig{
 			BaseURL:      mustEnv("CUSTOMER_ENTITY_BASE_URL"),
 			TokenURL:     mustEnv("OAUTH2_TOKEN_URL"),
@@ -392,13 +395,18 @@ func main() {
 		// exists.
 		slaProducer = eventbus.NewProducer(eventBusCfg)
 
-		slaEngine := slaengine.NewEngine(slaEntityClient, slaengine.NewWakeIndex(redisClient), slaProducer, googleChatClient, linkResolver, defaultChatProduct)
+		slaEngine := slaengine.NewEngine(slaEntityClient, slaengine.NewTierStore(redisClient), slaProducer, googleChatClient, linkResolver, defaultChatProduct)
 
-		slaConsumerGroup := envOrDefault("SLA_CONSUMER_GROUP", "csm-notification-service-sla")
-		slaConsumerCount := envInt("SLA_CONSUMER_COUNT", 1)
-		slaConsumers = startConsumers(ctx, "sla", eventBusCfg, slaConsumerGroup, slaConsumerCount, slaEngine.Handle, toDeadLetter)
-
-		tickInterval := envDuration("SLA_TICK_INTERVAL", 15*time.Second)
+		// SLA_TICK_INTERVAL defaults far above the old wake-index engine's
+		// 15s: that interval made sense for firing a precomputed due date
+		// close to when it actually elapsed, but this engine now polls
+		// entity-service directly every tick (paginating through every
+		// active clock, ~5,500 as of this redesign) and only needs to
+		// notice a newly-crossed 50/75/100% checkpoint, not a specific
+		// instant — most active "sla" rows don't change more than a few
+		// times a day. 5 minutes balances alert latency against load on
+		// entity-service and Redis.
+		tickInterval := envDuration("SLA_TICK_INTERVAL", 5*time.Minute)
 		go slaEngine.RunTicker(ctx, tickInterval)
 	}
 
@@ -428,9 +436,6 @@ func main() {
 		c.Close()
 	}
 	for _, c := range crDLQConsumers {
-		c.Close()
-	}
-	for _, c := range slaConsumers {
 		c.Close()
 	}
 	for _, c := range timeCardConsumers {

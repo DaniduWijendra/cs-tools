@@ -51,6 +51,7 @@ import { isBlankHtml, sanitizeRichTextHtml } from "@utils/sanitizeHtml";
 import { BackendApiError } from "@api/backend/client";
 import ExportPdfButton from "@components/ExportPdfButton";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useEngineerDisplayName } from "@hooks/useEngineerDisplayName";
 import { useRecordRecentView } from "@features/csm-recent/hooks/useRecentViews";
 import { useGetChangeRequest } from "@features/csm-operations/api/useGetChangeRequest";
@@ -232,6 +233,9 @@ export default function CsmChangeRequestDetailPage(): JSX.Element {
   // several times at once (one per open tab, kept alive in the background —
   // see `CaseTabIsolatedRouter`), while there is only ever one real matched
   // route/location for the app as a whole.
+  // UX only — the backend 403s attachment downloads the same regardless of
+  // this flag, so hiding the control here is never the enforcement.
+  const { canDownloadAttachment } = usePortalAccess();
   const routedId = useNormalizedIdParam("id");
   const routedNavigate = useNavTransition();
   const routedLocationState = useLocation().state;
@@ -985,7 +989,7 @@ export default function CsmChangeRequestDetailPage(): JSX.Element {
                 : null
             }
             onUpload={onUploadAttachment}
-            onDownload={onDownloadAttachment}
+            onDownload={canDownloadAttachment ? onDownloadAttachment : undefined}
           />
         </Card>
       )}

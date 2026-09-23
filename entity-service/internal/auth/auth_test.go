@@ -66,7 +66,7 @@ func staticValidator(key *rsa.PrivateKey) *Validator {
 }
 
 func userClaims(mod func(jwt.MapClaims)) jwt.MapClaims {
-	c := jwt.MapClaims{"iss": testIssuer, "aud": []string{testSPA}, "sub": "user-1", "email": "Jane@Example.com", "exp": time.Now().Add(time.Hour).Unix()}
+	c := jwt.MapClaims{"iss": testIssuer, "aud": []string{testSPA}, "sub": "user-1", "userid": "asgardeo-uuid-1", "email": "Jane@Example.com", "exp": time.Now().Add(time.Hour).Unix()}
 	if mod != nil {
 		mod(c)
 	}
@@ -86,7 +86,7 @@ func TestValidateUserToken(t *testing.T) {
 	v := staticValidator(key)
 
 	uc, err := v.ValidateUserToken(sign(t, key, userClaims(nil)))
-	if err != nil || uc.Email != "Jane@Example.com" || uc.Subject != "user-1" {
+	if err != nil || uc.Email != "Jane@Example.com" || uc.Subject != "user-1" || uc.UserID != "asgardeo-uuid-1" {
 		t.Fatalf("valid token: %+v, %v", uc, err)
 	}
 
@@ -148,6 +148,16 @@ func TestValidateClientToken(t *testing.T) {
 
 func run(t *testing.T, v *Validator, headers map[string]string) (code int, id Identity, called bool) {
 	t.Helper()
+	_, code, id, called = runWithHolder(t, v, headers)
+	return code, id, called
+}
+
+// runWithHolder is run's superset, also returning the *IdentityHolder --
+// installed into context the same way middleware.Logger installs one in
+// production, before Middleware runs -- so a test can assert what an outer
+// access logger would see, including on a rejected request.
+func runWithHolder(t *testing.T, v *Validator, headers map[string]string) (holder *IdentityHolder, code int, id Identity, called bool) {
+	t.Helper()
 	h := Middleware(v)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 		id = IdentityFromContext(r.Context())
@@ -156,9 +166,11 @@ func run(t *testing.T, v *Validator, headers map[string]string) (code int, id Id
 	for k, val := range headers {
 		req.Header.Set(k, val)
 	}
+	ctx, holderRef := WithIdentityHolder(req.Context())
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return rec.Code, id, called
+	return holderRef, rec.Code, id, called
 }
 
 // TestMiddleware_NilValidatorIsADefensiveFallbackNotADeploymentMode: routes.go
@@ -195,7 +207,7 @@ func TestMiddleware_Enabled(t *testing.T) {
 	})
 	t.Run("on behalf of a user: bearer + user token", func(t *testing.T) {
 		_, id, _ := run(t, v, map[string]string{"authorization": "bearer " + bearer, "x-user-id-token": user})
-		if id.ClientID != testM2M || id.UserEmail != "Jane@Example.com" || id.UserSubject != "user-1" {
+		if id.ClientID != testM2M || id.UserEmail != "Jane@Example.com" || id.UserSubject != "user-1" || id.UserID != "asgardeo-uuid-1" {
 			t.Fatalf("got %+v", id)
 		}
 	})
@@ -215,6 +227,54 @@ func TestMiddleware_Enabled(t *testing.T) {
 		code, _, called := run(t, v, map[string]string{"x-user-id-token": bearer})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
+		}
+	})
+}
+
+// TestMiddleware_IdentityHolder covers what middleware.Logger actually reads
+// to build its access-log line: the *IdentityHolder installed into context
+// before Middleware runs, not IdentityFromContext (see IdentityHolder's own
+// doc comment for why the two differ on a rejected request).
+func TestMiddleware_IdentityHolder(t *testing.T) {
+	key := newKey(t)
+	v := staticValidator(key)
+	user := sign(t, key, userClaims(nil))
+	bearer := sign(t, key, clientClaims(nil))
+
+	t.Run("no tokens: holder stays empty", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, nil)
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("m2m: holder carries the client id", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer})
+		if holder.ClientID != testM2M || holder.UserID != "" {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("on behalf of a user: holder carries the user UUID, not sub", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": user})
+		if holder.UserID != "asgardeo-uuid-1" || holder.ClientID != testM2M {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("invalid user token: holder stays empty, even though the bearer alone would have validated", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": "garbage"})
+		if code != http.StatusUnauthorized || called {
+			t.Fatalf("got %d called=%v", code, called)
+		}
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("a rejected request must never attribute the access log to an unproven claim, got %+v", holder)
+		}
+	})
+	t.Run("invalid bearer: holder stays empty", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"Authorization": "Bearer garbage"})
+		if code != http.StatusUnauthorized || called {
+			t.Fatalf("got %d called=%v", code, called)
+		}
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("got %+v", holder)
 		}
 	})
 }

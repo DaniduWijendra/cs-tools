@@ -35,7 +35,6 @@ import (
 var testUser = &middleware.UserInfo{
 	Email:  "agent@example.com",
 	UserID: "f2d9bf5b-7067-43dc-8578-802c8623af5d",
-	Groups: []string{"csm-agents"},
 }
 
 // testPlatformUserID is the id GET /users/me resolves for testUser: the
@@ -402,10 +401,14 @@ func (m *mockSCIMClient) UpdateUserPhone(ctx context.Context, userID, mobile str
 // ----- mock entity user client -----
 
 type mockEntityUserClient struct {
-	getUserMeFn   func(ctx context.Context) ([]byte, error)
-	patchUserMeFn func(ctx context.Context, body []byte) ([]byte, error)
-	searchUsersFn func(ctx context.Context, body []byte) ([]byte, error)
-	getUserFn     func(ctx context.Context, id string) ([]byte, error)
+	getUserMeFn              func(ctx context.Context) ([]byte, error)
+	patchUserMeFn            func(ctx context.Context, body []byte) ([]byte, error)
+	searchUsersFn            func(ctx context.Context, body []byte) ([]byte, error)
+	getUserFn                func(ctx context.Context, id string) ([]byte, error)
+	listSavedFilterViewsFn   func(ctx context.Context, listKey string) ([]byte, error)
+	saveSavedFilterViewFn    func(ctx context.Context, body []byte) ([]byte, error)
+	deleteSavedFilterViewFn  func(ctx context.Context, listKey, name string) ([]byte, error)
+	reorderSavedFilterViewFn func(ctx context.Context, body []byte) ([]byte, error)
 }
 
 func (m *mockEntityUserClient) GetUser(ctx context.Context, id string) ([]byte, error) {
@@ -465,6 +468,34 @@ func (m *mockEntityUserClient) SearchUsers(ctx context.Context, body []byte) ([]
 		return m.searchUsersFn(ctx, body)
 	}
 	return []byte(`{}`), nil
+}
+
+func (m *mockEntityUserClient) ListSavedFilterViews(ctx context.Context, listKey string) ([]byte, error) {
+	if m.listSavedFilterViewsFn != nil {
+		return m.listSavedFilterViewsFn(ctx, listKey)
+	}
+	return []byte(`{"views":[]}`), nil
+}
+
+func (m *mockEntityUserClient) SaveSavedFilterView(ctx context.Context, body []byte) ([]byte, error) {
+	if m.saveSavedFilterViewFn != nil {
+		return m.saveSavedFilterViewFn(ctx, body)
+	}
+	return []byte(`{"views":[]}`), nil
+}
+
+func (m *mockEntityUserClient) DeleteSavedFilterView(ctx context.Context, listKey, name string) ([]byte, error) {
+	if m.deleteSavedFilterViewFn != nil {
+		return m.deleteSavedFilterViewFn(ctx, listKey, name)
+	}
+	return []byte(`{"views":[]}`), nil
+}
+
+func (m *mockEntityUserClient) ReorderSavedFilterView(ctx context.Context, body []byte) ([]byte, error) {
+	if m.reorderSavedFilterViewFn != nil {
+		return m.reorderSavedFilterViewFn(ctx, body)
+	}
+	return []byte(`{"views":[]}`), nil
 }
 
 // ----- mock entity account client -----
@@ -972,12 +1003,13 @@ func (m *mockEntityTimeCardClient) DeleteTimeCard(ctx context.Context, id string
 // ----- mock entity deployment client -----
 
 type mockEntityDeploymentClient struct {
-	postDeploymentFn         func(ctx context.Context, body []byte) ([]byte, error)
-	searchDeploymentsFn      func(ctx context.Context, body []byte) ([]byte, error)
-	searchDeployedProductsFn func(ctx context.Context, body []byte) ([]byte, error)
-	patchDeploymentFn        func(ctx context.Context, deploymentID string, body []byte) ([]byte, error)
-	postDeployedProductFn    func(ctx context.Context, body []byte) ([]byte, error)
-	patchDeployedProductFn   func(ctx context.Context, deployedProductID string, body []byte) ([]byte, error)
+	postDeploymentFn                 func(ctx context.Context, body []byte) ([]byte, error)
+	searchDeploymentsFn              func(ctx context.Context, body []byte) ([]byte, error)
+	searchDeployedProductsFn         func(ctx context.Context, body []byte) ([]byte, error)
+	searchProjectsByProductVersionFn func(ctx context.Context, body []byte) ([]byte, error)
+	patchDeploymentFn                func(ctx context.Context, deploymentID string, body []byte) ([]byte, error)
+	postDeployedProductFn            func(ctx context.Context, body []byte) ([]byte, error)
+	patchDeployedProductFn           func(ctx context.Context, deployedProductID string, body []byte) ([]byte, error)
 }
 
 func (m *mockEntityDeploymentClient) PostDeployment(ctx context.Context, body []byte) ([]byte, error) {
@@ -997,6 +1029,13 @@ func (m *mockEntityDeploymentClient) SearchDeployments(ctx context.Context, body
 func (m *mockEntityDeploymentClient) SearchDeployedProducts(ctx context.Context, body []byte) ([]byte, error) {
 	if m.searchDeployedProductsFn != nil {
 		return m.searchDeployedProductsFn(ctx, body)
+	}
+	return []byte(`{}`), nil
+}
+
+func (m *mockEntityDeploymentClient) SearchProjectsByProductVersion(ctx context.Context, body []byte) ([]byte, error) {
+	if m.searchProjectsByProductVersionFn != nil {
+		return m.searchProjectsByProductVersionFn(ctx, body)
 	}
 	return []byte(`{}`), nil
 }

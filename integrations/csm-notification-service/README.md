@@ -140,28 +140,26 @@ Required — a record that exhausts the main consumer's retries is published her
 | `EVENT_HUB_DLQ_CONSUMER_GROUP` | Consumer group ID the DLQ consumer's instances join. Optional — defaults to `csm-notification-service-dlq` |
 | `DLQ_CONSUMER_COUNT` | How many concurrent consumer instances to run for `EVENT_HUB_DLQ_TOPIC`. Optional — defaults to `1`; same partition-count guidance as `MAIN_CONSUMER_COUNT` |
 
-### SLA timer engine
+### SLA breach-alerting engine
 
-Optional, gated on `REDIS_URL` or `REDIS_ADDR` — unset (both) means `internal/slaengine` neither consumes `sla.clock.register` nor ticks. Ported from a standalone POC: registers a per-case SLA clock (durable state on entity-service's `sla_clocks` table, with durations entity-service computes from case severity per WSO2's own [support policy](https://wso2.com/licenses/support-policy/6.0)) when it sees a `sla.clock.register` event, tracks 50%/75%/100% elapsed via a Redis wake index, publishes `sla.tier_reached`, and sends a Google Chat breach alert directly (not routed through `internal/dispatch`) when a ticker finds a due, still-unresolved entry. Pausing, resuming, and completing a clock early (e.g. a support engineer's first response) never touch this service at all — those are direct, in-process writes from entity-service's own case-handling code straight to its `sla_clocks` table; see that repo's `CLAUDE.md`.
+Optional, gated on `REDIS_URL` or `REDIS_ADDR` — unset (both) means `internal/slaengine` never polls. Not a Kafka consumer: on a plain ticker, it polls entity-service's `GET /sla-status` (backed by the real, ServiceNow-synced `sla` table, not a value this service computes itself), diffs each clock's live elapsed percentage against the last tier it alerted for (a small cursor per `(caseId, clockType)` kept in Redis), and — on a genuinely new 50%/75%/100% crossing since its last poll — publishes `sla.tier_reached` and sends a Google Chat breach alert directly (not routed through `internal/dispatch`). The first time this engine ever sees a given clock, it seeds the cursor at that clock's *current* tier without alerting — avoiding an alert flood from every SLA clock already in progress the moment this engine starts polling; only a tier crossed on a later poll is a genuine new crossing. Replaces an earlier design that registered a durable clock per case on a now-removed entity-service `sla_clocks` table (a stand-in built before the real `sla` table existed) and scheduled Redis wake-ups off a locally-computed due date — see entity-service's own `CLAUDE.md` ("SLA status") for the full history. Pausing/resuming a clock never needs a signal from this service either: ServiceNow's own SLA engine freezes `businessElapsedPercent` while paused, so a paused clock's tier simply doesn't advance until it resumes.
 
 `REDIS_URL` (a `rediss://:<password>@<host>:<port>` connection string, parsed with `redis.ParseURL`) is how a managed, TLS-only Redis is configured — Azure Managed Redis, Azure Cache for Redis — since the `rediss` scheme makes go-redis dial with TLS automatically; takes priority over `REDIS_ADDR`/`REDIS_PASSWORD` when set. `REDIS_ADDR`/`REDIS_PASSWORD` remain the plain, non-TLS pair for a local Redis.
 
 The client is a plain `redis.NewClient` — it only supports a non-clustered Redis (a real standalone instance, or a managed Redis under a non-clustered/"Enterprise" clustering policy, where the provider's own proxy hides the sharding). It does **not** support "OSS Cluster" policy, which needs a cluster-aware client to follow `MOVED`/`ASK` redirects. Confirm the target resource's clustering policy before pointing `REDIS_URL` at it.
 
-This engine's own narrow `sla_clocks` client talks to the same entity-service as `CUSTOMER_ENTITY_BASE_URL`/`CUSTOMER_ENTITY_SCOPES` (see [Customer entity service](#customer-entity-service) above) — not a different backend — so it reuses those same two variables, plus the shared `OAUTH2_*` credentials (all required once `REDIS_URL` or `REDIS_ADDR` is set), rather than a redundant `SLA_ENTITY_*` pair.
+This engine's own narrow entity-service client talks to the same entity-service as `CUSTOMER_ENTITY_BASE_URL`/`CUSTOMER_ENTITY_SCOPES` (see [Customer entity service](#customer-entity-service) above) — not a different backend — so it reuses those same two variables, plus the shared `OAUTH2_*` credentials (all required once `REDIS_URL` or `REDIS_ADDR` is set), rather than a redundant `SLA_ENTITY_*` pair.
 
 | Variable | Description |
 |---|---|
 | `REDIS_URL` | `rediss://:<url-encoded-password>@<host>:<port>` connection string for a TLS Redis (Azure Managed Redis/Azure Cache for Redis). Percent-encode the password if it contains `+`, `/`, or `=`. Takes priority over `REDIS_ADDR`/`REDIS_PASSWORD` |
 | `REDIS_ADDR` | Redis address for a plain, non-TLS Redis, e.g. `localhost:6379`. Ignored when `REDIS_URL` is set. Unset (with `REDIS_URL` also unset) disables this whole engine |
 | `REDIS_PASSWORD` | Optional — empty for a local Redis with no auth. Ignored when `REDIS_URL` is set |
-| `SLA_CONSUMER_GROUP` | Consumer group ID this engine's own consumer instances join — independent from `EVENT_HUB_CONSUMER_GROUP`/`EVENT_HUB_DLQ_CONSUMER_GROUP`. Optional — defaults to `csm-notification-service-sla` |
-| `SLA_CONSUMER_COUNT` | How many concurrent consumer instances to run. Optional — defaults to `1` |
-| `SLA_TICK_INTERVAL` | How often the ticker scans the Redis wake index for due tiers. Optional — defaults to `15s` |
+| `SLA_TICK_INTERVAL` | How often this engine polls `GET /sla-status` and diffs tiers. Optional — defaults to `5m`. Most active SLA clocks don't change more than a few times a day, so a short interval mostly just adds load without meaningfully lowering alert latency |
 
 ### Billable status engine
 
-Always started (no Redis/state dependency, unlike the SLA timer engine above). `internal/timecardengine.Engine` consumes `case.billable_status_changed` — published by entity-service's Postgres data source when a case's severity crosses into or out of `LOW` — on its own dedicated consumer group, for the same reason the SLA timer engine has one: `eventbus.Consumer` processes one record at a time, fully sequentially, so a future bulk time-card update must not delay unrelated email/Chat delivery on `dispatch.Dispatcher`'s own consumer group.
+Always started (no Redis/state dependency, unlike the SLA engine above — it's a plain Kafka consumer). `internal/timecardengine.Engine` consumes `case.billable_status_changed` — published by entity-service's Postgres data source when a case's severity crosses into or out of `LOW` — on its own dedicated consumer group: `eventbus.Consumer` processes one record at a time, fully sequentially, so a future bulk time-card update must not delay unrelated email/Chat delivery on `dispatch.Dispatcher`'s own consumer group.
 
 **Currently log-only.** Entity-service has no `time_cards` table on its Postgres data source yet (time cards are ServiceNow-only there), so there's no bulk-update reaction to perform — and entity-service's own `Publish` call for this event is itself still commented out. This consumer group exists ahead of need: the plumbing (topic wiring, retry/DLQ behavior, schema validation) is in place and ready for when that reaction is built.
 
@@ -208,9 +206,9 @@ csm-notification-service/
 │   ├── dispatch/
 │   │   └── dispatch.go          # Dispatcher.Handle — envelope → validate → resolve links → group → template → EmailClient
 │   └── slaengine/
-│       ├── client.go            # EntityClient — narrow HTTP client for entity-service's sla_clocks endpoints
-│       ├── redis.go             # WakeIndex — the Redis ZSET scheduling index
-│       └── engine.go            # Engine.Handle (register clocks) + Engine.Tick/RunTicker (fire due tiers)
+│       ├── client.go            # EntityClient — narrow HTTP client for entity-service's GET /sla-status
+│       ├── redis.go             # TierStore — last-alerted-tier cursor per (caseId, clockType)
+│       └── engine.go            # Engine.Tick/RunTicker — poll, diff tiers, alert on new crossings
 ├── .env                         # Local config (git-ignored)
 └── go.mod
 ```
