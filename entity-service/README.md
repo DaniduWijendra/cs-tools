@@ -237,9 +237,16 @@ client secrets, not ciphertext.
 This service deliberately does not encrypt its own writes. Doing so alone would put two formats in
 one column that cannot be told apart on read — a hex key is also valid base64, so no heuristic
 recovers which writer produced a given value — and a row written here would stop matching the
-ServiceNow record the project row mirrors. Encrypting these at rest is worth doing, but it has to
-happen across every writer including the sync, which is a platform change rather than this
-service's to make. These routes need no configuration of their own beyond `DB_*`.
+ServiceNow record the project row mirrors, where `ProductConsumptionUtils.updateProject` assigns
+each value straight from its payload.
+
+It would also have to be undone before licence issuance could move here: ServiceNow signs a licence
+by reading these four values back in the clear (`_getDeployment`), and refuses to sign unless every
+one is present.
+
+Encrypting these at rest is worth doing, but it has to happen across every writer including the
+sync, which is a platform change rather than this service's to make. These routes need no
+configuration of their own beyond `DB_*`.
 
 **License issuance still runs in ServiceNow.** This service drives the five-step provisioning
 sequence through the Choreo subscription operation and returns the licence ServiceNow issues; the

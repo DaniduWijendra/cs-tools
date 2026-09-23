@@ -54,15 +54,22 @@ var ErrConsumptionStatusStale = errors.New("project consumption: stored status i
 
 // projectConsumptionRepo stores the provisioning artefacts as they are given.
 //
-// These columns are shared with the ServiceNow sync, which writes them in the
-// clear, and the project row is a mirror of the ServiceNow record. Encrypting
-// only this service's writes would put two indistinguishable formats in one
-// column -- a stored value cannot be classified after the fact, since a hex
-// key is also valid base64 -- and would make a row written here stop matching
-// the record it mirrors. Nothing reads these values back either: the read
-// response reports only whether each is present. So they are stored as
-// supplied, matching the sync. Encrypting them at rest is worth doing across
-// every writer, which is a platform change rather than this service's to make.
+// These columns are shared with the ServiceNow sync and the project row is a
+// mirror of the ServiceNow record, where ProductConsumptionUtils.updateProject
+// assigns each of them straight from its payload -- so the record this mirrors
+// holds them in the clear, and matching that is what "mirror" means here.
+//
+// Encrypting only this service's writes would put two indistinguishable
+// formats in one column (a stored value cannot be classified after the fact,
+// since a hex key is also valid base64) and would make a row written here stop
+// matching the record it mirrors. It would also have to be undone before the
+// licence path could move here: ServiceNow signs a licence by reading these
+// four values back in the clear, and refuses to sign unless all of them are
+// present.
+//
+// So they are stored as supplied. Encrypting them at rest is worth doing
+// across every writer, which is a platform change rather than this service's
+// to make.
 type projectConsumptionRepo struct {
 	db *pgxpool.Pool
 }
