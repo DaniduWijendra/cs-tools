@@ -109,8 +109,11 @@ type onboardingStepRecorder interface {
 // emails, and notifications.EmailClient binds its From at construction.
 // Steps (satisfied by *entity.CustomerEntityClient) records each step's
 // outcome on entity-service's onboarding-step ledger, best-effort — see
-// recordOnboardingStep. PortalURL is the sign-in link the invitation
-// points at (ONBOARD_PORTAL_URL).
+// recordOnboardingStep — and is also read back for the duplicate-invitation
+// check. Recording tolerates a nil Steps, but EmailEnabled does not: with
+// no ledger to read there is no duplicate check, so the EMAIL step fails as
+// a configuration error rather than sending unguarded. PortalURL is the
+// sign-in link the invitation points at (ONBOARD_PORTAL_URL).
 type OnboardingConfig struct {
 	Identity        identityProvisioner
 	Email           emailSender
@@ -1517,6 +1520,23 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 		}
 		if d.onboarding.Email == nil {
 			err := fmt.Errorf("dispatch: invitation email enabled but no email client configured")
+			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
+			return err
+		}
+		if !p.IsResend && d.onboarding.Steps == nil {
+			// A resend never reaches the read below, so a missing recorder
+			// costs it nothing but the (best-effort) record of the send;
+			// failing a deliberate resend over it would be gratuitous.
+			//
+			// recordOnboardingStep tolerates a nil recorder -- a step
+			// outcome nobody can write down is worth a warning, not a
+			// failed record. The read below is not that: without it there
+			// is no duplicate check at all, and sending anyway is the
+			// second invitation this whole block exists to prevent. So it
+			// is a configuration error, reported the same way as the two
+			// nil checks above, and the record follows the normal
+			// retry/DLQ path instead of panicking inside the consumer.
+			err := fmt.Errorf("dispatch: invitation email enabled but no onboarding-step ledger configured; cannot check whether an invitation was already sent")
 			d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepFailed, err)
 			return err
 		}

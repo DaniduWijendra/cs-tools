@@ -659,30 +659,6 @@ func TestDispatcher_Handle_ProjectContactInvited_LedgerNotConsultedWhenEmailIsOf
 	}
 }
 
-// TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation
-// pins the detached recording context. A shutdown cancels the handler's
-// context, and the EMAIL=SUCCEEDED write must still happen: losing it while
-// the offset commit is also lost is precisely how one invitation becomes
-// two.
-func TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation(t *testing.T) {
-	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
-	steps.requireLiveContext = true
-	d := newOnboardingDispatcher(identity, email, steps, true, true)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	// Cancelled the instant the email is sent, standing in for a shutdown
-	// landing between the send and the write that records it.
-	email.onSend = cancel
-
-	if err := d.Handle(ctx, invitedRecord(false)); err != nil {
-		t.Fatalf("Handle() error = %v", err)
-	}
-	if len(email.calls) != 1 {
-		t.Fatalf("emails sent = %d, want 1", len(email.calls))
-	}
-	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
-}
-
 // TestDispatcher_Handle_ProjectContactInvited_ResendBypassesTheLedgerGuard:
 // a deliberate resend is the one case the duplicate guard must not stop.
 // The ledger says an invitation already succeeded -- which is exactly what
@@ -751,4 +727,83 @@ func TestDispatcher_Handle_ProjectContactInvited_WithoutResendTheGuardStillHolds
 	if steps.emailSentChecks != 1 {
 		t.Errorf("ledger consulted %d times, want exactly 1", steps.emailSentChecks)
 	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_NoLedgerConfiguredDoesNotSend
+// covers a misconfiguration the other two nil checks already cover for the
+// SCIM and email clients: the email step enabled with no onboarding-step
+// recorder at all. Recording a step tolerates that, but the duplicate check
+// cannot -- and reaching it with a nil recorder used to panic inside the
+// consumer goroutine. It must be an ordinary failed record instead, with no
+// unguarded invitation going out.
+func TestDispatcher_Handle_ProjectContactInvited_NoLedgerConfiguredDoesNotSend(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{}, &mockEmailSender{}
+	// Deliberately not newOnboardingDispatcher: Steps has to be a nil
+	// interface, not a typed nil *mockStepRecorder.
+	d := newTestDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}).
+		WithOnboarding(OnboardingConfig{
+			Identity:        identity,
+			Email:           email,
+			IdentityEnabled: true,
+			EmailEnabled:    true,
+			PortalURL:       "https://support.wso2.com",
+		})
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil {
+		t.Fatal("Handle() = nil, want a configuration error so the record is retried")
+	}
+	if !strings.Contains(err.Error(), "onboarding-step ledger") {
+		t.Errorf("Handle() error = %v, want it to name the missing ledger", err)
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails, want none with no ledger to check them against", len(email.calls))
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ResendNeedsNoLedger is the
+// other side of that guard: a resend never reads the ledger, so a missing
+// recorder must not stop it. The send is deliberate; the only thing lost is
+// the best-effort record of it, which recordOnboardingStep already tolerates.
+func TestDispatcher_Handle_ProjectContactInvited_ResendNeedsNoLedger(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}
+	d := newTestDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}).
+		WithOnboarding(OnboardingConfig{
+			Identity:        identity,
+			Email:           email,
+			IdentityEnabled: true,
+			EmailEnabled:    true,
+			PortalURL:       "https://support.wso2.com",
+		})
+
+	if err := d.Handle(context.Background(), resentInvitedRecord()); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1: a resend does not depend on the ledger", len(email.calls))
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation
+// pins the detached recording context. A shutdown cancels the handler's
+// context, and the EMAIL=SUCCEEDED write must still happen: losing it while
+// the offset commit is also lost is precisely how one invitation becomes
+// two.
+func TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	steps.requireLiveContext = true
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancelled the instant the email is sent, standing in for a shutdown
+	// landing between the send and the write that records it.
+	email.onSend = cancel
+
+	if err := d.Handle(ctx, invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("emails sent = %d, want 1", len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
 }
