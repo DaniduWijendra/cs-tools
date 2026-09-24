@@ -149,6 +149,17 @@ func (c *Client) SearchProjectOpportunityLinks(ctx context.Context, body []byte)
 	return c.do(ctx, http.MethodPost, "/project-opportunity-links/search", body)
 }
 
+// SyncProductVulnerabilities calls POST /products/vulnerabilities/sync on the entity
+// service. This is a full-replace sync: the caller must submit the complete current set
+// of product-vulnerability records on every call, not an incremental delta — the
+// downstream ServiceNow-backed operation deletes any existing record not present in the
+// submitted set. Unlike UpdateProject, this entity-service operation accepts pure M2M
+// calls with no forwarded end-user token, so this call is expected to succeed.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *Client) SyncProductVulnerabilities(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/products/vulnerabilities/sync", body)
+}
+
 // CreateIncident calls POST /incidents on the entity service. This targets a
 // ServiceNow-backed operation that requires a forwarded end-user identity
 // token. This service is strictly M2M with no mechanism to carry one, so
@@ -189,15 +200,4 @@ func (c *Client) CreateAlertIncidentMapping(ctx context.Context, body []byte) ([
 // returned as raw JSON; typed response structs are deferred.
 func (c *Client) LookupAlertIncidentMappings(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/alert-incident-mappings/lookup", body)
-}
-
-// SyncProductVulnerabilities calls POST /products/vulnerabilities/sync on the entity
-// service. This is a full-replace sync: the caller must submit the complete current set
-// of product-vulnerability records on every call, not an incremental delta — the
-// downstream ServiceNow-backed operation deletes any existing record not present in the
-// submitted set. Unlike UpdateProject, this entity-service operation accepts pure M2M
-// calls with no forwarded end-user token, so this call is expected to succeed.
-// Response is returned as raw JSON; typed response structs are deferred.
-func (c *Client) SyncProductVulnerabilities(ctx context.Context, body []byte) ([]byte, error) {
-	return c.do(ctx, http.MethodPost, "/products/vulnerabilities/sync", body)
 }

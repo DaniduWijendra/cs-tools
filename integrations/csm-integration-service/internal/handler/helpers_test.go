@@ -236,6 +236,19 @@ func (m *mockEntityProjectOpportunityLinkClient) SearchProjectOpportunityLinks(c
 	return []byte(`{}`), nil
 }
 
+// ----- mock entity vulnerability client -----
+
+type mockEntityVulnerabilityClient struct {
+	syncProductVulnerabilitiesFn func(ctx context.Context, body []byte) ([]byte, error)
+}
+
+func (m *mockEntityVulnerabilityClient) SyncProductVulnerabilities(ctx context.Context, body []byte) ([]byte, error) {
+	if m.syncProductVulnerabilitiesFn != nil {
+		return m.syncProductVulnerabilitiesFn(ctx, body)
+	}
+	return []byte(`{}`), nil
+}
+
 // ----- mock entity incident client -----
 
 type mockEntityIncidentClient struct {
@@ -274,19 +287,6 @@ func (m *mockEntityAlertIncidentMappingClient) CreateAlertIncidentMapping(ctx co
 func (m *mockEntityAlertIncidentMappingClient) LookupAlertIncidentMappings(ctx context.Context, body []byte) ([]byte, error) {
 	if m.lookupAlertIncidentMappingsFn != nil {
 		return m.lookupAlertIncidentMappingsFn(ctx, body)
-	}
-	return []byte(`{}`), nil
-}
-
-// ----- mock entity vulnerability client -----
-
-type mockEntityVulnerabilityClient struct {
-	syncProductVulnerabilitiesFn func(ctx context.Context, body []byte) ([]byte, error)
-}
-
-func (m *mockEntityVulnerabilityClient) SyncProductVulnerabilities(ctx context.Context, body []byte) ([]byte, error) {
-	if m.syncProductVulnerabilitiesFn != nil {
-		return m.syncProductVulnerabilitiesFn(ctx, body)
 	}
 	return []byte(`{}`), nil
 }
