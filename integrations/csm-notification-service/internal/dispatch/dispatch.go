@@ -1383,6 +1383,13 @@ func (d *Dispatcher) handleCRPlanDateNotice(ctx context.Context, record eventbus
 // attempted — the invitee must not be told to sign in to an account that
 // doesn't exist.
 //
+// A resend (ProjectContactInvitedPayload.IsResend, set by entity-service
+// when an admin presses "Resend invitation") is the one case that skips
+// the duplicate-invitation ledger check below and uses the short reminder
+// template instead of either of the other two. The identity step is
+// unchanged: the SCIM endpoint is create-if-absent, so a resend simply
+// finds the account the first invitation created.
+//
 // An integration user (IsIntegrationUser) never signs in and gets no
 // email: both steps are recorded SKIPPED and nothing else happens. A step
 // whose flag is off is likewise recorded SKIPPED. A step that fails records
@@ -1540,7 +1547,19 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 		// A failure to read the ledger is not a reason to send, and not a
 		// reason to give up either, so it is returned and the record is
 		// retried.
-		if sent, err := d.onboarding.Steps.EmailAlreadySent(ctx, p.MembershipSfID); err != nil {
+		//
+		// A resend skips the check entirely. The guard exists to stop an
+		// *accidental* second invitation -- every portal invitation also
+		// writes the membership back to Salesforce, so the same contact
+		// returns through the ingest as an event and would otherwise be
+		// invited twice. An admin pressing "Resend invitation" is not
+		// that: entity-service republishes this event with isResend set
+		// precisely because the invitation should go out again. The EMAIL
+		// step is still recorded either way, so the ledger's attemptCount
+		// keeps showing how many invitations actually went out.
+		if p.IsResend {
+			slog.InfoContext(ctx, "dispatch: resend requested; not checking the invitation ledger", logAttrs...)
+		} else if sent, err := d.onboarding.Steps.EmailAlreadySent(ctx, p.MembershipSfID); err != nil {
 			return fmt.Errorf("dispatch: check invitation already sent for membership %s: %w", p.MembershipSfID, err)
 		} else if sent {
 			slog.InfoContext(ctx, "dispatch: invitation already recorded as sent for this membership; not sending again", logAttrs...)
@@ -1562,10 +1581,21 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 		// been created for you" nor "you already have one", only how to
 		// sign in.
 		var subject, body string
-		if d.onboarding.IdentityEnabled && existed {
+		switch {
+		case p.IsResend:
+			// A resend always uses the reminder wording, whatever the
+			// identity step answered. By now the account exists (the first
+			// invitation, or this record's own identity step, created it),
+			// so the "existing" template would tell someone who may never
+			// have opened the first email that they already have an
+			// account -- and the "new" one would welcome them a second
+			// time. The reminder claims neither.
+			subject = fmt.Sprintf("[WSO2 Support] Reminder: your invitation to %s", data.ProjectName)
+			body = notifications.RenderProjectContactInvitedReminderEmail(data)
+		case d.onboarding.IdentityEnabled && existed:
 			subject = fmt.Sprintf("[WSO2 Support] %s has been added to your account", data.ProjectName)
 			body = notifications.RenderProjectContactInvitedExistingEmail(data)
-		} else {
+		default:
 			data.AccountCreated = d.onboarding.IdentityEnabled
 			subject = fmt.Sprintf("[WSO2 Support] You have been given access to %s", data.ProjectName)
 			if data.AccountCreated {
@@ -1579,7 +1609,7 @@ func (d *Dispatcher) handleProjectContactInvited(ctx context.Context, record eve
 			return err
 		}
 		d.recordOnboardingStep(ctx, p, entity.OnboardingStepEmail, entity.OnboardingStepSucceeded, nil)
-		slog.InfoContext(ctx, "dispatch: invitation email sent", append(logAttrs, "existingAccount", d.onboarding.IdentityEnabled && existed)...)
+		slog.InfoContext(ctx, "dispatch: invitation email sent", append(logAttrs, "existingAccount", d.onboarding.IdentityEnabled && existed, "resend", p.IsResend)...)
 	}
 
 	return nil

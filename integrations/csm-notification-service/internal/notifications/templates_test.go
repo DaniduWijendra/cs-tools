@@ -260,9 +260,10 @@ func TestRenderCRApprovalRequestedEmail_MissingDetail(t *testing.T) {
 }
 
 // TestRenderProjectContactInvitedEmail_Variants pins what distinguishes the
-// two invitation wordings — the "new" one welcomes a just-created account
+// three invitation wordings — the "new" one welcomes a just-created account
 // and explains the first-sign-in email code, the "existing" one says the
-// project was added to an account the reader already has — and that both
+// project was added to an account the reader already has, the "reminder"
+// (a deliberate resend) just repeats the invitation — and that all
 // carry every value a reader needs (name, project, key, email, sign-in
 // link, roles) with no placeholder left unsubstituted.
 func TestRenderProjectContactInvitedEmail_Variants(t *testing.T) {
@@ -302,6 +303,18 @@ func TestRenderProjectContactInvitedEmail_Variants(t *testing.T) {
 			want:   []string{"has been added to your WSO2 Support Portal account", "You already have a WSO2 account"},
 			deny:   []string{"A WSO2 account has been created for you", "verification code"},
 		},
+		{
+			// A resend: it must claim neither that an account was just
+			// created nor that the reader already has one — they may
+			// never have seen the first invitation.
+			name: "reminder",
+			render: func(d ProjectContactInvitedEmailData) string {
+				d.AccountCreated = true
+				return RenderProjectContactInvitedReminderEmail(d)
+			},
+			want: []string{"Your invitation", "Here is your invitation to the project", "Sign in with your email address"},
+			deny: []string{"A WSO2 account has been created for you", "You already have a WSO2 account", "Welcome"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -335,6 +348,7 @@ func TestRenderProjectContactInvitedEmail_OmitsRolesLineWhenEmpty(t *testing.T) 
 	for name, render := range map[string]func(ProjectContactInvitedEmailData) string{
 		"new":      RenderProjectContactInvitedNewEmail,
 		"existing": RenderProjectContactInvitedExistingEmail,
+		"reminder": RenderProjectContactInvitedReminderEmail,
 	} {
 		got := render(ProjectContactInvitedEmailData{DisplayName: "jane", Email: "jane@acme.com", ProjectName: "Acme Cloud", ProjectKey: "ACMECLOUD", PortalURL: "https://support.wso2.com"})
 		if strings.Contains(got, "Your role") {

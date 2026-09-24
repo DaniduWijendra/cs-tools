@@ -43,6 +43,7 @@ func TestValidate_Valid(t *testing.T) {
 		"incident.created omits product/callTo": {"INC-1", TypeIncidentCreated, `{"title":"P1 outage","shortDescription":"Everything is down"}`},
 		"sla.tier_reached":                      {"CASE-1", TypeSLATierReached, `{"caseId":"CASE-1","clockType":"response","tier":"50"}`},
 		"project_contact.invited":               {"a0e000000000001AAA", TypeProjectContactInvited, `{"membershipSfId":"a0e000000000001AAA","contactSfId":"003000000000001AAA","email":"jane@acme.com","givenName":"Jane","familyName":"Doe","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":["Admin","Portal user"],"isIntegrationUser":false,"type":"OWN CONTACT"}`},
+		"project_contact.invited resend":        {"a0e000000000001AAA", TypeProjectContactInvited, `{"membershipSfId":"a0e000000000001AAA","contactSfId":"003000000000001AAA","email":"jane@acme.com","givenName":"Jane","familyName":"Doe","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":["Admin"],"isIntegrationUser":false,"type":"OWN CONTACT","isResend":true}`},
 		"project_contact.invited without names": {"a0e000000000001AAA", TypeProjectContactInvited, `{"membershipSfId":"a0e000000000001AAA","contactSfId":"","email":"svc@acme.com","givenName":"","familyName":"","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":null,"isIntegrationUser":true,"type":"OWN CONTACT"}`},
 	}
 	for name, c := range cases {
