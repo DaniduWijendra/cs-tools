@@ -22,4 +22,6 @@ DROP POLICY IF EXISTS announcement_visibility ON announcement;
 ALTER TABLE announcement NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE announcement DISABLE ROW LEVEL SECURITY;
 
+DROP FUNCTION IF EXISTS announcement_is_security(UUID, announcement_type_enum);
+
 DROP INDEX IF EXISTS idx_project_contact_project_id_email;

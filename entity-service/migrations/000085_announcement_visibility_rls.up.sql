@@ -61,6 +61,50 @@
 -- equals 'true', and NULL never equals an email, so both the internal
 -- bypass and the EXISTS lookup naturally evaluate to "no access" rather
 -- than needing an explicit "is this set" check.
+--
+-- announcement_is_security decides general-vs-security from TWO signals,
+-- not just announcement_type (migration 000084_announcement_add_type):
+-- checked live against the real ServiceNow-synced data, announcement_type
+-- is correctly set on some real security bulletins but NOT on others (a
+-- currently-open, CVSS 10.0 "account takeover" bulletin fanned out to many
+-- real customers had announcement_type = 'GENERAL') -- and there is no
+-- guarantee historical rows will ever be corrected. The "Security
+-- Announcement" work_item_tag (already attached by the publish flow's
+-- AddCaseTagAs, see announcement_request_service.go's
+-- autoPublishSecurityTagLabel) is checked too, as a second, independent
+-- signal: a row is treated as security if EITHER says so, so a gap in one
+-- signal doesn't silently under-protect a real security announcement.
+--
+-- KNOWN GAP, accepted rather than worked around here (checked live, not
+-- assumed): a whole class of historical/ongoing ServiceNow-originated
+-- bulletins -- every "[Special Security Announcement]"-prefixed case,
+-- including the entire real Log4Shell (CVE-2021-44228) campaign, 31,741
+-- cases -- has BOTH signals wrong: announcement_type = 'GENERAL' and no
+-- work_item_tag at all (confirmed against ServiceNow's own label_entry
+-- table). Whatever process creates these bulletins sets neither signal
+-- correctly, for years running -- a source-data quality issue in that
+-- external process, not something a Postgres policy can safely infer from
+-- (e.g. matching on subject-line keywords would be fragile and easy to get
+-- wrong in both directions, trading a known gap for a new one). This is
+-- still strictly an improvement over the pre-migration baseline, which
+-- enforced no restriction on any announcement at all -- new announcements
+-- and portal-published ones are correctly protected; this historical
+-- ServiceNow-batch class is not, until that upstream process is fixed.
+CREATE OR REPLACE FUNCTION announcement_is_security(ann_id UUID, ann_type announcement_type_enum)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT ann_type = 'SECURITY'
+    OR EXISTS (
+      SELECT 1
+      FROM work_item_tag wit
+      JOIN tag t ON t.id = wit.tag_id
+      WHERE wit.work_item_id = ann_id
+        AND LOWER(t.name) = LOWER('Security Announcement')
+    )
+$$;
+
 ALTER TABLE announcement ENABLE ROW LEVEL SECURITY;
 
 -- Without FORCE, a non-superuser table owner is still exempt from its own
@@ -93,8 +137,8 @@ CREATE POLICY announcement_visibility ON announcement
       WHERE wi.id = announcement.id
         AND LOWER(pc.email) = LOWER(current_setting('app.viewer_email', true))
         AND (
-          (NOT announcement.is_security_announcement AND pr.role IN ('PORTAL_USER', 'LEAD_USER'))
-          OR (announcement.is_security_announcement AND pr.role = 'SECURITY_CONTACT')
+          (NOT announcement_is_security(announcement.id, announcement.announcement_type) AND pr.role IN ('PORTAL_USER', 'LEAD_USER'))
+          OR (announcement_is_security(announcement.id, announcement.announcement_type) AND pr.role = 'SECURITY_CONTACT')
         )
     )
   );

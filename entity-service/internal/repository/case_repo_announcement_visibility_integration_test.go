@@ -23,17 +23,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
 
-// Runs against a real Postgres with migrations 000084/000085 applied (the
-// announcement.is_security_announcement column and its RLS policy) --
+// Runs against a real Postgres with migration 000085 applied (the RLS
+// policy, keyed on announcement_type from migration 000084_announcement_add_type
+// and the "Security Announcement" work_item_tag -- see
+// announcement_is_security's own doc comment for why both signals) --
 // exercises the actual caseRepo.GetCaseByID/SearchCases Go code, not just the
 // SQL policy in isolation, since that is the only way to prove
-// setAnnouncementVisibility's transaction wiring actually works end to end.
+// setCallerIdentity's transaction wiring actually works end to end.
 // Skipped without ANNOUNCEMENT_VISIBILITY_TEST_DSN, so an ordinary
 // `go test ./...` stays hermetic.
 //
@@ -53,17 +56,19 @@ func announcementVisibilityPool(t *testing.T) *pgxpool.Pool {
 }
 
 const (
-	avProjectID  = "b0000000-0000-0000-0000-000000000099"
-	avAccountID  = "a0000000-0000-0000-0000-000000000099"
-	avContactID  = "c0000000-0000-0000-0000-000000000099"
-	avGeneralID  = "31111111-1111-1111-1111-111111111111"
-	avSecurityID = "32222222-2222-2222-2222-222222222222"
+	avProjectID        = "b0000000-0000-0000-0000-000000000099"
+	avAccountID        = "a0000000-0000-0000-0000-000000000099"
+	avContactID        = "c0000000-0000-0000-0000-000000000099"
+	avGeneralID        = "31111111-1111-1111-1111-111111111111"
+	avSecurityID       = "32222222-2222-2222-2222-222222222222"
+	avSecurityViaTagID = "33333333-3333-3333-3333-333333333333"
 )
 
 // seedAnnouncementVisibilityFixtures creates one project with five contacts
 // (one per real project_group -- General Access, Security Only, Full
-// Access, Lead User Group, Business Contact Group alone) and two
-// announcements (one general, one security). project_role/project_group/
+// Access, Lead User Group, Business Contact Group alone) and three
+// announcements (general, security via announcement_type, and security via
+// the work_item_tag fallback only). project_role/project_group/
 // project_group_role are reference data populated by the external
 // ServiceNow sync job, never by this test -- looked up by name rather than
 // (re)created, and the test fails with a clear message rather than silently
@@ -124,12 +129,34 @@ func seedAnnouncementVisibilityFixtures(t *testing.T, pool *pgxpool.Pool) {
 	mustExec(`INSERT INTO work_item (id, created_on, updated_on, created_by, updated_by, number, wso2_id, subject, type, project_id)
 		VALUES ($1, $2, $2, 'test', 'test', 'AV-TEST-GEN-1', 'AV-WSO2-GEN-1', 'AV test general announcement', 'ANNOUNCEMENT', $3)`,
 		avGeneralID, now, avProjectID)
-	mustExec(`INSERT INTO announcement (id, is_security_announcement) VALUES ($1, false)`, avGeneralID)
+	mustExec(`INSERT INTO announcement (id, announcement_type) VALUES ($1, 'GENERAL')`, avGeneralID)
 
 	mustExec(`INSERT INTO work_item (id, created_on, updated_on, created_by, updated_by, number, wso2_id, subject, type, project_id)
 		VALUES ($1, $2, $2, 'test', 'test', 'AV-TEST-SEC-1', 'AV-WSO2-SEC-1', 'AV test security announcement', 'ANNOUNCEMENT', $3)`,
 		avSecurityID, now, avProjectID)
-	mustExec(`INSERT INTO announcement (id, is_security_announcement) VALUES ($1, true)`, avSecurityID)
+	mustExec(`INSERT INTO announcement (id, announcement_type) VALUES ($1, 'SECURITY')`, avSecurityID)
+
+	// Mirrors a real finding (checked live against ServiceNow-synced data): a
+	// currently-open, CVSS 10.0 security bulletin had announcement_type wrongly
+	// GENERAL, with only its "Security Announcement" work_item_tag correct --
+	// exercises announcement_is_security's tag-based fallback signal, not just
+	// its announcement_type check.
+	mustExec(`INSERT INTO work_item (id, created_on, updated_on, created_by, updated_by, number, wso2_id, subject, type, project_id)
+		VALUES ($1, $2, $2, 'test', 'test', 'AV-TEST-SEC-2', 'AV-WSO2-SEC-2', 'AV test security via tag only', 'ANNOUNCEMENT', $3)`,
+		avSecurityViaTagID, now, avProjectID)
+	mustExec(`INSERT INTO announcement (id, announcement_type) VALUES ($1, 'GENERAL')`, avSecurityViaTagID)
+
+	var tagID string
+	err := pool.QueryRow(ctx, `SELECT id FROM tag WHERE LOWER(name) = LOWER('Security Announcement') LIMIT 1`).Scan(&tagID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = pool.QueryRow(ctx, `INSERT INTO tag (id, created_on, updated_on, created_by, updated_by, name)
+			VALUES (gen_random_uuid(), $1, $1, 'test', 'test', 'Security Announcement') RETURNING id`, now).Scan(&tagID)
+	}
+	if err != nil {
+		t.Fatalf("find or create Security Announcement tag: %v", err)
+	}
+	mustExec(`INSERT INTO work_item_tag (id, created_on, updated_on, created_by, updated_by, work_item_id, tag_id)
+		VALUES (gen_random_uuid(), $1, $1, 'test', 'test', $2, $3)`, now, avSecurityViaTagID, tagID)
 }
 
 // caseTypeOf runs GetCaseByID and reports whether the announcement was
@@ -160,29 +187,34 @@ func TestAnnouncementVisibilityIntegration(t *testing.T) {
 	}
 
 	cases := []struct {
-		name         string
-		scope        repository.SearchScope
-		wantGeneral  bool
-		wantSecurity bool
+		name               string
+		scope              repository.SearchScope
+		wantGeneral        bool
+		wantSecurity       bool
+		wantSecurityViaTag bool
 	}{
-		{"General Access", scoped("av-general@test.local"), true, false},
-		{"Security Only", scoped("av-secure-only@test.local"), false, true},
-		{"Full Access", scoped("av-full-access@test.local"), true, true},
-		{"Lead User Group", scoped("av-lead@test.local"), true, false},
-		{"Business Contact Group alone", scoped("av-biz-contact-alone@test.local"), false, false},
-		{"Unknown email, fails closed", scoped("nobody@nowhere.local"), false, false},
-		{"Internal caller sees both", repository.SearchScope{Unrestricted: true}, true, true},
+		{"General Access", scoped("av-general@test.local"), true, false, false},
+		{"Security Only", scoped("av-secure-only@test.local"), false, true, true},
+		{"Full Access", scoped("av-full-access@test.local"), true, true, true},
+		{"Lead User Group", scoped("av-lead@test.local"), true, false, false},
+		{"Business Contact Group alone", scoped("av-biz-contact-alone@test.local"), false, false, false},
+		{"Unknown email, fails closed", scoped("nobody@nowhere.local"), false, false, false},
+		{"Internal caller sees all three", repository.SearchScope{Unrestricted: true}, true, true, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gotGeneral := announcementVisible(t, repo, avGeneralID, tc.scope)
 			gotSecurity := announcementVisible(t, repo, avSecurityID, tc.scope)
+			gotSecurityViaTag := announcementVisible(t, repo, avSecurityViaTagID, tc.scope)
 			if gotGeneral != tc.wantGeneral {
 				t.Errorf("general announcement visible = %v, want %v", gotGeneral, tc.wantGeneral)
 			}
 			if gotSecurity != tc.wantSecurity {
 				t.Errorf("security announcement visible = %v, want %v", gotSecurity, tc.wantSecurity)
+			}
+			if gotSecurityViaTag != tc.wantSecurityViaTag {
+				t.Errorf("security-via-tag announcement (announcement_type wrongly GENERAL) visible = %v, want %v", gotSecurityViaTag, tc.wantSecurityViaTag)
 			}
 		})
 	}
@@ -209,10 +241,10 @@ func TestAnnouncementVisibilitySearchCasesIntegration(t *testing.T) {
 		wantCount int
 	}{
 		{"General Access sees 1 (general only)", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-general@test.local"}, 1},
-		{"Security Only sees 1 (security only)", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-secure-only@test.local"}, 1},
-		{"Full Access sees 2 (both)", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-full-access@test.local"}, 2},
+		{"Security Only sees 2 (security + tag-only security)", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-secure-only@test.local"}, 2},
+		{"Full Access sees 3 (all)", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-full-access@test.local"}, 3},
 		{"Business Contact alone sees 0", repository.SearchScope{ProjectIDs: []string{avProjectID}, ViewerEmail: "av-biz-contact-alone@test.local"}, 0},
-		{"Internal caller sees 2 (both)", repository.SearchScope{Unrestricted: true}, 2},
+		{"Internal caller sees 3 (all)", repository.SearchScope{Unrestricted: true}, 3},
 	}
 
 	for _, tc := range cases {
