@@ -56,10 +56,10 @@ func (s ConsumptionStatus) Valid() bool {
 
 // ProjectConsumption is the stored provisioning state for one project.
 //
-// The credential fields are decrypted on read and encrypted on write by the
-// repository; this struct always holds them in the clear, which is why it is
-// never serialised to a response as-is. See ProjectConsumptionView for what
-// callers actually receive.
+// The credential fields are stored and read as supplied -- the repository
+// neither encrypts nor decrypts them, see projectConsumptionRepo for why. This
+// struct therefore holds real secrets, which is why it is never serialised to a
+// response as-is. See ProjectConsumptionView for what callers actually receive.
 type ProjectConsumption struct {
 	ProjectID           string
 	Status              ConsumptionStatus

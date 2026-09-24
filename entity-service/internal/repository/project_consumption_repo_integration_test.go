@@ -15,7 +15,7 @@
 // under the License.
 
 // These tests exercise the real SQL in project_consumption_repo.go against a
-// live PostgreSQL instance. The forward-only guard is an ON CONFLICT ... WHERE
+// live PostgreSQL instance. The forward-only guard is a guarded UPDATE ... WHERE
 // clause and the partial write is a COALESCE — neither has any behaviour a fake
 // repository can reproduce, so the unit tests in internal/service cannot cover
 // them and these fill that gap.
@@ -275,7 +275,7 @@ func TestIntegration_PartialWriteKeepsEarlierSteps(t *testing.T) {
 	}
 }
 
-// TestIntegration_BackwardsWriteIsRejected covers the ON CONFLICT ... WHERE
+// TestIntegration_BackwardsWriteIsRejected covers the UPDATE ... WHERE
 // guard directly — the clause a fake repository cannot model.
 func TestIntegration_BackwardsWriteIsRejected(t *testing.T) {
 	repo, _ := newIntegrationRepo(t)
@@ -485,14 +485,6 @@ func advance(t *testing.T, repo ProjectConsumptionRepository, status domain.Cons
 
 func asNotFound(err error, target **apierror.NotFoundError) bool {
 	v, ok := err.(*apierror.NotFoundError)
-	if ok {
-		*target = v
-	}
-	return ok
-}
-
-func asValidation(err error, target **apierror.ValidationError) bool {
-	v, ok := err.(*apierror.ValidationError)
 	if ok {
 		*target = v
 	}

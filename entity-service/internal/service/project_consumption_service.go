@@ -387,16 +387,46 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 		req := domain.DeploymentLicenseRequest{
 			Email: email,
 		}
-		if s.repo != nil {
-			signingCtx, err := s.repo.GetSigningContext(ctx, projectID, deploymentID)
-			if err != nil {
-				slog.WarnContext(ctx, "failed to load signing context for licence download; falling back to direct download",
+		// The signing context is only safe to send when the Postgres mirror is
+		// authoritative for this project. GetSigningContext reads credentials
+		// by project id alone and does not look at status, so a mirror that is
+		// disabled, stale or diverged would otherwise hand the licensing
+		// operation keys that do not match the ones ServiceNow holds -- and it
+		// would sign with them rather than fail. Two conditions gate it:
+		// dual-write is on, so this service is actually maintaining the mirror;
+		// and the mirror has itself reached step 5, matching the ServiceNow
+		// status this branch was entered on. The status is re-read here rather
+		// than reused from the divergence check above, because the sequence
+		// advances the mirror during this same call.
+		//
+		// Failing either check is not an error: the direct download is the
+		// pre-existing path and still works.
+		if s.dualWrite && s.repo != nil {
+			pgState, _, _, getErr := s.repo.Get(ctx, projectID)
+			switch {
+			case getErr != nil:
+				slog.WarnContext(ctx, "could not read the postgres mirror for licence signing; falling back to direct download",
 					"projectId", projectID,
 					"deploymentId", deploymentID,
-					"err", err,
+					"err", getErr,
 				)
-			} else if signingCtx != nil && signingCtx.PrimarySecretKey != "" {
-				req.SigningContext = signingCtx
+			case pgState.Status != domain.ConsumptionStatusGeneratedSecretKeys:
+				slog.WarnContext(ctx, "postgres mirror is not at the generated-secret-keys step; falling back to direct download",
+					"projectId", projectID,
+					"deploymentId", deploymentID,
+					"postgresStatus", int(pgState.Status),
+				)
+			default:
+				signingCtx, err := s.repo.GetSigningContext(ctx, projectID, deploymentID)
+				if err != nil {
+					slog.WarnContext(ctx, "failed to load signing context for licence download; falling back to direct download",
+						"projectId", projectID,
+						"deploymentId", deploymentID,
+						"err", err,
+					)
+				} else if signingCtx != nil && signingCtx.PrimarySecretKey != "" {
+					req.SigningContext = signingCtx
+				}
 			}
 		}
 

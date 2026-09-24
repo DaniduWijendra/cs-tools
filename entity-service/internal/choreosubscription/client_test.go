@@ -240,7 +240,10 @@ func TestClient_GetConsumptionStatus(t *testing.T) {
 		}
 		var req ConsumptionStatusRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode req: %v", err)
+			// t.Errorf, not t.Fatalf: httptest runs this handler on its own
+			// goroutine, and FailNow from there cannot stop the test goroutine.
+			t.Errorf("decode req: %v", err)
+			return
 		}
 		if req.DeploymentID != expectedDepSysID {
 			t.Errorf("got deploymentID %s, want %s", req.DeploymentID, expectedDepSysID)

@@ -2189,11 +2189,9 @@ paths:
       summary: Get a project's product-consumption provisioning state.
       description: >
         Reads the Postgres mirror of the provisioning state, so this route is
-        registered only where a database pool and an encryption key
-        (CONSUMPTION_SECRET_KEY) are both configured — without the key it is not
-        registered at all, rather than storing the credentials in the clear.
-        This is independent of DATA_SOURCE: a configured pool enables it on the
-        ServiceNow data source too, which is what staging and production run.
+        registered wherever a database pool is configured. This is independent
+        of DATA_SOURCE: a configured pool enables it on the ServiceNow data
+        source too, which is what staging and production run.
 
         ServiceNow remains the source of truth for the status itself. There it
         lives on the customer_project record and is reached through the
@@ -8881,13 +8879,13 @@ components:
           description: Required when status is 4.
         consumerSecret:
           type: string
-          description: Required when status is 4. Stored encrypted; never returned.
+          description: Required when status is 4. Stored as supplied; never returned.
         primarySecretKey:
           type: string
-          description: Required when status is 5. Stored encrypted; never returned.
+          description: Required when status is 5. Stored as supplied; never returned.
         secondarySecretKey:
           type: string
-          description: Required when status is 5. Stored encrypted; never returned.
+          description: Required when status is 5. Stored as supplied; never returned.
       required:
         - status
 
