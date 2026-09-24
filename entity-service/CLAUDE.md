@@ -1352,6 +1352,41 @@ changed.
   (`domain.NewUserReference("", ...)`), never the watcher's own resolved id
   — `WatchListUser.User`'s own doc comment requires that field to stay null
   regardless of whether this data source happens to know it.
+
+  **A new case always gets no watchers at all on the SN-first create
+  path.** `CreateCaseFromServiceNow`'s insert only ever writes `work_item`/
+  the type-specific extension table — never `work_item_watcher` — so every
+  Postgres-sourced read of a freshly created case (`GetCaseByID`,
+  `SearchCases`) showed no watchers, and `publishCaseCreatedEvent`'s own
+  `Recipients` (built from a `GetCaseByID` call) went out to nobody. An
+  earlier revision of this fix mirrored `req.WatchList` (whatever the
+  caller sent, forwarded to ServiceNow via `s.snMirror.CreateCase`) into
+  `work_item_watcher` — deliberately replaced: that design still routed the
+  default watch list through ServiceNow-shaped concepts (email vs. UUID
+  resolution, `userRepo.GetUserByEmail` lookups) for something this schema
+  can answer directly.
+
+  **Every case now gets its account's four named stakeholders as watchers,
+  unconditionally, from a pure Postgres lookup — no ServiceNow involved.**
+  `account.customer_success_manager_id`/`technical_owner_id`/
+  `secondary_technical_owner_id`/`account_manager_id` (migration 000008)
+  are already `"user"` ids, so there's no email/UUID ambiguity to resolve
+  at all. `createCaseSNFirst` calls `addAccountDefaultWatchers` right after
+  `CreateCaseFromServiceNow` succeeds and before `publishCaseCreatedEvent`;
+  it resolves those four ids for the case's project via
+  `CaseRepository.AccountDefaultWatcherIDs` (a `project JOIN account`,
+  whichever of the four are set, deduplicated) and writes them with the
+  same `CaseRepository.SetCaseWatchList` the `UpdateCase` branch above
+  already uses. A project with no linked account, or an account with none
+  of the four roles set, is a normal state (an empty slice, `SetCaseWatchList`
+  never called) — not an error. A repository failure here is logged, not
+  returned: ServiceNow already has the case by this point, so a missing
+  default watch list must not be reported as a failed create, same posture
+  as every other post-ServiceNow-success step in this file (event
+  publishing included). `req.WatchList` itself is unaffected by any of
+  this — it's still forwarded to ServiceNow as part of the create request
+  the normal way; this addition is purely about what the Postgres mirror
+  also guarantees.
 - **Account contacts** (`account_contact`, migration 000020) and **project
   contacts** (`project_contact` + `project_contact_group`/`project_group`/
   `project_group_role`/`project_role`, migrations 000022-000025): new

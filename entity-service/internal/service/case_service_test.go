@@ -62,6 +62,7 @@ type stubCaseRepo struct {
 	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
 	addCaseTag               func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
 	setCaseWatchList         func(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error)
+	accountDefaultWatcherIDs func(ctx context.Context, projectID string) ([]string, error)
 }
 
 func (s *stubCaseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error) {
@@ -159,6 +160,18 @@ func (s *stubCaseRepo) SetCaseWatchList(ctx context.Context, caseID string, user
 		return s.setCaseWatchList(ctx, caseID, userIDs, actorEmail)
 	}
 	panic("not implemented")
+}
+
+// AccountDefaultWatcherIDs defaults to empty rather than panicking:
+// createCaseSNFirst now calls it unconditionally on every case create, and
+// none of this stub's existing test cases (from before this method existed)
+// care about its contents -- same reasoning as stubUserRepo's
+// GetUserRoles/GetUserGroups defaults above.
+func (s *stubCaseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error) {
+	if s.accountDefaultWatcherIDs != nil {
+		return s.accountDefaultWatcherIDs(ctx, projectID)
+	}
+	return nil, nil
 }
 func (s *stubCaseRepo) SearchCaseActivities(context.Context, domain.SearchCaseActivitiesRequest) ([]domain.CaseActivity, int, error) {
 	panic("not implemented")
@@ -1104,6 +1117,142 @@ func TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds(t *testing.T)
 	}
 	if publisher.calls[0].eventType != events.TypeCaseCreated || publisher.calls[0].entityID != caseID {
 		t.Errorf("unexpected publish call: %+v", publisher.calls[0])
+	}
+}
+
+// TestCaseService_CreateCase_AddsAccountDefaultWatchers is the regression
+// guard for a real gap: CreateCaseFromServiceNow's insert never touched
+// work_item_watcher, so a newly created case always showed no watchers on
+// every Postgres-sourced read (GetCaseByID, SearchCases), and case.created's
+// own Recipients (built from a GetCaseByID call) went out to nobody. Rather
+// than mirroring whatever req.WatchList happened to carry (a ServiceNow/
+// email-resolution-dependent design), every case now gets its account's
+// four named stakeholders as watchers directly from a Postgres lookup
+// (AccountDefaultWatcherIDs), independent of req.WatchList and of
+// ServiceNow entirely. Also proves this runs before the case.created
+// publish -- see TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds's
+// own getCaseByID stub for how a missing/late mirror would otherwise show
+// up as empty Recipients.
+func TestCaseService_CreateCase_AddsAccountDefaultWatchers(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+	const projectID = "proj-1"
+	stakeholderIDs := []string{"csm-id", "tow-id", "stow-id", "am-id"}
+
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	var setWatchListCaseID string
+	var setWatchListUserIDs []string
+	var watchListSet bool
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, ProjectID: projectID, State: &respState}, nil
+		},
+		accountDefaultWatcherIDs: func(_ context.Context, gotProjectID string) ([]string, error) {
+			if gotProjectID != projectID {
+				t.Errorf("AccountDefaultWatcherIDs projectID = %q, want %q", gotProjectID, projectID)
+			}
+			return stakeholderIDs, nil
+		},
+		setCaseWatchList: func(_ context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error) {
+			setWatchListCaseID = caseID
+			setWatchListUserIDs = userIDs
+			watchListSet = true
+			return nil, time.Time{}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			if !watchListSet {
+				t.Error("GetCaseByID (case.created enrichment) was called before SetCaseWatchList")
+			}
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: projectID, Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.calls) == 0 {
+		t.Fatal("expected case.created to be published")
+	}
+
+	if setWatchListCaseID != caseID {
+		t.Fatalf("SetCaseWatchList caseID = %q, want %q", setWatchListCaseID, caseID)
+	}
+	if len(setWatchListUserIDs) != len(stakeholderIDs) {
+		t.Fatalf("SetCaseWatchList userIDs = %v, want %v", setWatchListUserIDs, stakeholderIDs)
+	}
+	for i, id := range stakeholderIDs {
+		if setWatchListUserIDs[i] != id {
+			t.Errorf("SetCaseWatchList userIDs[%d] = %q, want %q", i, setWatchListUserIDs[i], id)
+		}
+	}
+}
+
+// TestCaseService_CreateCase_NoAccountDefaultWatchersIsNotAnError proves the
+// other half: a project with no linked account, or one whose account has
+// none of the four stakeholder roles set, is a normal state
+// (AccountDefaultWatcherIDs returns an empty slice) -- SetCaseWatchList must
+// not even be called, and the create must still succeed.
+func TestCaseService_CreateCase_NoAccountDefaultWatchersIsNotAnError(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	setWatchListCalled := false
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
+		},
+		accountDefaultWatcherIDs: func(context.Context, string) ([]string, error) {
+			return nil, nil
+		},
+		setCaseWatchList: func(context.Context, string, []string, string) ([]domain.WatchListUser, time.Time, error) {
+			setWatchListCalled = true
+			return nil, time.Time{}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+			}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if setWatchListCalled {
+		t.Error("SetCaseWatchList must not be called when the account has no default watchers")
 	}
 }
 

@@ -500,6 +500,13 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 		return domain.CreateCaseResponse{}, err
 	}
 
+	// Every case gets its account's four named stakeholders as watchers by
+	// default -- a pure Postgres lookup, independent of req.WatchList and of
+	// ServiceNow entirely (no forwarding, no email/UUID resolution). Must run
+	// before the publish call below: it builds its own Recipients from a
+	// GetCaseByID call, which reads watchers from work_item_watcher.
+	s.addAccountDefaultWatchers(ctx, c.ID, c.ProjectID, c.CreatedBy)
+
 	// Only now — Postgres has confirmed the row this mode's reads actually
 	// depend on — is it safe to publish. See publishCaseCreatedEvent's doc
 	// comment for why this can't just be snCaseService's own automatic
@@ -523,6 +530,35 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 			State:      responseState,
 		},
 	}, nil
+}
+
+// addAccountDefaultWatchers adds a just-created case's account's four named
+// stakeholders (customer_success_manager_id, technical_owner_id,
+// secondary_technical_owner_id, account_manager_id -- migration 000008) as
+// its initial watchers -- see createCaseSNFirst's own call site comment for
+// why this exists. A plain Postgres lookup keyed by projectID, independent
+// of req.WatchList and of ServiceNow entirely: no forwarding, no email/UUID
+// resolution -- the four columns are already user ids.
+//
+// Best-effort: ServiceNow already has the case by the time this runs (see
+// createCaseSNFirst's own "no orphan gets created" vs. "real drift"
+// distinction), so a failure here must not fail the create -- logged rather
+// than returned, the same posture publishCaseCreatedEvent's own doc comment
+// documents for the sibling publish step right after this one. A project
+// with no linked account, or none of the four roles set, is a normal state
+// (AccountDefaultWatcherIDs returns an empty slice), not an error.
+func (s *caseService) addAccountDefaultWatchers(ctx context.Context, caseID, projectID, callerEmail string) {
+	userIDs, err := s.repo.AccountDefaultWatcherIDs(ctx, projectID)
+	if err != nil {
+		slog.ErrorContext(ctx, "create case: resolving account default watchers failed", "caseId", caseID, "error", err)
+		return
+	}
+	if len(userIDs) == 0 {
+		return
+	}
+	if _, _, err := s.repo.SetCaseWatchList(ctx, caseID, userIDs, callerEmail); err != nil {
+		slog.ErrorContext(ctx, "create case: adding account default watchers failed", "caseId", caseID, "error", err)
+	}
 }
 
 // GetCaseByID implements CaseService.
