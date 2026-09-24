@@ -634,6 +634,12 @@ type CaseService interface {
 	// AddCaseTag attaches a free-text label to the case identified by caseID.
 	// A ValidationError is returned for invalid input (e.g. malformed UUID, empty label).
 	AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error)
+	// AddCaseTagAs is AddCaseTag for a caller that already knows who is
+	// acting (actorEmail) and has no live x-user-id-token to resolve it
+	// from -- see AnnouncementRequestService.AutoPublish's own doc comment
+	// for why that caller can never have one. Skips the token-based actor
+	// resolution AddCaseTag does; everything else is identical.
+	AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
 	// RemoveCaseTag removes the tag identified by tagID from the case identified by caseID.
 	// A NotFoundError is returned if the tag does not exist on the case.
 	RemoveCaseTag(ctx context.Context, caseID, tagID string) error

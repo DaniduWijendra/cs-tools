@@ -218,16 +218,17 @@ func (f *fakeAnnouncementRequestRepo) ListDeliveries(_ context.Context, announce
 	return f.listDeliveriesResult, nil
 }
 
-// fakeCaseFanOutClient stubs the narrow CreateCase/AddCaseTag subset
+// fakeCaseFanOutClient stubs the narrow CreateCase/AddCaseTagAs subset
 // AutoPublish uses — every created case gets a sequential id ("case-1",
 // "case-2", ...) unless createCaseFn overrides that.
 type fakeCaseFanOutClient struct {
 	createCaseFn func(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error)
 	addTagFn     func(ctx context.Context, caseID, label string) (domain.Tag, error)
 
-	createdCases []domain.CreateCaseRequest
-	taggedCases  []string
-	nextCaseNum  int
+	createdCases      []domain.CreateCaseRequest
+	taggedCases       []string
+	taggedActorEmails []string
+	nextCaseNum       int
 }
 
 func (f *fakeCaseFanOutClient) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
@@ -239,8 +240,9 @@ func (f *fakeCaseFanOutClient) CreateCase(ctx context.Context, req domain.Create
 	return domain.CreateCaseResponse{Case: domain.CreateCaseDetails{ID: fmt.Sprintf("case-%d", f.nextCaseNum)}}, nil
 }
 
-func (f *fakeCaseFanOutClient) AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error) {
+func (f *fakeCaseFanOutClient) AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
 	f.taggedCases = append(f.taggedCases, caseID)
+	f.taggedActorEmails = append(f.taggedActorEmails, actorEmail)
 	if f.addTagFn != nil {
 		return f.addTagFn(ctx, caseID, label)
 	}
@@ -678,6 +680,48 @@ func TestAnnouncementRequestService_AutoPublish(t *testing.T) {
 		}
 	})
 
+	t.Run("attaches the security tag as the request's own creator, not a resolved x-user-id-token", func(t *testing.T) {
+		// Regression test: AutoPublish runs with no end-user token on its
+		// ctx at all (it's an internal, machine-to-machine caller — see
+		// caseFanOutClient's own doc comment) — AddCaseTag would 401 with
+		// "x-user-id-token header is required" every single time from this
+		// caller, which is exactly what happened live before AddCaseTagAs
+		// existed: every scheduled security announcement's tag attach
+		// failed, though its cases were created fine (CreateCase already
+		// had its own CreatedBy workaround). Asserts on the actor email
+		// actually forwarded, not just that a tag call happened.
+		req := dueApproved()
+		req.IsSecurityAnnouncement = true
+		repo := &fakeAnnouncementRequestRepo{getResult: req}
+		cases := &fakeCaseFanOutClient{}
+		svc := NewAnnouncementRequestService(repo, cases, internal)
+
+		if _, err := svc.AutoPublish(context.Background(), "req-1"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, email := range cases.taggedActorEmails {
+			if email != "user-3@example.com" {
+				t.Fatalf("expected every tag attach to use the request's own CreatedByEmail, got %v", cases.taggedActorEmails)
+			}
+		}
+	})
+
+	t.Run("rejects a security announcement with no recorded creator email, rather than attaching the tag as no one", func(t *testing.T) {
+		req := dueApproved()
+		req.IsSecurityAnnouncement = true
+		req.CreatedByEmail = nil
+		repo := &fakeAnnouncementRequestRepo{getResult: req}
+		cases := &fakeCaseFanOutClient{}
+		svc := NewAnnouncementRequestService(repo, cases, internal)
+
+		if _, err := svc.AutoPublish(context.Background(), "req-1"); err == nil {
+			t.Fatal("expected a conflict error for a security announcement with no CreatedByEmail, got nil")
+		}
+		if len(cases.createdCases) != 0 {
+			t.Fatalf("expected no case creation attempted before this guard, got %+v", cases.createdCases)
+		}
+	})
+
 	t.Run("resumes from existing successful deliveries without recreating their cases", func(t *testing.T) {
 		repo := &fakeAnnouncementRequestRepo{
 			getResult: dueApproved(),
@@ -728,6 +772,9 @@ func TestAnnouncementRequestService_AutoPublish(t *testing.T) {
 		}
 		if len(cases.taggedCases) != 1 || cases.taggedCases[0] != "case-existing" {
 			t.Fatalf("expected only the tag_failed project's existing case retagged, got %v", cases.taggedCases)
+		}
+		if len(cases.taggedActorEmails) != 1 || cases.taggedActorEmails[0] != "user-3@example.com" {
+			t.Fatalf("expected the retry to use the request's CreatedByEmail, got %v", cases.taggedActorEmails)
 		}
 	})
 

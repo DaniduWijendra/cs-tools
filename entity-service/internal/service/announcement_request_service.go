@@ -50,11 +50,17 @@ const autoPublishSecurityTagLabel = "Security Announcement"
 // x-user-id-token to resolve who's acting (see case_service.go), which
 // neither this service nor a scheduled job ever has. Calling the same
 // CaseService methods directly, in-process, sidesteps that entirely: the
-// actor (CreatedBy) is already known from the announcement_request row
-// itself, so there's nothing to resolve from a token at all.
+// actor is already known from the announcement_request row itself (CreatedBy
+// for CreateCase, CreatedByEmail for AddCaseTagAs — see each call site for
+// why), so there's nothing to resolve from a token at all. AddCaseTagAs is
+// deliberately used here instead of AddCaseTag: the latter still hard-fails
+// with "x-user-id-token header is required" on this caller's token-less
+// ctx (found live — every AutoPublish tag attach failed on a security
+// announcement until this was fixed), the former was built specifically so
+// this caller doesn't need one.
 type caseFanOutClient interface {
 	CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error)
-	AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error)
+	AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
 }
 
 type announcementRequestService struct {
@@ -371,6 +377,14 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 	if len(current.ResolvedProjectIDs) == 0 {
 		return domain.AnnouncementRequest{}, &apierror.ConflictError{Msg: "this request has no resolved audience to publish to"}
 	}
+	if current.IsSecurityAnnouncement && (current.CreatedByEmail == nil || *current.CreatedByEmail == "") {
+		// AddCaseTagAs needs a real actor email -- there's no token on this
+		// caller's ctx to fall back to resolving one from (see
+		// caseFanOutClient's own doc comment). Every request submitted since
+		// CreatedByEmail existed has one; a row from before that still
+		// wouldn't be safe to guess an actor for.
+		return domain.AnnouncementRequest{}, &apierror.ConflictError{Msg: "this security announcement has no recorded creator email to attach the tag as"}
+	}
 
 	current, err = s.repo.ClaimForAutoPublish(ctx, id, autoPublishClaimStaleAfter)
 	if err != nil {
@@ -385,6 +399,17 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 	deliveries, err := s.repo.ListDeliveries(ctx, id)
 	if err != nil {
 		return domain.AnnouncementRequest{}, err
+	}
+
+	// Resolved once, nil-safe, reused by both the tag-attach loops below and
+	// MarkPublished at the end: the guard above only proves CreatedByEmail
+	// is set when IsSecurityAnnouncement is true *right now* -- a stale
+	// tag-failed delivery from before an edit toggled that flag off is a
+	// state this code doesn't otherwise reach, but this avoids a nil
+	// dereference in the tag-attach loops either way.
+	var actorEmail string
+	if current.CreatedByEmail != nil {
+		actorEmail = *current.CreatedByEmail
 	}
 
 	succeeded := make(map[string]bool, len(deliveries))
@@ -424,7 +449,7 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 	// exists rather than creating a second one for the same project.
 	for projectID, caseID := range failedTagCaseByProject {
 		caseID := caseID
-		if _, err := s.cases.AddCaseTag(ctx, caseID, autoPublishSecurityTagLabel); err != nil {
+		if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
 			stillFailingTags = append(stillFailingTags, projectID)
 			if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusTagFailed}); err != nil {
 				return domain.AnnouncementRequest{}, err
@@ -459,7 +484,7 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 		caseID := created.Case.ID
 		caseIDByProject[projectID] = caseID
 		if current.IsSecurityAnnouncement {
-			if _, err := s.cases.AddCaseTag(ctx, caseID, autoPublishSecurityTagLabel); err != nil {
+			if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
 				// The case is real — this project must not be treated as
 				// delivered until the tag actually attaches (see the type
 				// doc comment on AnnouncementRequestDeliveryStatus), so it
@@ -487,10 +512,6 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 	caseIDs := make([]string, 0, len(caseIDByProject))
 	for _, caseID := range caseIDByProject {
 		caseIDs = append(caseIDs, caseID)
-	}
-	actorEmail := ""
-	if current.CreatedByEmail != nil {
-		actorEmail = *current.CreatedByEmail
 	}
 	return s.MarkPublished(context.WithoutCancel(ctx), id, current.CreatedBy, actorEmail, caseIDs)
 }

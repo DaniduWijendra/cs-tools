@@ -1354,6 +1354,24 @@ func (s *caseService) GetAttachment(_ context.Context, _ string) (domain.Attachm
 // flipping every time card's IsBillable for caseId), so the actual publish
 // stays commented out in detectPatchTagBillableOverride until that exists.
 func (s *caseService) AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error) {
+	actor, err := s.resolveActor(ctx)
+	if err != nil {
+		return domain.Tag{}, err
+	}
+	return s.addCaseTagAs(ctx, caseID, label, actor.Email)
+}
+
+// AddCaseTagAs implements CaseService for a caller that already knows the
+// acting email and has no x-user-id-token to resolve one from -- see the
+// CaseService interface's own doc comment on this method.
+func (s *caseService) AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+	return s.addCaseTagAs(ctx, caseID, label, actorEmail)
+}
+
+// addCaseTagAs is the shared validation/attach logic behind both
+// AddCaseTag (token-resolved actor) and AddCaseTagAs (caller-supplied
+// actor) -- everything past actor resolution is identical between the two.
+func (s *caseService) addCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
 	if err := validateUUIDs("caseId", []string{caseID}); err != nil {
 		return domain.Tag{}, err
 	}
@@ -1365,14 +1383,9 @@ func (s *caseService) AddCaseTag(ctx context.Context, caseID, label string) (dom
 		return domain.Tag{}, &apierror.ValidationError{Msg: "label must not exceed 255 characters"}
 	}
 
-	actor, err := s.resolveActor(ctx)
-	if err != nil {
-		return domain.Tag{}, err
-	}
-
 	s.detectPatchTagBillableOverride(ctx, caseID, label)
 
-	return s.repo.AddCaseTag(ctx, caseID, label, actor.Email)
+	return s.repo.AddCaseTag(ctx, caseID, label, actorEmail)
 }
 
 // detectPatchTagBillableOverride DETECTS AND LOGS ONLY — it does not
