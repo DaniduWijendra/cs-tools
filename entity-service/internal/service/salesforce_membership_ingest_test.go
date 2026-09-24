@@ -28,6 +28,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/salesentity"
 )
 
@@ -67,12 +68,16 @@ func (f *fakeMembershipSalesEntity) GetContact(_ context.Context, id string) (sa
 }
 
 type fakeMembershipRepo struct {
-	upserts       []domain.SalesforceMembershipUpsert
-	steps         []domain.UpsertOnboardingStepRequest
-	upsertErr     error
-	deactivated   []string
-	deactivateOK  bool
-	deactivateErr error
+	upserts   []domain.SalesforceMembershipUpsert
+	steps     []domain.UpsertOnboardingStepRequest
+	upsertErr error
+	// rowAlreadyExisted makes the upsert report that it UPDATED an existing
+	// project_contact rather than creating one -- which is what a portal
+	// write's own Salesforce echo looks like by the time it reaches here.
+	rowAlreadyExisted bool
+	deactivated       []string
+	deactivateOK      bool
+	deactivateErr     error
 }
 
 func (f *fakeMembershipRepo) Upsert(_ context.Context, in domain.SalesforceMembershipUpsert, step domain.UpsertOnboardingStepRequest) (domain.SalesforceMembershipUpsertResult, error) {
@@ -81,12 +86,25 @@ func (f *fakeMembershipRepo) Upsert(_ context.Context, in domain.SalesforceMembe
 	if f.upsertErr != nil {
 		return domain.SalesforceMembershipUpsertResult{}, f.upsertErr
 	}
-	return domain.SalesforceMembershipUpsertResult{ProjectID: "proj-1", ProjectContactID: "pc-1", CreatedUser: true}, nil
+	return domain.SalesforceMembershipUpsertResult{
+		ProjectID:             "proj-1",
+		ProjectContactID:      "pc-1",
+		CreatedUser:           true,
+		CreatedProjectContact: !f.rowAlreadyExisted,
+	}, nil
 }
 
 func (f *fakeMembershipRepo) DeactivateBySfID(_ context.Context, id string) (bool, error) {
 	f.deactivated = append(f.deactivated, id)
 	return f.deactivateOK, f.deactivateErr
+}
+
+func (f *fakeMembershipRepo) UpsertWithin(context.Context, string, string, repository.MembershipWritePlan) (domain.SalesforceMembershipUpsertResult, error) {
+	return domain.SalesforceMembershipUpsertResult{}, errors.New("not used by the ingest")
+}
+
+func (f *fakeMembershipRepo) GetMembershipByEmail(context.Context, string, string) (domain.ProjectMembershipRow, error) {
+	return domain.ProjectMembershipRow{}, errors.New("not used by the ingest")
 }
 
 type fakeStepRepo struct {
@@ -209,7 +227,7 @@ func TestMapProjectGroups(t *testing.T) {
 		{"security only → Security Only", []string{"Security Contact"}, []string{projectGroupSecurityOnly}, nil},
 		{"lead adds Lead User Group", []string{"Portal user", "Lead"}, []string{projectGroupGeneralAccess, projectGroupLeadUserGroup}, nil},
 		{"lead alone", []string{"Lead"}, []string{projectGroupLeadUserGroup}, nil},
-		{"admin is global only", []string{"Admin"}, nil, nil},
+		{"admin joins the Admin group", []string{"Admin"}, []string{projectGroupAdmin}, nil},
 		{"case-insensitive", []string{"PORTAL USER", " security contact "}, []string{projectGroupFullAccess}, nil},
 		{"unknown roles ignored", []string{"Portal user", "Billing Contact", "Legal"}, []string{projectGroupGeneralAccess}, []string{"Billing Contact", "Legal"}},
 		{"no roles", nil, nil, nil},
@@ -232,25 +250,33 @@ func TestMapGlobalRoles(t *testing.T) {
 	cases := []struct {
 		name          string
 		typ           string
-		isCsAdmin     bool
-		roles         []string
 		isIntegration bool
 		want          []string
+		wantAdminRole string
 		wantManaged   bool
 	}{
-		{"own contact", domain.MembershipTypeOwnContact, false, []string{"Portal user"}, false, []string{"customer", "external"}, true},
-		{"partner contact", domain.MembershipTypePartnerContact, false, []string{"Portal user"}, false, []string{"external", "partner"}, true},
-		{"own admin via flag", domain.MembershipTypeOwnContact, true, nil, false, []string{"customer", "customer_admin", "external"}, true},
-		{"own admin via role", domain.MembershipTypeOwnContact, false, []string{"admin"}, false, []string{"customer", "customer_admin", "external"}, true},
-		{"partner admin", "partner contact", true, nil, false, []string{"external", "partner", "partner_admin"}, true},
-		{"blank type is own", "", false, nil, false, []string{"customer", "external"}, true},
-		{"integration user gets nothing", domain.MembershipTypeOwnContact, true, []string{"Admin"}, true, nil, false},
+		{"own contact", domain.MembershipTypeOwnContact, false, []string{"customer", "external"}, "customer_admin", true},
+		{"partner contact", domain.MembershipTypePartnerContact, false, []string{"external", "partner"}, "partner_admin", true},
+		{"blank type is own", "", false, []string{"customer", "external"}, "customer_admin", true},
+		{"integration user gets nothing", domain.MembershipTypeOwnContact, true, nil, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, managed := mapGlobalRoles(tc.typ, tc.isCsAdmin, tc.roles, tc.isIntegration)
+			got, managed, adminRole := mapGlobalRoles(tc.typ, tc.isIntegration)
 			if !reflect.DeepEqual(sorted(got), sorted(tc.want)) {
 				t.Errorf("grant = %v, want %v", got, tc.want)
+			}
+			// The admin role is never GRANTED here any more -- mapGlobalRoles
+			// only says which of the two it would be. Whether the user holds
+			// it is derived from every membership they have, in the
+			// repository, after the write.
+			for _, r := range got {
+				if r == "customer_admin" || r == "partner_admin" {
+					t.Errorf("mapGlobalRoles must not grant an admin role, got %v", got)
+				}
+			}
+			if adminRole != tc.wantAdminRole {
+				t.Errorf("adminRole = %q, want %q", adminRole, tc.wantAdminRole)
 			}
 			if tc.wantManaged && !reflect.DeepEqual(sorted(managed), []string{"customer_admin", "partner_admin"}) {
 				t.Errorf("managed = %v", managed)
@@ -313,12 +339,17 @@ func TestMembershipIngest_CreatedInvitedPublishesEvent(t *testing.T) {
 		in.ContactFirstName != "Jane" || in.ContactLastName != "Doe" || in.IsCsIntegrationUser {
 		t.Errorf("unexpected upsert: %+v", in)
 	}
-	if !reflect.DeepEqual(in.ProjectGroups, []string{projectGroupFullAccess}) {
+	// Admin is a PROJECT role now: it joins the Admin group rather than
+	// landing straight on the user as a global role.
+	if !reflect.DeepEqual(in.ProjectGroups, []string{projectGroupFullAccess, projectGroupAdmin}) {
 		t.Errorf("groups = %v", in.ProjectGroups)
 	}
 	sort.Strings(in.GlobalRoles)
-	if !reflect.DeepEqual(in.GlobalRoles, []string{"customer", "customer_admin", "external"}) {
+	if !reflect.DeepEqual(in.GlobalRoles, []string{"customer", "external"}) {
 		t.Errorf("global roles = %v", in.GlobalRoles)
+	}
+	if in.AdminRoleName != "customer_admin" {
+		t.Errorf("adminRoleName = %q, want customer_admin (which of the two, not whether)", in.AdminRoleName)
 	}
 	step := h.repo.steps[0]
 	if step.Step != domain.OnboardingStepDatabase || step.Status != domain.OnboardingStepSucceeded || step.EventType != "CREATED" ||
@@ -361,6 +392,49 @@ func TestMembershipIngest_EventOnlyForInvitedStates(t *testing.T) {
 				t.Errorf("published = %d, want %d", len(h.pub.published), want)
 			}
 		})
+	}
+}
+
+// TestMembershipIngest_EchoOfAPortalWriteDoesNotPublish is the echo
+// suppression. Every portal membership write also writes Salesforce, and that
+// Salesforce write comes back here through the Service Bus subscriber as an
+// ordinary CREATED/UPDATED envelope. By then the row already exists — the
+// portal write wrote it first — so the event is our own write returning.
+// Without this, one invitation sent by a customer admin would produce TWO
+// e-mails: one from the portal write, one from its own echo.
+func TestMembershipIngest_EchoOfAPortalWriteDoesNotPublish(t *testing.T) {
+	for _, state := range []string{"INVITED", "RE-INVITED"} {
+		t.Run(state, func(t *testing.T) {
+			h := newIngestHarness(sampleProjectContact(state, "Portal user"), sampleContact(), true)
+			h.repo.rowAlreadyExisted = true
+
+			if err := h.svc.HandleEvent(context.Background(), membershipEvent("UPDATED", "Project_Contact__c")); err != nil {
+				t.Fatalf("HandleEvent: %v", err)
+			}
+			// The row is still updated — silently. Only the e-mail is suppressed.
+			if len(h.repo.upserts) != 1 {
+				t.Fatalf("upserts = %d, want 1: an echo must still update the row", len(h.repo.upserts))
+			}
+			if len(h.pub.published) != 0 {
+				t.Errorf("published = %d, want 0 for a membership we already knew about", len(h.pub.published))
+			}
+		})
+	}
+}
+
+// TestMembershipIngest_GenuinelySalesforceOriginatedInvitationStillPublishes
+// is the other half: an invitation made in Salesforce itself (or the
+// historical backfill) creates the row here, so it is not an echo and the
+// e-mail must still be sent.
+func TestMembershipIngest_GenuinelySalesforceOriginatedInvitationStillPublishes(t *testing.T) {
+	h := newIngestHarness(sampleProjectContact("INVITED", "Portal user"), sampleContact(), true)
+	h.repo.rowAlreadyExisted = false
+
+	if err := h.svc.HandleEvent(context.Background(), membershipEvent("CREATED", "Project_Contact__c")); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if len(h.pub.published) != 1 {
+		t.Errorf("published = %d, want 1 for a row this ingest created", len(h.pub.published))
 	}
 }
 
@@ -493,8 +567,14 @@ func TestMembershipIngest_PartnerContactRoles(t *testing.T) {
 	}
 	got := h.repo.upserts[0].GlobalRoles
 	sort.Strings(got)
-	if !reflect.DeepEqual(got, []string{"external", "partner", "partner_admin"}) {
+	if !reflect.DeepEqual(got, []string{"external", "partner"}) {
 		t.Errorf("partner roles = %v", got)
+	}
+	if h.repo.upserts[0].AdminRoleName != "partner_admin" {
+		t.Errorf("adminRoleName = %q, want partner_admin", h.repo.upserts[0].AdminRoleName)
+	}
+	if !reflect.DeepEqual(h.repo.upserts[0].ProjectGroups, []string{projectGroupGeneralAccess, projectGroupAdmin}) {
+		t.Errorf("groups = %v", h.repo.upserts[0].ProjectGroups)
 	}
 	if h.repo.upserts[0].Type != domain.MembershipTypePartnerContact {
 		t.Errorf("type = %q", h.repo.upserts[0].Type)
@@ -513,8 +593,11 @@ func TestMembershipIngest_IntegrationUser(t *testing.T) {
 	if !in.IsCsIntegrationUser || len(in.GlobalRoles) != 0 || len(in.ManagedAdminRoles) != 0 {
 		t.Errorf("integration user must get no global roles: %+v", in)
 	}
-	if !reflect.DeepEqual(in.ProjectGroups, []string{projectGroupGeneralAccess}) {
+	if !reflect.DeepEqual(in.ProjectGroups, []string{projectGroupGeneralAccess, projectGroupAdmin}) {
 		t.Errorf("project groups still apply: %v", in.ProjectGroups)
+	}
+	if in.AdminRoleName != "" {
+		t.Errorf("adminRoleName = %q, want empty for an integration user", in.AdminRoleName)
 	}
 	if len(h.pub.published) != 1 {
 		t.Fatal("event still published so the consumer can record IDENTITY/EMAIL as SKIPPED")

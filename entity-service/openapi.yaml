@@ -27,7 +27,7 @@ paths:
         POST /customer-search (isRealTime true), not GraphQL
         sales/entity-graphql-service, and upserts the csm-platform account table.
         Entity Project_Contact__c (also accepted as Project_Contact), only when
-        SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
+        CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
         the membership and its Contact (POST /project-contacts/search,
         POST /contacts/search) and upsert user, user_role, account_contact,
         project_contact and project_contact_group in one transaction, record the
@@ -2234,6 +2234,160 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /projects/{id}/contacts:
+    post:
+      summary: Invite a contact to a project.
+      description: >
+        Adds a contact to the project: state INVITED (RE-INVITED when a previously
+        deactivated membership is being brought back) in both the CSM database and
+        Salesforce, and publishes project_contact.invited so the invitation e-mail is
+        sent. The database transaction and the Salesforce write succeed together or
+        neither is applied and this call returns an error; the database commits last,
+        because it is the only participant that can be rolled back.
+
+
+        Postgres data source only, and registered only when
+        CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true" — the path 404s otherwise.
+        Internal callers only (AUTH_INTERNAL_CLIENT_IDS); a portal end user is 403. The
+        calling portal backend decides who may invite whom.
+      operationId: inviteProjectContact
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectMembershipRequest'
+      responses:
+        '201':
+          description: The membership that was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectMembership'
+        '400':
+          description: Bad request — a missing or malformed e-mail address, or a role Salesforce does not accept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Project not found, or the project has no Salesforce account to add a contact to.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The address is already an active contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /projects/{id}/contacts/{contactId}/resend-invitation:
+    post:
+      summary: Re-send a contact's invitation e-mail.
+      description: >
+        Re-publishes project_contact.invited with a resend marker so
+        csm-notification-service bypasses its own already-sent guard. Writes nothing —
+        neither the database nor Salesforce is touched. Valid only while the membership
+        is in state INVITED, and rate-limited to one send per membership every five
+        minutes, measured from the EMAIL step's updatedOn in the onboarding ledger.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id — the
+        same key the invite and role-change operations use. Postgres data source only,
+        registered only when CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true".
+        Internal callers only.
+      operationId: resendProjectContactInvitation
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      responses:
+        '204':
+          description: The invitation was queued for re-sending.
+        '400':
+          description: Bad request — a malformed project id or e-mail address.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Contact not found on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The membership is not in state INVITED, so there is no outstanding invitation to re-send.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: An invitation was sent for this membership within the last five minutes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Invitation e-mails are not configured, or the event could not be queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /projects/{id}/contacts/{contactId}:
     get:
       summary: Get one contact's attributes for a single project.
@@ -2283,6 +2437,146 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+    patch:
+      summary: Replace a contact's roles on a project.
+      description: >
+        Replaces the membership's Salesforce roles, and with them its project groups.
+        The membership's state is untouched. An empty roles list is accepted and means
+        "no roles" — it removes every project group rather than leaving the current set
+        alone. The database transaction and the Salesforce write succeed together or
+        neither is applied; the database commits last.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id —
+        the key a membership is addressed by, unlike the GET on this same path, which
+        takes the contact's platform user id. Postgres data source only, registered
+        only when CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true". Internal
+        callers only.
+      operationId: updateProjectContactRoles
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectMembershipRolesRequest'
+      responses:
+        '200':
+          description: The membership, with its new roles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectMembership'
+        '400':
+          description: Bad request — a malformed e-mail address, or a role Salesforce does not accept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Project not found, or the contact is not a contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Deactivate a contact on a project.
+      description: >
+        Moves the membership to state DEACTIVATED in both the CSM database and
+        Salesforce. It never deletes: DEACTIVATED is a real value of both the Salesforce
+        State__c picklist and project_contact_state_enum, and deactivating is what the
+        portal does today. The contact's roles are left as they are — the derived
+        account-level admin role ignores deactivated memberships, so an admin losing
+        their last active project loses the account-level role without anything being
+        erased.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id.
+        Postgres data source only, registered only when
+        CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true". Internal callers only.
+      operationId: deactivateProjectContact
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      responses:
+        '204':
+          description: The membership is deactivated in both systems.
+        '400':
+          description: Bad request — a malformed project id or e-mail address.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Project not found, or the contact is not a contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /projects/{id}/contacts/search:
     post:
       summary: Search contacts for a project.
@@ -8754,6 +9048,22 @@ components:
           type: array
           items:
             type: string
+          description: The contact's roles on THIS project.
+        accountRoles:
+          type: array
+          items:
+            type: string
+          description: >
+            The contact's account-level roles, a SEPARATE list from `roles` and never merged
+            into it: `roles` is what they may do on this project, `accountRoles` what they are
+            across the account. Only the five roles the membership write owns appear here —
+            external, customer/partner, and the derived customer_admin/partner_admin — so an
+            internal role a staff account happens to hold never leaks into a customer-facing
+            contact list. The admin entry is the point: admin is stored per project, and a
+            person is an account admin when any of their memberships carries the project ADMIN
+            role, so both portals can render an Admin badge without a second call per row.
+            Empty for a row with no linked user, and always empty on the ServiceNow data
+            source, which has no notion of this role set.
         customerContactPresent:
           type: boolean
           description: >
@@ -8768,6 +9078,94 @@ components:
             restatement of `customerContactPresent` — a row invited under one address but
             linked to a contact whose own address differs is invisible to both people, and
             that does happen on genuine customer rows.
+
+    CreateProjectMembershipRequest:
+      type: object
+      required: [email, roles]
+      properties:
+        email:
+          type: string
+          format: email
+          description: The address to invite. Lower-cased and trimmed before anything else sees it.
+        firstName:
+          type: string
+          description: >
+            Used only when the Salesforce contact has to be created; an existing contact keeps
+            its own name. Falls back to the local part of the address when neither name is given.
+        lastName:
+          type: string
+          description: See firstName.
+        roles:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [Portal user, Security Contact, Lead, Admin]
+          description: >
+            The raw Salesforce Role__c labels, matched case-insensitively. At least one is
+            required: an invitation granting nothing would provision an identity that sees an
+            empty portal. A label Salesforce would not accept is a 400 rather than a Salesforce
+            error mid-transaction.
+        isCsIntegrationUser:
+          type: boolean
+          default: false
+          description: >-
+            Mark a machine account. It gets its database row and Salesforce
+            records like anyone else, but no Asgardeo identity and no
+            invitation email. Only honoured when this request creates the
+            Salesforce contact; an existing contact keeps its own flag.
+
+    UpdateProjectMembershipRolesRequest:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [Portal user, Security Contact, Lead, Admin]
+          description: >
+            The membership's new complete set of Salesforce roles — a replacement, not a merge.
+            An empty list is allowed and removes every project group.
+
+    ProjectMembership:
+      type: object
+      description: >
+        One customer's membership of one project, as returned by the write endpoints.
+        Deliberately a different shape from ProjectContact, the read model the contacts search
+        returns: this one is about the write that just happened and carries the Salesforce ids
+        needed to correlate the onboarding ledger.
+      required: [projectId, projectContactId, membershipSfId, contactSfId, userId, email, state, roles]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        projectContactId:
+          type: string
+          format: uuid
+        membershipSfId:
+          type: string
+          description: The Salesforce Project_Contact__c Id, the key of the onboarding ledger.
+        contactSfId:
+          type: string
+          description: The Salesforce Contact Id.
+        userId:
+          type: string
+          format: uuid
+          description: The "user" row the membership resolved to; the write creates one when no match exists.
+        email:
+          type: string
+          format: email
+        state:
+          type: string
+          enum: [INVITED, REGISTERED, RE-INVITED, DEACTIVATED]
+        roles:
+          type: array
+          items:
+            type: string
+          description: >
+            The raw Salesforce Role__c labels the membership now carries, exactly as written to
+            Salesforce — not the derived project_role/project_group values.
 
     SearchProjectContactsResponse:
       type: object
@@ -13567,7 +13965,7 @@ components:
           description: >-
             Salesforce sObject name. Account is always processed.
             Project_Contact__c (also accepted as Project_Contact) and Contact
-            are processed only when SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
+            are processed only when CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
             true; otherwise, like every other value, they are acknowledged
             with 204 and ignored.
         referenceId:

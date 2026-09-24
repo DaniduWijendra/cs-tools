@@ -45,7 +45,7 @@ type SalesEntityMembershipClient interface {
 // Contact branch of POST /salesforce/events. It is optional: a
 // salesforceEventService built without it acknowledges those entities and
 // does nothing (the pre-existing behaviour), which is how
-// SALESFORCE_MEMBERSHIP_INGEST_ENABLED=false is realised in routes.go.
+// CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=false is realised in routes.go.
 type MembershipIngest struct {
 	Memberships repository.ProjectMembershipRepository
 	Steps       repository.OnboardingStepRepository

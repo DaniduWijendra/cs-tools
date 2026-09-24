@@ -104,6 +104,17 @@ type Config struct {
 	// false, and while it is false routes.go does not register the route at
 	// all — it 404s, and nothing on this path can write to Salesforce.
 	CSMMigrationMembershipRegistrationEnabled bool
+	// CSMMigrationPortalWritesEnabled turns on the portal-driven membership
+	// write endpoints (POST/PATCH/DELETE /projects/{id}/contacts[/{email}]
+	// and the resend-invitation call). Both portals invite, re-role and
+	// deactivate customer users through them, and each one writes Postgres
+	// and Salesforce together.
+	//
+	// OFF BY DEFAULT (the value must be exactly "true"), and with it off the
+	// routes are not registered at all rather than answering 403: until the
+	// Sales Entity create endpoints this depends on are deployed, a portal
+	// that called them would write the database and leave Salesforce behind.
+	CSMMigrationPortalWritesEnabled bool
 	// GithubIntegrationEnabled gates the GitHub change-request sync: the
 	// webhook endpoint and the client that answers it.
 	//
@@ -153,6 +164,13 @@ type Config struct {
 	// A distinct topic is what actually isolates the two volumes; a distinct
 	// consumer group alone would only isolate the processing.
 	CREventHubTopic string
+
+	// ProjectEventHubTopic carries the onboarding events
+	// (project_contact.invited) rather than the shared EventHubTopic, so a
+	// backlog of case events can never delay an invitation and the
+	// onboarding dead-letter queue can be watched on its own.
+	// csm-notification-service consumes it with its own consumer group.
+	ProjectEventHubTopic string
 	// CRNoticePollInterval is how often to poll event_outbox when the last
 	// pass came back short. A backlog drains at full speed regardless, so this
 	// governs only the idle case: notice latency against query volume.
@@ -253,8 +271,10 @@ func Load() *Config {
 		GithubLabelsClass:                         os.Getenv("GITHUB_LABELS_CLASS"),
 		GithubLabelStatusAssigned:                 os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                          os.Getenv("CR_NOTICES_ENABLED") == "true",
-		SalesforceMembershipIngestEnabled:         os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		SalesforceMembershipIngestEnabled:         os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		CSMMigrationPortalWritesEnabled:           os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
 		CREventHubTopic:                           getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
+		ProjectEventHubTopic:                      getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
 		CRNoticePollInterval:                      envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
 		AuthIssuer:                                os.Getenv("AUTH_ISSUER"),
 		AuthJWKSURL:                               os.Getenv("AUTH_JWKS_URL"),
@@ -449,6 +469,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("SALES_ENTITY_BASE_URL, SALES_ENTITY_TOKEN_URL, SALES_ENTITY_CLIENT_ID, and SALES_ENTITY_CLIENT_SECRET must be set together or not at all")
 	}
 	return nil
+}
+
+// HasPortalMembershipWrites reports whether the portal-driven membership
+// write endpoints may be registered: the flag is on, the data source is
+// Postgres (the write is a Postgres transaction — there is no ServiceNow
+// equivalent), and the REST sales/sales-entity-service connection is
+// complete, since half of every one of those writes goes to Salesforce.
+// routes.go ANDs this with db != nil, the same way every other
+// Postgres-only feature set is gated.
+func (c *Config) HasPortalMembershipWrites() bool {
+	return c.CSMMigrationPortalWritesEnabled &&
+		c.DataSource == DataSourcePostgres &&
+		c.SalesEntityConfigured()
 }
 
 // SalesEntityConfigured reports whether every REST sales/sales-entity-service env var is set.

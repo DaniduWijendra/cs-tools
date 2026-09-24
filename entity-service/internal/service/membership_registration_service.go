@@ -28,12 +28,14 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/salesentity"
 )
 
-// SalesEntityMembershipWriteClient is the write half of the REST
-// sales/sales-entity-service contract the registration flip needs. Kept
-// separate from SalesEntityMembershipClient (the read half the ingest uses)
-// so the ingest cannot accidentally gain write access to Salesforce;
+// membershipRegistrationSalesClient is the narrow write contract the
+// registration flip needs: clear the contact's lockout flag, then move the
+// membership to REGISTERED. Deliberately narrower than
+// SalesEntityMembershipWriteClient (which the portal write path uses and
+// which can also create records) so this path cannot create anything in
+// Salesforce -- it only ever flips an existing membership.
 // *salesentity.Client satisfies both.
-type SalesEntityMembershipWriteClient interface {
+type membershipRegistrationSalesClient interface {
 	// UpdateContactLockout clears or sets the Contact's "Locked Out
 	// [ Service Now ]" flag (Salesforce Contact.State__c).
 	UpdateContactLockout(ctx context.Context, contactSfID string, lockedOut bool) error
@@ -45,7 +47,7 @@ type SalesEntityMembershipWriteClient interface {
 
 type membershipRegistrationService struct {
 	repo  repository.MembershipRegistrationRepository
-	sales SalesEntityMembershipWriteClient
+	sales membershipRegistrationSalesClient
 	// events is the same SalesforceEventService POST /salesforce/events is
 	// backed by. Re-ingesting through it (rather than through a second copy
 	// of the mapping) is what keeps the Postgres row, the DATABASE onboarding
@@ -61,7 +63,7 @@ type membershipRegistrationService struct {
 // matching database write.
 func NewMembershipRegistrationService(
 	repo repository.MembershipRegistrationRepository,
-	sales SalesEntityMembershipWriteClient,
+	sales membershipRegistrationSalesClient,
 	events SalesforceEventService,
 	steps repository.OnboardingStepRepository,
 ) MembershipRegistrationService {

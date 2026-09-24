@@ -181,6 +181,39 @@ type OnboardingStepService interface {
 	Search(ctx context.Context, req domain.SearchOnboardingStepsRequest) (domain.SearchOnboardingStepsResponse, error)
 }
 
+// ProjectMembershipWriteService owns every change to who is a contact on a
+// project: the Customer Portal (a customer admin managing their own users)
+// and the CSM Portal (an account manager doing it for them) both call these
+// same four operations, and each one writes the CSM database and Salesforce
+// together or writes neither.
+//
+// The database is the source of truth; Salesforce is kept in step rather
+// than read from as an authority. See NewProjectMembershipWriteService for
+// the ordering that makes "both or neither" hold without a distributed
+// transaction, and why the database commits last.
+//
+// Every method is restricted to internal callers (AUTH_INTERNAL_CLIENT_IDS).
+// The portal backends decide who may invite whom; this service does not.
+type ProjectMembershipWriteService interface {
+	// Invite adds a contact to a project: state INVITED (RE-INVITED when a
+	// previously deactivated membership is being brought back) in both
+	// systems, and a project_contact.invited event. A ConflictError when the
+	// address is already an active contact on the project.
+	Invite(ctx context.Context, projectID string, req domain.CreateProjectMembershipRequest) (domain.ProjectMembership, error)
+	// UpdateRoles replaces the membership's Salesforce roles, and with them
+	// its project groups. The state is untouched.
+	UpdateRoles(ctx context.Context, projectID, email string, req domain.UpdateProjectMembershipRolesRequest) (domain.ProjectMembership, error)
+	// Deactivate moves the membership to DEACTIVATED in both systems. It
+	// never deletes: DEACTIVATED is a real state in both the Salesforce
+	// picklist and project_contact_state_enum.
+	Deactivate(ctx context.Context, projectID, email string) error
+	// ResendInvitation re-publishes project_contact.invited with a resend
+	// marker so csm-notification-service bypasses its already-sent guard.
+	// Valid only while the membership is INVITED (ConflictError otherwise),
+	// and rate-limited per membership (TooManyRequestsError).
+	ResendInvitation(ctx context.Context, projectID, email string) error
+}
+
 // ScheduledTaskRunService defines the operations available on the
 // scheduled_task_run entity — see domain.ScheduledTaskRun's doc comment for
 // what it's for.

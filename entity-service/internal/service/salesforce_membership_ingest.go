@@ -188,8 +188,28 @@ func (s *salesforceEventService) ingestMembership(ctx context.Context, membershi
 		"membershipSfId", membershipSfID, "state", in.State, "projectId", res.ProjectID, "projectContactId", res.ProjectContactID,
 		"createdUser", res.CreatedUser, "createdAccountContact", res.CreatedAccountContact, "createdProjectContact", res.CreatedProjectContact)
 
-	if in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited {
+	// ECHO SUPPRESSION. Publish only for a project_contact row this ingest
+	// actually CREATED.
+	//
+	// Every portal membership write also writes Salesforce, and every
+	// Salesforce write comes back to us through the Service Bus subscriber
+	// as an ordinary CREATED/UPDATED envelope. By the time that echo lands
+	// the row already exists, because the portal write wrote it first — so
+	// an event for a membership we already knew about is our own write
+	// returning, and publishing project_contact.invited for it would have
+	// csm-notification-service send a SECOND invitation email for the one
+	// invitation the customer admin sent. Updating the row silently is the
+	// whole point of the echo.
+	//
+	// A genuinely Salesforce-originated invitation (someone invited through
+	// Salesforce itself, or the historical backfill) still creates the row
+	// here and still publishes. The state check stays: a CREATED row that
+	// arrives already REGISTERED or DEACTIVATED is not an invitation.
+	if res.CreatedProjectContact && (in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited) {
 		s.publishProjectContactInvited(ctx, in, pc)
+	} else if in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited {
+		slog.InfoContext(ctx, "salesforce: membership already known, not re-publishing project_contact.invited",
+			"membershipSfId", membershipSfID, "state", in.State)
 	}
 	return nil
 }
@@ -278,7 +298,7 @@ func buildMembershipUpsert(pc salesentity.ProjectContact, contact salesentity.Co
 	isIntegration := contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser
 	membershipType := strings.TrimSpace(derefString(pc.Type))
 
-	globalRoles, managed := mapGlobalRoles(membershipType, isCsAdmin, roles, isIntegration)
+	globalRoles, managed, adminRole := mapGlobalRoles(membershipType, isIntegration)
 	groups, ignored := mapProjectGroups(roles)
 
 	name := strings.TrimSpace(derefString(contact.Name))
@@ -312,6 +332,7 @@ func buildMembershipUpsert(pc salesentity.ProjectContact, contact salesentity.Co
 		ProjectKey:          strings.TrimSpace(derefString(pc.Subscription.Key)),
 		GlobalRoles:         globalRoles,
 		ManagedAdminRoles:   managed,
+		AdminRoleName:       adminRole,
 		ProjectGroups:       groups,
 	}, ignored, nil
 }
