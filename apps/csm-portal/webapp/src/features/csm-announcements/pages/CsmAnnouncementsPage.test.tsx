@@ -205,6 +205,20 @@ describe("CsmAnnouncementsPage — batch rows (grouped registry)", () => {
     expect(screen.getByText("Published")).toBeInTheDocument();
   });
 
+  it("shows a Security chip next to the subject for a security batch row, not for a non-security one", () => {
+    mockResult({
+      data: {
+        rows: [BATCH_ROW, { ...BATCH_ROW, announcementRequestId: "req-batch-2", isSecurityAnnouncement: true }],
+        total: 2,
+        limit: 20,
+        offset: 0,
+        hasMore: false,
+      },
+    });
+    render(<CsmAnnouncementsPage />);
+    expect(screen.getAllByText("Security")).toHaveLength(1);
+  });
+
   it("opens the request dialog (not a case route) when a batch row is clicked", () => {
     mockResult({
       data: { rows: [BATCH_ROW], total: 1, limit: 20, offset: 0, hasMore: false },
@@ -370,6 +384,30 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     // state is the 1st arg of useSearchAnnouncementRequests(state, page, pageSize).
     const lastCall = mockedUseSearchRequests.mock.calls.at(-1)!;
     expect(lastCall[0]).toBe("pending_approval");
+  });
+
+  it("shows a Security chip next to the subject for a security pending request, not for a non-security one", () => {
+    mockResult({
+      data: { rows: [ROW], total: 1, limit: 20, offset: 0, hasMore: false },
+    });
+    mockedUseSearchRequests.mockReturnValue({
+      data: {
+        requests: [PENDING_REQUEST, { ...PENDING_REQUEST, id: "req-2", isSecurityAnnouncement: true }],
+        total: 2,
+        limit: 10,
+        offset: 0,
+        hasMore: false,
+      },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
+    render(<CsmAnnouncementsPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+
+    expect(screen.getAllByText("Security")).toHaveLength(1);
   });
 
   it("opens the request dialog with the clicked row's id", () => {

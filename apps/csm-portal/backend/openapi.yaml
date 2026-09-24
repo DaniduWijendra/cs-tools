@@ -13657,6 +13657,12 @@ components:
         projectCount:
           type: integer
           description: Set for kind=batch only.
+        isSecurityAnnouncement:
+          type: boolean
+          description: >-
+            Set for kind=batch only — a bare legacy case (kind=case) has no
+            owning request to read this from and is never inferred from its
+            own tags, so it's omitted rather than guessed at.
         cases:
           type: array
           description: >-

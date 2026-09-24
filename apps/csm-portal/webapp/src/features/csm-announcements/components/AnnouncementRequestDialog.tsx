@@ -20,6 +20,7 @@ import {
   Box,
   Button,
   Checkbox,
+  Chip,
   DatePickers,
   Dialog,
   DialogActions,
@@ -502,9 +503,14 @@ export default function AnnouncementRequestDialog({
               </>
             ) : (
               <>
-                <Typography variant="body1" sx={{ fontWeight: 600 }}>
-                  {request.subject || "(no subject)"}
-                </Typography>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                  <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                    {request.subject || "(no subject)"}
+                  </Typography>
+                  {request.isSecurityAnnouncement && (
+                    <Chip size="small" color="warning" label="Security" sx={{ flexShrink: 0 }} />
+                  )}
+                </Box>
                 <Box
                   sx={{ fontSize: "0.875rem", lineHeight: 1.5, wordBreak: "break-word" }}
                   dangerouslySetInnerHTML={{ __html: sanitizeRichTextHtml(request.description) }}
