@@ -158,6 +158,13 @@ type Config struct {
 	// A distinct topic is what actually isolates the two volumes; a distinct
 	// consumer group alone would only isolate the processing.
 	CREventHubTopic string
+
+	// ProjectEventHubTopic carries the onboarding events
+	// (project_contact.invited) rather than the shared EventHubTopic, so a
+	// backlog of case events can never delay an invitation and the
+	// onboarding dead-letter queue can be watched on its own.
+	// csm-notification-service consumes it with its own consumer group.
+	ProjectEventHubTopic string
 	// CRNoticePollInterval is how often to poll event_outbox when the last
 	// pass came back short. A backlog drains at full speed regardless, so this
 	// governs only the idle case: notice latency against query volume.
@@ -261,6 +268,7 @@ func Load() *Config {
 		SalesforceMembershipIngestEnabled:        os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
 		CSMMigrationPortalWritesEnabled:          os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
 		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
+		ProjectEventHubTopic:                     getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
 		CRNoticePollInterval:                     envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
 		AuthIssuer:                               os.Getenv("AUTH_ISSUER"),
 		AuthJWKSURL:                              os.Getenv("AUTH_JWKS_URL"),

@@ -99,6 +99,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		)
 	}
 
+	// Onboarding events go to their own topic, not the shared one, so a
+	// case-event backlog cannot delay an invitation and the onboarding
+	// dead-letter queue can be watched separately. Same broker, same
+	// credentials, same failure recording -- only the topic differs. nil
+	// under exactly the same conditions as eventPublisher above, and the
+	// membership ingest already treats a nil publisher as "write the rows,
+	// send nothing".
+	var projectEventPublisher service.EventPublisherService
+	if cfg.EventHubBroker != "" && cfg.EventPublishingEnabled {
+		projectEventPublisher = service.NewEventPublisherService(
+			eventbus.NewProducer(eventbus.Config{
+				Broker:           cfg.EventHubBroker,
+				ConnectionString: cfg.EventHubConnectionString,
+				Topic:            cfg.ProjectEventHubTopic,
+			}),
+			eventPublishFailureSvc,
+		)
+	}
+
 	// sla-status reads the "sla" table directly (ServiceNow's own SLA data,
 	// synced in) — no ServiceNow equivalent of its own, gated on the pool for
 	// the same reason as event_publish_failures above. Replaces the old
@@ -206,7 +225,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 					Memberships: repository.NewProjectMembershipRepository(db),
 					Steps:       repository.NewOnboardingStepRepository(db),
 					SalesEntity: salesEntityClient,
-					Publisher:   eventPublisher,
+					Publisher:   projectEventPublisher,
 				}))
 		} else {
 			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventService(accountRepo, salesEntityClient))
@@ -233,7 +252,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 			Memberships: repository.NewProjectMembershipRepository(db),
 			Steps:       repository.NewOnboardingStepRepository(db),
 			SalesEntity: salesEntityClient,
-			Publisher:   eventPublisher,
+			Publisher:   projectEventPublisher,
 			Failures:    eventPublishFailureSvc,
 			Access:      accessSvc,
 		}))
