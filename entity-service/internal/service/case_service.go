@@ -963,6 +963,11 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 	if err := validateUUIDs("projectId", parsed.ExcludeProjectIDs); err != nil {
 		return domain.SearchCasesResponse{}, err
 	}
+	if parsed.ParentID != nil {
+		if err := validateUUIDs("parentId", []string{*parsed.ParentID}); err != nil {
+			return domain.SearchCasesResponse{}, err
+		}
+	}
 	// The same checks apply to the top-level fields and to each anyOf branch, so
 	// they live in one function.
 	if err := validateCaseFieldValues(domain.CaseFilterGroup{
@@ -1019,11 +1024,10 @@ func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesReq
 	// taskSLABusinessElapsedPercent are implemented there, so are absent here.)
 	// state+in is supported here; state+notIn has no repository query support,
 	// and dropping an exclusion silently would widen the result set.
+	// parentId is also implemented (wi.parent_id, migration 000036 -- the
+	// "Linked Items" tab's child-case lookup), so it too is absent here.
 	if len(parsed.ExcludeStates) > 0 {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "state" (notIn) is not supported by this data source`}
-	}
-	if parsed.ParentID != nil {
-		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "parentId" is not supported by this data source`}
 	}
 	if len(parsed.ProductNames) > 0 {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: `field "product" is not supported by this data source`}

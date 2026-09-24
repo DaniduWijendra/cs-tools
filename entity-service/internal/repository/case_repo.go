@@ -281,12 +281,13 @@ func (r *caseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest)
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			type, project_id, deployment_id, deployed_product_id,
-			subject, description, opened_by_user_id
+			subject, description, opened_by_user_id, account_id
 		)
 		SELECT gen_random_uuid(), NOW(), NOW(), u.email, u.email,
 		       'CASE'::work_item_type_enum, $2::uuid, $3::uuid, $4::uuid,
-		       $5, $6, u.id
+		       $5, $6, u.id, p.account_id
 		FROM "user" u
+		LEFT JOIN project p ON p.id = $2::uuid
 		WHERE u.id = $1::uuid
 		RETURNING id::TEXT, number, wso2_id, created_by, project_id::TEXT, deployment_id::TEXT,
 		          deployed_product_id::TEXT, subject, description, created_on, updated_on`
@@ -384,12 +385,12 @@ const createCaseFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'CASE'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -431,12 +432,12 @@ const createAnnouncementFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'ANNOUNCEMENT'::work_item_type_enum,
-			$7, NULL, NULL
+			$7, NULL, NULL, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -480,12 +481,12 @@ const createServiceRequestFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'SERVICE_REQUEST'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -530,12 +531,12 @@ const createEngagementFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'ENGAGEMENT'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -573,12 +574,12 @@ const createSecurityReportAnalysisFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'SECURITY_REPORT_ANALYSIS'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -1537,6 +1538,18 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		// needing a join) -- see this file's other created_by fixes.
 		where += fmt.Sprintf(" AND wi.created_by = ANY($%d)", argIdx)
 		filterArgs = append(filterArgs, req.Parsed.CreatedBy)
+		argIdx++
+	}
+
+	// parentId: child cases of this case/incident, via the generic
+	// work_item.parent_id self-reference (migration 000036) -- the same
+	// column GetCaseByID's own ParentCase resolves in the other direction.
+	// Not part of caseFieldPredicates: rejectUnsupportedOrGroupFields already
+	// refuses parentId inside an anyOf branch on every data source, so this
+	// only ever needs to apply at the top level.
+	if req.Parsed.ParentID != nil {
+		where += fmt.Sprintf(" AND wi.parent_id = $%d::uuid", argIdx)
+		filterArgs = append(filterArgs, *req.Parsed.ParentID)
 		argIdx++
 	}
 
