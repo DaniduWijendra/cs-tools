@@ -2425,12 +2425,23 @@ ones that should have unconditional access. A caller that reaches entity-service
 *through* another service is identified by that other service's client id, not
 its own.
 
+The three product-consumption routes (`GET`/`PATCH
+/projects/{id}/consumption`, `POST
+/projects/{id}/deployments/{deploymentId}/license`) are scoped too, but check
+membership in `service.authorizeProject` rather than pushing the scope into a
+query. Two of the three have no query to push it into: a write and an upstream
+call that leaves the service entirely. Refused as a 404 for the same reason as
+the by-id reads. **These are scoped on both data sources**, unlike the five
+operations above -- they are registered in ServiceNow mode deliberately (see
+"Product-consumption provisioning state" in `README.md`), so ServiceNow is not
+there to scope them.
+
 **Not yet wired**: every other project/case-adjacent read (comments,
 escalations, time cards, attachments, conversations, change requests,
 call requests, catalogs, instances, etc.) still does no per-caller scoping --
-the auth middleware validates tokens on every route, but only the five
-operations above actually call `AccessService`. Extending it further is
-follow-up work, not done in this pass.
+the auth middleware validates tokens on every route, but only the operations
+above actually call `AccessService`. Extending it further is follow-up work,
+not done in this pass.
 
 ## Call requests and the service-request catalog (migrations 000067-000072)
 

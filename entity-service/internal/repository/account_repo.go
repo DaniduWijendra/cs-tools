@@ -51,6 +51,10 @@ type AccountRow struct {
 	RenewalAccountManagerID    *string
 	RenewalAccountManagerName  *string
 	RenewalAccountManagerEmail *string
+	CreTeamID                  *string
+	CreTeamName                *string
+	SreTeamID                  *string
+	SreTeamName                *string
 	HasAgent                   *bool
 	HasKbReferences            *bool
 	CreatedOn                  time.Time
@@ -81,12 +85,20 @@ func NewAccountRepository(db *pgxpool.Pool) AccountRepository {
 	return &accountRepo{db: db}
 }
 
+// accountSelectColumns' cre/sre joins are the same "group" table
+// change_request_repo.go's own customer_group_id join already uses (see
+// that file's changeRequestDetailJoins) -- account.cre_team_id/sre_team_id
+// (renamed/added by migration 000074, ex-integration_cs_team_id) are real
+// FKs into "group" now, unlike when CreTeam/SreTeam were first documented
+// as "ServiceNow data source only" on domain.AccountView/AccountDetail;
+// this is what actually reads them back for the Postgres data source.
 const accountSelectColumns = `
 	a.id, a.name, a.classification, a.global_pod, a.sf_id, a.region,
 	a.activation_date, a.deactivation_date,
 	tow.id, COALESCE(tow.name, NULLIF(TRIM(CONCAT_WS(' ', tow.first_name, tow.last_name)), '')), tow.email,
 	mgr.id, COALESCE(mgr.name, NULLIF(TRIM(CONCAT_WS(' ', mgr.first_name, mgr.last_name)), '')), mgr.email,
 	ram.id, COALESCE(ram.name, NULLIF(TRIM(CONCAT_WS(' ', ram.first_name, ram.last_name)), '')), ram.email,
+	cre.id, cre.name, sre.id, sre.name,
 	a.ai_gen_response_enabled, a.smart_knowledge_base_suggestions_enabled,
 	a.created_on, a.created_by, a.updated_on`
 
@@ -94,7 +106,9 @@ const accountFromJoins = `
 	FROM account a
 	LEFT JOIN "user" tow ON tow.id = a.technical_owner_id
 	LEFT JOIN "user" mgr ON mgr.id = a.account_manager_id
-	LEFT JOIN "user" ram ON ram.id = a.renewal_account_manager_id`
+	LEFT JOIN "user" ram ON ram.id = a.renewal_account_manager_id
+	LEFT JOIN "group" cre ON cre.id = a.cre_team_id
+	LEFT JOIN "group" sre ON sre.id = a.sre_team_id`
 
 func scanAccountRow(row interface{ Scan(...any) error }) (AccountRow, error) {
 	var a AccountRow
@@ -104,6 +118,7 @@ func scanAccountRow(row interface{ Scan(...any) error }) (AccountRow, error) {
 		&a.TechnicalOwnerID, &a.TechnicalOwnerName, &a.TechnicalOwnerEmail,
 		&a.AccountManagerID, &a.AccountManagerName, &a.AccountManagerEmail,
 		&a.RenewalAccountManagerID, &a.RenewalAccountManagerName, &a.RenewalAccountManagerEmail,
+		&a.CreTeamID, &a.CreTeamName, &a.SreTeamID, &a.SreTeamName,
 		&a.HasAgent, &a.HasKbReferences,
 		&a.CreatedOn, &a.CreatedBy, &a.UpdatedOn,
 	)

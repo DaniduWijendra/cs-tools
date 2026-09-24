@@ -18,6 +18,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
 
@@ -57,6 +59,7 @@ type stubCaseRepo struct {
 	createCaseFromServiceNow func(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error)
 	createCaseComment        func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
 	createCase               func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
+	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
 }
 
 func (s *stubCaseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error) {
@@ -71,7 +74,10 @@ func (s *stubCaseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.
 	}
 	panic("not implemented")
 }
-func (s *stubCaseRepo) GetCaseByID(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+func (s *stubCaseRepo) GetCaseByID(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error) {
+	if s.getCaseByID != nil {
+		return s.getCaseByID(ctx, id, scope)
+	}
 	panic("not implemented")
 }
 func (s *stubCaseRepo) SearchCases(ctx context.Context, req domain.SearchCasesRequest, scope repository.SearchScope) ([]domain.SearchCaseView, int, error) {
@@ -686,6 +692,179 @@ func TestCaseService_UpdateCase_MirrorsFieldToServiceNow(t *testing.T) {
 	}
 }
 
+// TestCaseService_UpdateCase_PublishesStatusChanged is the regression guard
+// for a real bug: caseService.UpdateCase never published case.status_changed
+// at all, for any DATA_SOURCE that writes state through this repository
+// (not just DATA_SOURCE=postgres-servicenow-dual-write) -- the wiring
+// snCaseService.UpdateCase already had (publishStatusChanged) was simply
+// missing here. Also proves the display label sent matches ServiceNow's own
+// wording (caseStateDisplayLabel), not the raw lowercase domain enum value.
+func TestCaseService_UpdateCase_PublishesStatusChanged(t *testing.T) {
+	newState := domain.CaseStateWaitingOnWSO2
+	repo := &stubCaseRepo{
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			openState := domain.CaseStateOpen
+			return domain.CaseView{
+				ID: testDeploymentUUID, Number: "CS0001", State: &openState,
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			return domain.Case{ID: req.ID, State: req.State}, nil, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, State: &newState}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call, got %d", len(publisher.calls))
+	}
+	if publisher.calls[0].eventType != events.TypeStatusChanged || publisher.calls[0].entityID != testDeploymentUUID {
+		t.Fatalf("unexpected publish call: %+v", publisher.calls[0])
+	}
+	var payload events.StatusChangedPayload
+	if err := json.Unmarshal(publisher.calls[0].payload, &payload); err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
+	if payload.NewStatus != "Waiting on WSO2" {
+		t.Errorf("NewStatus = %q, want %q (ServiceNow's own display label)", payload.NewStatus, "Waiting on WSO2")
+	}
+}
+
+// TestCaseService_UpdateCase_DoesNotPublishStatusChangedOnNoOp proves a
+// caller re-PATCHing the case's current state does not send every watcher a
+// false "status changed" notification -- the same no-op guard
+// snCaseService.UpdateCase already applies.
+func TestCaseService_UpdateCase_DoesNotPublishStatusChangedOnNoOp(t *testing.T) {
+	sameState := domain.CaseStateOpen
+	repo := &stubCaseRepo{
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{ID: testDeploymentUUID, State: &sameState}, nil
+		},
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			return domain.Case{ID: req.ID, State: req.State}, nil, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, State: &sameState}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.calls) != 0 {
+		t.Errorf("expected no publish call for a no-op state re-PATCH, got %d", len(publisher.calls))
+	}
+}
+
+// TestCaseService_UpdateCase_PublishesSeverityChanged is the regression
+// guard for the case.severity_changed half of the same gap
+// TestCaseService_UpdateCase_PublishesStatusChanged closes for
+// case.status_changed.
+func TestCaseService_UpdateCase_PublishesSeverityChanged(t *testing.T) {
+	newSeverity := domain.CaseSeverityCritical
+	oldSeverity := domain.CaseSeverityLow
+	repo := &stubCaseRepo{
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: testDeploymentUUID, Number: "CS0001",
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			os := oldSeverity
+			return domain.Case{ID: req.ID, Severity: req.Severity}, &os, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, Severity: &newSeverity}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call, got %d", len(publisher.calls))
+	}
+	if publisher.calls[0].eventType != events.TypeSeverityChanged {
+		t.Fatalf("unexpected publish call: %+v", publisher.calls[0])
+	}
+	var payload events.SeverityChangedPayload
+	if err := json.Unmarshal(publisher.calls[0].payload, &payload); err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
+	if payload.OldSeverity != "LOW" || payload.NewSeverity != "CRITICAL" {
+		t.Errorf("payload severities = %q -> %q, want LOW -> CRITICAL", payload.OldSeverity, payload.NewSeverity)
+	}
+}
+
+// TestCaseService_UpdateCase_PublishesSeverityChangedOnFirstSet is the
+// regression guard for a real gap: domain.Case's own doc comment says
+// Severity is nil for the large majority of real Postgres cases (see
+// domain.go), so the very first severity ever set on such a case must still
+// publish case.severity_changed with an empty OldSeverity -- exactly what
+// snCaseService.UpdateCase already does via derefSeverity. A prior revision
+// of this guard required oldSeverity != nil, which silently skipped every
+// one of these first-time sets.
+func TestCaseService_UpdateCase_PublishesSeverityChangedOnFirstSet(t *testing.T) {
+	newSeverity := domain.CaseSeverityCritical
+	repo := &stubCaseRepo{
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: testDeploymentUUID, Number: "CS0001",
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			return domain.Case{ID: req.ID, Severity: req.Severity}, nil, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, Severity: &newSeverity}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call, got %d", len(publisher.calls))
+	}
+	var payload events.SeverityChangedPayload
+	if err := json.Unmarshal(publisher.calls[0].payload, &payload); err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
+	if payload.OldSeverity != "" || payload.NewSeverity != "CRITICAL" {
+		t.Errorf("payload severities = %q -> %q, want \"\" -> CRITICAL", payload.OldSeverity, payload.NewSeverity)
+	}
+}
+
+// TestCaseService_UpdateCase_DoesNotPublishSeverityChangedOnNoOp mirrors
+// TestCaseService_UpdateCase_DoesNotPublishStatusChangedOnNoOp for severity.
+func TestCaseService_UpdateCase_DoesNotPublishSeverityChangedOnNoOp(t *testing.T) {
+	sameSeverity := domain.CaseSeverityLow
+	repo := &stubCaseRepo{
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			os := sameSeverity
+			return domain.Case{ID: req.ID, Severity: req.Severity}, &os, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, Severity: &sameSeverity}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.calls) != 0 {
+		t.Errorf("expected no publish call for a no-op severity re-PATCH, got %d", len(publisher.calls))
+	}
+}
+
 // TestCaseService_UpdateCase_RecordsSNWritebackFailureOnMirrorError covers
 // the failure path: Postgres already committed by the time Dispatch runs, so
 // a failed mirror write must not surface as an UpdateCase error — it's
@@ -843,6 +1022,96 @@ func TestCaseService_CreateCase_SNSuccessCreatesPostgresRowWithMatchingIdentity(
 	}
 	if resp.Case.ID != snID || resp.Case.Number != snNumber || resp.Case.InternalID != snInternalID {
 		t.Errorf("CreateCase response = %+v, want identity matching ServiceNow's (%q, %q, %q)", resp.Case, snID, snNumber, snInternalID)
+	}
+}
+
+// TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds is the
+// regression guard for a real bug: createCaseSNFirst never called
+// publishCaseCreatedEvent at all, so case.created never fired for
+// DATA_SOURCE=postgres-servicenow-dual-write's case pilot even with Event
+// Hub fully configured and enabled -- the wiring incidentService.
+// createIncidentSNFirst already had (see
+// TestIncidentService_CreateIncident_PublishesOnlyAfterPostgresSucceeds) was
+// simply missing here. Also proves the event only fires after
+// CreateCaseFromServiceNow has actually confirmed the Postgres row, same
+// ordering guarantee as incident's own version -- never right after the
+// ServiceNow POST, which a consumer could observe before the Postgres
+// -backed read API (the only one live in this mode) can return anything for
+// it.
+func TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call after Postgres success, got %d", len(publisher.calls))
+	}
+	if publisher.calls[0].eventType != events.TypeCaseCreated || publisher.calls[0].entityID != caseID {
+		t.Errorf("unexpected publish call: %+v", publisher.calls[0])
+	}
+}
+
+// TestCaseService_CreateCase_DoesNotPublishWhenPostgresFails proves the
+// other half: if ServiceNow already has the case but the Postgres insert
+// fails (real drift, logged separately), no event fires -- a consumer must
+// never see case.created for a case the Postgres-backed read API cannot
+// return.
+func TestCaseService_CreateCase_DoesNotPublishWhenPostgresFails(t *testing.T) {
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: "55555555-5555-5555-5555-555555555555", InternalID: "WSO2-CS-3", Number: "CS0023003",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(context.Context, domain.CreateCaseRequest, string, string, string, string, string) (domain.Case, error) {
+			return domain.Case{}, errors.New("postgres insert failed")
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err == nil {
+		t.Fatal("expected an error when the Postgres insert fails")
+	}
+	if len(publisher.calls) != 0 {
+		t.Errorf("expected no publish call when the Postgres insert fails, got %d", len(publisher.calls))
 	}
 }
 
@@ -1275,6 +1544,57 @@ func TestCaseService_CreateCaseComment_MirrorsToServiceNow(t *testing.T) {
 	}
 	if got := failures.count(); got != 0 {
 		t.Errorf("expected 0 sn_writeback_failures records for a successful mirror, got %d", got)
+	}
+}
+
+// TestCaseService_CreateCaseComment_PublishesCommentAdded is the regression
+// guard for a real bug: caseService.CreateCaseComment never published
+// case.comment_added at all, for any DATA_SOURCE that writes comments
+// through this repository -- the wiring snCaseService.CreateCaseComment
+// already had (publishCommentAdded) was simply missing here. Also proves
+// the author's display name is built from the already-resolved actor
+// (FirstName/LastName), with no SearchCaseComments re-fetch needed the way
+// snCaseService's own version requires.
+func TestCaseService_CreateCaseComment_PublishesCommentAdded(t *testing.T) {
+	repo := &stubCaseRepo{
+		createCaseComment: func(_ context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error) {
+			return domain.CaseComment{ID: "comment-1", CaseID: req.CaseID, Type: req.Type, Content: req.Content}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: testDeploymentUUID, Number: "CS0001", InternalID: "WSO2-CS-1", Subject: "s",
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+	}
+	userRepo := stubUserRepo{getUserByEmail: func(context.Context, string) (domain.User, error) {
+		return domain.User{ID: "user-1", Email: "jane.doe@example.com", FirstName: "Jane", LastName: "Doe"}, nil
+	}}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, userRepo, publisher, alwaysUnrestrictedAccess{})
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	req := domain.CreateCaseCommentRequest{CaseID: testDeploymentUUID, Type: domain.CommentTypeComment, Content: "Working on it"}
+	if _, err := svc.CreateCaseComment(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call, got %d", len(publisher.calls))
+	}
+	if publisher.calls[0].eventType != events.TypeCommentAdded || publisher.calls[0].entityID != testDeploymentUUID {
+		t.Fatalf("unexpected publish call: %+v", publisher.calls[0])
+	}
+	var payload events.CommentAddedPayload
+	if err := json.Unmarshal(publisher.calls[0].payload, &payload); err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
+	if payload.Name != "Jane Doe" {
+		t.Errorf("Name = %q, want %q", payload.Name, "Jane Doe")
+	}
+	if payload.CaseComment != "Working on it" || payload.CommentID != "comment-1" {
+		t.Errorf("payload = %+v, want content %q and commentId %q", payload, "Working on it", "comment-1")
 	}
 }
 

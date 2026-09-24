@@ -60,25 +60,28 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// NewPoolIfNeeded creates a Postgres connection pool when one is needed.
+// NewPoolIfNeeded creates a Postgres connection pool when database credentials
+// are configured, whatever the data source.
 //
-// Gated on whether DB credentials are actually configured (cfg.DBUser), not
-// on cfg.DataSource. DATA_SOURCE=servicenow only means case/account/etc.
-// reads go through the SN integration service instead of this pool — it
-// says nothing about whether Postgres itself is available. Side tables
-// (event_publish_failures, sla_clocks, scheduled_task_run,
-// alert_incident_mapping) have no ServiceNow equivalent and are always
-// backed by Postgres regardless of DATA_SOURCE (see each one's own domain
-// doc comment); gating on DataSource alone left them 404ing in any
-// SN-mode deployment that had a perfectly good Postgres instance configured
-// right next to it, simply unused. Gating on DBUser instead preserves the
-// one thing DataSource-gating was actually protecting: a local SN-mode
-// setup with no Postgres provisioned at all still gets (nil, nil), exactly
-// as before — see config.Config.Validate's doc comment, which is why
-// DB_USER/DB_PASSWORD/DB_NAME stay optional (not required) for
+// Gated on whether DB credentials are actually configured (cfg.HasDatabase()),
+// not on cfg.DataSource. DATA_SOURCE=servicenow only means case/account/etc.
+// reads go through the SN integration service instead of this pool — it says
+// nothing about whether Postgres itself is available. Product consumption keeps
+// its provisioning state in Postgres and dual-writes it alongside ServiceNow, so
+// a DATA_SOURCE=servicenow deployment -- which is what staging and production run
+// -- still needs a pool. Side tables (event_publish_failures, sla_clocks,
+// scheduled_task_run, alert_incident_mapping) have no ServiceNow equivalent and
+// are always backed by Postgres regardless of DATA_SOURCE; gating on DataSource
+// alone left them 404ing in any SN-mode deployment that had a perfectly good
+// Postgres instance configured right next to it, simply unused.
+//
+// Gating on HasDatabase preserves the one thing DataSource-gating was actually
+// protecting: a local SN-mode setup with no Postgres provisioned at all still
+// gets (nil, nil), exactly as before — see config.Config.Validate's doc comment,
+// which is why DB_USER/DB_PASSWORD/DB_NAME stay optional (not required) for
 // DATA_SOURCE=servicenow rather than becoming mandatory here.
 func NewPoolIfNeeded(cfg *config.Config) (*pgxpool.Pool, error) {
-	if cfg.DBUser == "" {
+	if !cfg.HasDatabase() {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
