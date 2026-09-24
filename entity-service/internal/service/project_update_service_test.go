@@ -162,7 +162,7 @@ func TestPgProjectUpdateService_PlainPostgresUpdatesFieldsAndNeverCallsSN(t *tes
 	if repo.gotByWhom != "jane.doe@example.com" {
 		t.Fatalf("repo.UpdateProject() updatedBy = %q, want the caller's own resolved email", repo.gotByWhom)
 	}
-	if repo.gotReq.HasAgent == nil || *repo.gotReq.HasAgent != true {
+	if repo.gotReq.HasAgent == nil || !*repo.gotReq.HasAgent {
 		t.Fatalf("repo.UpdateProject() req.HasAgent = %v, want true", repo.gotReq.HasAgent)
 	}
 	if resp.Project.ID != wantResult.ID || resp.Project.UpdatedBy != wantResult.UpdatedBy ||

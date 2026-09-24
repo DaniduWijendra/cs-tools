@@ -3115,6 +3115,56 @@ func (s *snCaseService) patchCaseFields(ctx context.Context, caseID string, stat
 	return result, nil
 }
 
+// patchCaseWatchList performs a bare ServiceNow PATCH replacing the case's
+// watch list wholesale, with NONE of UpdateCase's enrichment reads, no-op
+// detection, or event publishing -- same reasoning as patchCaseFields's own
+// doc comment, extended to WatchList for DATA_SOURCE=postgres-servicenow-dual-write's
+// async WatchList mirror (see caseService.updateCaseWatchList's own doc
+// comment). userIDs is forwarded to watchListEmails exactly as UpdateCase's
+// own WatchList branch does (platform UUIDs resolved to emails, emails
+// forwarded as-is) -- an explicitly empty, non-nil slice still clears the
+// watch list rather than being skipped, matching UpdateCase's own behavior.
+func (s *snCaseService) patchCaseWatchList(ctx context.Context, caseID string, userIDs []string) (domain.UpdatedCase, error) {
+	token := middleware.UserIDTokenFromContext(ctx)
+
+	emails, err := watchListEmails(ctx, s.client, token, "watchList", userIDs)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	payload := snUpdateCasePayload{WatchList: &emails}
+	raw, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	var snResp snUpdateCaseResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case watch list: parse response: %w", err)
+	}
+
+	updatedOn, err := parseSNDateTime(ctx, "sn patch case watch list", "updatedOn", snResp.Case.UpdatedOn)
+	if err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case watch list: parse updatedOn %q: %w", snResp.Case.UpdatedOn, err)
+	}
+
+	result := domain.UpdatedCase{ID: sysidToUUID(snResp.Case.ID), UpdatedOn: updatedOn, UpdatedBy: snResp.Case.UpdatedBy}
+	if len(snResp.Case.WatchList) > 0 {
+		wl := make([]domain.WatchListUser, 0, len(snResp.Case.WatchList))
+		for _, u := range snResp.Case.WatchList {
+			wl = append(wl, domain.WatchListUser{
+				ID:       sysidToUUID(u.ID),
+				UserName: u.UserName,
+				Name:     u.Name,
+				Email:    u.Email,
+				User:     domain.NewUserReference("", u.Email, u.Name),
+			})
+		}
+		result.WatchList = wl
+	}
+	return result, nil
+}
+
 type snCreateAttachmentPayload struct {
 	ReferenceID   string  `json:"referenceId"`
 	ReferenceType string  `json:"referenceType"`

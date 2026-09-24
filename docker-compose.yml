@@ -86,6 +86,34 @@ services:
       - ./scripts/csm-compose/migrate-and-seed.sh:/migrate.sh:ro
     entrypoint: ["sh", "/migrate.sh"]
 
+  # One-shot: generates a broader, randomized set of dummy CSM data (extra
+  # accounts/projects/deployments/products/users and a spread of work items
+  # across case/service_request/change_request/incident/engagement/problem,
+  # plus comments, time cards, watchers, tags, escalations, and SLAs) into
+  # entity-service's database, on top of migrate's fixed single-case seed --
+  # see scripts/csm-compose/seed-generator's doc comment. Deliberately its
+  # own one-shot service, not an extra step appended to migrate-and-seed.sh:
+  # migrate's image (postgres:16-alpine) has no Go toolchain to build or run
+  # this program inside that container, so it gets its own image, built the
+  # same way mock-oidc and gateway-shim already are, and chains off
+  # migrate's completion the same way kafka-topics-init chains off kafka's.
+  # Idempotent via a marker table (see main.go): safe to leave running on
+  # every `docker compose up`.
+  seed-generator:
+    build:
+      context: ./scripts/csm-compose/seed-generator
+      dockerfile: ../../../docker/local/seed-generator.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: devpassword
+      DB_NAME: csm_platform
+      DB_SSLMODE: disable
+
   # KRaft-mode Kafka broker standing in for production's Azure Event Hub
   # Kafka-compatible endpoint. entity-service/internal/eventbus,
   # csm-notification-service, and both activity-stream services all
@@ -183,7 +211,11 @@ services:
       context: ./entity-service
       dockerfile: ../docker/local/entity-service.Dockerfile
     depends_on:
-      migrate:
+      # seed-generator itself depends on migrate completing (see above), so
+      # this transitively waits for migrations + both seed steps -- not just
+      # migrate directly -- so the API never starts serving before the bulk
+      # seed data exists.
+      seed-generator:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy

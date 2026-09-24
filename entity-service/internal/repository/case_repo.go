@@ -230,6 +230,14 @@ type CaseRepository interface {
 	// caseID does not exist; a ValidationError if any userID does not
 	// exist.
 	SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error)
+	// AccountDefaultWatcherIDs returns the account owning projectID's four
+	// named stakeholder ids -- customer_success_manager_id, technical_owner_id,
+	// secondary_technical_owner_id, account_manager_id (migration 000008) --
+	// whichever are set, deduplicated, in that order. A project with no
+	// linked account, or a project id that does not exist, returns an empty
+	// slice rather than an error: this is a default watch list, not a
+	// requirement.
+	AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error)
 	// SearchCaseActivities returns a paginated, newest-first feed combining
 	// the case's comments (comment, migration 000037) and complete
 	// attachments (case_attachment, migration 000043) into one merged
@@ -281,12 +289,13 @@ func (r *caseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest)
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			type, project_id, deployment_id, deployed_product_id,
-			subject, description, opened_by_user_id
+			subject, description, opened_by_user_id, account_id
 		)
 		SELECT gen_random_uuid(), NOW(), NOW(), u.email, u.email,
 		       'CASE'::work_item_type_enum, $2::uuid, $3::uuid, $4::uuid,
-		       $5, $6, u.id
+		       $5, $6, u.id, p.account_id
 		FROM "user" u
+		LEFT JOIN project p ON p.id = $2::uuid
 		WHERE u.id = $1::uuid
 		RETURNING id::TEXT, number, wso2_id, created_by, project_id::TEXT, deployment_id::TEXT,
 		          deployed_product_id::TEXT, subject, description, created_on, updated_on`
@@ -384,12 +393,12 @@ const createCaseFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'CASE'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -431,12 +440,12 @@ const createAnnouncementFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'ANNOUNCEMENT'::work_item_type_enum,
-			$7, NULL, NULL
+			$7, NULL, NULL, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -480,12 +489,12 @@ const createServiceRequestFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'SERVICE_REQUEST'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -530,12 +539,12 @@ const createEngagementFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'ENGAGEMENT'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -573,12 +582,12 @@ const createSecurityReportAnalysisFromServiceNowQuery = `
 		INSERT INTO work_item (
 			id, created_on, updated_on, created_by, updated_by,
 			number, wso2_id, subject, description, type,
-			project_id, deployment_id, deployed_product_id
+			project_id, deployment_id, deployed_product_id, account_id
 		)
 		VALUES (
 			$1, NOW(), NOW(), $2, $2,
 			$3, $4, $5, $6, 'SECURITY_REPORT_ANALYSIS'::work_item_type_enum,
-			$7, $8, $9
+			$7, $8, $9, (SELECT account_id FROM project WHERE id = $7)
 		)
 		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
 		          subject, description, created_on, updated_on
@@ -1540,6 +1549,18 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		argIdx++
 	}
 
+	// parentId: child cases of this case/incident, via the generic
+	// work_item.parent_id self-reference (migration 000036) -- the same
+	// column GetCaseByID's own ParentCase resolves in the other direction.
+	// Not part of caseFieldPredicates: rejectUnsupportedOrGroupFields already
+	// refuses parentId inside an anyOf branch on every data source, so this
+	// only ever needs to apply at the top level.
+	if req.Parsed.ParentID != nil {
+		where += fmt.Sprintf(" AND wi.parent_id = $%d::uuid", argIdx)
+		filterArgs = append(filterArgs, *req.Parsed.ParentID)
+		argIdx++
+	}
+
 	if req.Parsed.ClosedStartDate != nil {
 		where += fmt.Sprintf(" AND c.closed_on >= $%d", argIdx)
 		filterArgs = append(filterArgs, req.Parsed.ClosedStartDate)
@@ -1916,6 +1937,38 @@ func (r *caseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs 
 	}
 
 	return watchers, updatedOn, nil
+}
+
+// AccountDefaultWatcherIDs implements CaseRepository.
+func (r *caseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error) {
+	var csmID, towID, stowID, amID *string
+	err := r.db.QueryRow(ctx, `
+		SELECT a.customer_success_manager_id, a.technical_owner_id,
+		       a.secondary_technical_owner_id, a.account_manager_id
+		FROM project p
+		JOIN account a ON a.id = p.account_id
+		WHERE p.id = $1`, projectID,
+	).Scan(&csmID, &towID, &stowID, &amID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("account default watcher ids: %w", err)
+	}
+
+	ids := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for _, id := range []*string{csmID, towID, stowID, amID} {
+		if id == nil || *id == "" {
+			continue
+		}
+		if _, dup := seen[*id]; dup {
+			continue
+		}
+		seen[*id] = struct{}{}
+		ids = append(ids, *id)
+	}
+	return ids, nil
 }
 
 // scanTag scans a single (id, name) row into a domain.Tag. tag has no

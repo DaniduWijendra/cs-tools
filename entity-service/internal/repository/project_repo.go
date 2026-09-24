@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -358,7 +359,14 @@ func (r *projectRepo) UpdateProject(ctx context.Context, id string, req domain.P
 	).Scan(&res.ID, &res.UpdatedOn, &res.UpdatedBy, &endDateState, &invoiceState, &complianceState)
 	if err != nil {
 		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "22P02" {
-			return domain.ProjectUpdateResult{}, &apierror.ValidationError{Msg: "endDateClosureState, invoiceDueDateClosureState, or complianceViolationClosureState is not a value this data source recognizes: " + pgErr.Message}
+			// pgErr.Message (e.g. `invalid input value for enum
+			// end_date_closure_state_enum: "Pending Notified"`) is logged in
+			// full for debugging but never returned to the caller verbatim --
+			// it embeds the internal enum type name, a schema implementation
+			// detail this API's response shouldn't leak. The caller only
+			// needs to know which of the three fields it sent was bad.
+			slog.WarnContext(ctx, "update project: invalid enum value", "projectId", id, "error", pgErr.Message)
+			return domain.ProjectUpdateResult{}, &apierror.ValidationError{Msg: "endDateClosureState, invoiceDueDateClosureState, or complianceViolationClosureState contains an unrecognized value"}
 		}
 		return domain.ProjectUpdateResult{}, fmt.Errorf("update project: %w", err)
 	}
@@ -367,7 +375,14 @@ func (r *projectRepo) UpdateProject(ctx context.Context, id string, req domain.P
 	res.ComplianceViolationClosureState = complianceState
 
 	if req.HasAgent != nil || req.HasKbReferences != nil {
-		if _, err := tx.Exec(ctx, `
+		// RowsAffected is checked, not just the error, because the account
+		// row itself (not just the project row locked above) could be
+		// deleted by a concurrent transaction between the project SELECT ...
+		// FOR UPDATE and this UPDATE -- accountID is a stale reference at
+		// that point, tx.Exec returns no error, and without this check the
+		// transaction would commit as a silent partial success: caller gets
+		// 200, hasAgent/hasKbReferences never actually changed.
+		tag, err := tx.Exec(ctx, `
 			UPDATE account
 			SET ai_gen_response_enabled = COALESCE($2, ai_gen_response_enabled),
 			    smart_knowledge_base_suggestions_enabled = COALESCE($3, smart_knowledge_base_suggestions_enabled),
@@ -375,8 +390,12 @@ func (r *projectRepo) UpdateProject(ctx context.Context, id string, req domain.P
 			    updated_by = $4
 			WHERE id = $1`,
 			*accountID, req.HasAgent, req.HasKbReferences, updatedBy,
-		); err != nil {
+		)
+		if err != nil {
 			return domain.ProjectUpdateResult{}, fmt.Errorf("update project: update linked account: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.ProjectUpdateResult{}, fmt.Errorf("update project: linked account %s disappeared under transaction", *accountID)
 		}
 	}
 

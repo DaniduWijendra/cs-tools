@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -52,6 +53,12 @@ type snWritebackJob struct {
 	operation  string
 	payload    any
 	writeFn    func(context.Context) error
+	// key identifies the entity this job mirrors ("entityType:entityID").
+	// The dispatcher uses it to serialize jobs for the same entity — see
+	// keyQueues below — so two writes queued for the same case/entity always
+	// apply to ServiceNow in the order they were dispatched, even though
+	// different entities' jobs run concurrently across the worker pool.
+	key string
 }
 
 // SNWritebackDispatcher runs best-effort, one-way ServiceNow mirror writes
@@ -72,6 +79,11 @@ type snWritebackJob struct {
 type SNWritebackDispatcher struct {
 	failures repository.SNWritebackFailureRepository
 	jobs     chan snWritebackJob
+
+	// keyMu guards keyQueues, the per-entity ("entityType:entityID")
+	// ordering state described on run and startOrQueue below.
+	keyMu     sync.Mutex
+	keyQueues map[string][]snWritebackJob
 }
 
 // NewSNWritebackDispatcher constructs an SNWritebackDispatcher and starts
@@ -81,8 +93,9 @@ type SNWritebackDispatcher struct {
 // guarantees (see config.Config.Validate's dbRequired check).
 func NewSNWritebackDispatcher(failures repository.SNWritebackFailureRepository) *SNWritebackDispatcher {
 	d := &SNWritebackDispatcher{
-		failures: failures,
-		jobs:     make(chan snWritebackJob, snWritebackQueueSize),
+		failures:  failures,
+		jobs:      make(chan snWritebackJob, snWritebackQueueSize),
+		keyQueues: make(map[string][]snWritebackJob),
 	}
 	for i := 0; i < snWritebackWorkers; i++ {
 		go d.worker()
@@ -96,7 +109,72 @@ func (d *SNWritebackDispatcher) worker() {
 	}
 }
 
+// run executes job, then drains any later jobs that were queued for the
+// same entity (job.key) while job was in flight, running them in the exact
+// order they were dispatched — one at a time, on this same goroutine —
+// before releasing the key. This is what prevents two writeback jobs for
+// the same entity (e.g. two case WatchList updates) from being picked up by
+// different workers and completing out of order: without it, a slower
+// worker could apply an older write to ServiceNow after a newer one already
+// landed, and both would report success with nothing to flag the drift.
+// Jobs for different keys are unaffected and keep running fully in
+// parallel across the worker pool.
 func (d *SNWritebackDispatcher) run(job snWritebackJob) {
+	for {
+		d.runOne(job)
+
+		next, ok := d.dequeueNext(job.key)
+		if !ok {
+			return
+		}
+		job = next
+	}
+}
+
+// dequeueNext pops the next pending job queued for key, if any. Returning
+// false also releases key: startOrQueue treats an absent key as free, so the
+// next Dispatch for this entity starts a fresh job on the channel/worker
+// pool instead of piggy-backing on this (finished) run.
+func (d *SNWritebackDispatcher) dequeueNext(key string) (snWritebackJob, bool) {
+	d.keyMu.Lock()
+	defer d.keyMu.Unlock()
+
+	queue := d.keyQueues[key]
+	if len(queue) == 0 {
+		delete(d.keyQueues, key)
+		return snWritebackJob{}, false
+	}
+
+	next := queue[0]
+	if len(queue) == 1 {
+		d.keyQueues[key] = nil // key stays claimed (about to run next) but empty
+	} else {
+		d.keyQueues[key] = queue[1:]
+	}
+	return next, true
+}
+
+// startOrQueue registers job under its key. If no job for that key is
+// currently in flight, it claims the key and returns true — the caller
+// (Dispatch) is then responsible for handing job to a worker. Otherwise job
+// is appended behind whatever is already queued for that key and startOrQueue
+// returns false: the goroutine currently draining that key's queue (see run)
+// will pick job up in order, so Dispatch must not hand it to a worker itself
+// — doing so would let it run concurrently with, and possibly finish before,
+// the job(s) ahead of it for the same entity.
+func (d *SNWritebackDispatcher) startOrQueue(job snWritebackJob) bool {
+	d.keyMu.Lock()
+	defer d.keyMu.Unlock()
+
+	if _, inFlight := d.keyQueues[job.key]; inFlight {
+		d.keyQueues[job.key] = append(d.keyQueues[job.key], job)
+		return false
+	}
+	d.keyQueues[job.key] = nil
+	return true
+}
+
+func (d *SNWritebackDispatcher) runOne(job snWritebackJob) {
 	writeCtx, cancel := context.WithTimeout(job.ctx, snWritebackTimeout)
 	defer cancel()
 
@@ -138,6 +216,15 @@ func (d *SNWritebackDispatcher) run(job snWritebackJob) {
 // context.WithoutCancel); it is not otherwise consulted, so Dispatch always
 // enqueues regardless of ctx's own state.
 //
+// Jobs sharing the same entityType+entityID are serialized: if a job for
+// that entity is already queued or running, this one is appended behind it
+// (via startOrQueue) and handed to a worker only once its predecessor(s)
+// finish, in the order they were dispatched — see run's doc comment. This
+// is what stops two writes for the same entity (e.g. two case WatchList
+// updates) from racing across different workers and applying to ServiceNow
+// out of order. Jobs for different entities are unaffected and still run
+// fully in parallel across the pool.
+//
 // If the queue is full (snWritebackQueueSize jobs already pending — meaning
 // ServiceNow mirror writes are backing up faster than the pool can drain
 // them), Dispatch still never touches ServiceNow itself: it logs and
@@ -147,7 +234,11 @@ func (d *SNWritebackDispatcher) run(job snWritebackJob) {
 // another goroutine would just let failure records pile up unbounded
 // against a queue that's already full, the same problem this branch exists
 // to avoid. What Dispatch guarantees is no blocking on ServiceNow network
-// I/O, never zero added latency.
+// I/O, never zero added latency. This synthetic failure never touches
+// ServiceNow, so it runs immediately regardless of per-entity ordering —
+// it can only ever precede, never race, a real write for the same entity,
+// because startOrQueue already claimed the entity's key on this call's
+// behalf (jobs appended after it are held back until this run drains).
 func (d *SNWritebackDispatcher) Dispatch(ctx context.Context, entityType, entityID, operation string, payload any, writeFn func(context.Context) error) {
 	job := snWritebackJob{
 		ctx:        context.WithoutCancel(ctx),
@@ -156,6 +247,13 @@ func (d *SNWritebackDispatcher) Dispatch(ctx context.Context, entityType, entity
 		operation:  operation,
 		payload:    payload,
 		writeFn:    writeFn,
+		key:        entityType + ":" + entityID,
+	}
+
+	if !d.startOrQueue(job) {
+		// A job for this entity is already in flight; the goroutine draining
+		// it (run) will pick this one up in order once it's done.
+		return
 	}
 
 	select {
@@ -169,6 +267,7 @@ func (d *SNWritebackDispatcher) Dispatch(ctx context.Context, entityType, entity
 			entityID:   entityID,
 			operation:  operation,
 			payload:    payload,
+			key:        job.key,
 			writeFn: func(context.Context) error {
 				return errQueueFull
 			},

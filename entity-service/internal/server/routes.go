@@ -415,9 +415,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// every DATA_SOURCE=postgres-servicenow-dual-write best-effort mirror
 	// write (see SNWritebackDispatcher's own doc comment) -- one dispatcher,
 	// one small worker pool, reused by every entity's mirror rather than each
-	// constructing its own. nil in every other mode. Originally constructed
-	// only inline for the case pilot further below; hoisted here once a
-	// second entity (project) needed the same instance.
+	// constructing its own: project (immediately below), and case,
+	// call_request, time_card, comment, change_request, and case tags/watch
+	// list (all further below, riding on the case dispatch). nil in every
+	// other mode. Originally constructed only inline for the case pilot;
+	// hoisted here once a second entity (project) needed the same instance.
 	var snWritebackDispatcher *service.SNWritebackDispatcher
 	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
 		snWritebackDispatcher = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
@@ -658,9 +660,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// data source, so these routes are registered for both data sources.
 	callRequestRepo := repository.NewCallRequestRepository(db)
 	var activeCallRequestSvc service.CallRequestService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeCallRequestSvc = service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateCallRequest mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see callRequestService's own doc comment for why
+		// UpdateCallRequest does not (Postgres-first CREATE means
+		// customer_call.id has no ServiceNow counterpart to target).
+		snCallRequestMirrorSvc := service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
+		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, snWritebackDispatcher, snCallRequestMirrorSvc)
+	default:
 		activeCallRequestSvc = service.NewCallRequestService(callRequestRepo, userRepo)
 	}
 	callRequestHandler := handler.NewCallRequestHandler(activeCallRequestSvc)
@@ -700,13 +710,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	case config.DataSourceServiceNow:
 		activeChangeRequestSvc = service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
 	case config.DataSourcePostgresServiceNowDualWrite:
-		// Pilot extension: change request CREATE only, same ServiceNow-first,
-		// synchronous shape as the case/incident pilots above -- see
-		// changeRequestService.createChangeRequestSNFirst's own doc comment.
-		// Reads stay on Postgres in this mode; snChangeRequestMirrorSvc's
-		// CreateChangeRequest is the only method of it this mode ever calls.
+		// Pilot extension: change request CREATE (ServiceNow-first,
+		// synchronous -- see changeRequestService.createChangeRequestSNFirst's
+		// own doc comment) plus PatchChangeRequest's best-effort, asynchronous
+		// ServiceNow mirror write (see that method's own doc comment). Reads
+		// stay on Postgres in this mode; snChangeRequestMirrorSvc's
+		// CreateChangeRequest/PatchChangeRequest are the only methods of it
+		// this mode ever calls.
 		snChangeRequestMirrorSvc := service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
-		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNMirror(changeRequestRepo, snChangeRequestMirrorSvc)
+		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNWriteback(changeRequestRepo, snChangeRequestMirrorSvc, snWritebackDispatcher)
 	default:
 		activeChangeRequestSvc = service.NewChangeRequestService(changeRequestRepo)
 	}
@@ -714,9 +726,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 
 	timeCardRepo := repository.NewTimeCardRepository(db)
 	var activeTimeCardSvc service.TimeCardService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeTimeCardSvc = service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateTimeCard mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see timeCardService's own doc comment for why
+		// Update/DeleteTimeCard do not (Postgres-first CREATE means
+		// time_card.id has no ServiceNow counterpart to target).
+		snTimeCardMirrorSvc := service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
+		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, snWritebackDispatcher, snTimeCardMirrorSvc)
+	default:
 		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
 	}
 	timeCardHandler := handler.NewTimeCardHandler(activeTimeCardSvc)
@@ -906,9 +926,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 
 	commentRepo := repository.NewCommentRepository(db)
 	var activeCommentSvc service.CommentService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeCommentSvc = service.NewServiceNowCommentService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateComment mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see commentService's own doc comment. This is separate
+		// from case's own comment mirror (CreateCaseComment/CreateBareCaseComment),
+		// which backs the case-scoped comment routes, not these generic ones.
+		snCommentMirrorSvc := service.NewServiceNowCommentService(serviceNowIntegrationServiceClient)
+		activeCommentSvc = service.NewCommentServiceWithSNWriteback(commentRepo, userRepo, snWritebackDispatcher, snCommentMirrorSvc)
+	default:
 		activeCommentSvc = service.NewCommentService(commentRepo, userRepo)
 	}
 	commentHandler := handler.NewCommentHandler(activeCommentSvc)

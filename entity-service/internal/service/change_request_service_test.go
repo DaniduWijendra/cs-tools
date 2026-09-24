@@ -32,6 +32,7 @@ import (
 // stubIncidentRepo (incident_service_test.go).
 type stubChangeRequestRepo struct {
 	createChangeRequestFromServiceNow func(ctx context.Context, req domain.CreateChangeRequestRequest, id, number, createdBy string) (domain.CreateChangeRequestResponse, error)
+	patchChangeRequest                func(ctx context.Context, id string, req domain.PatchChangeRequestRequest, email string) (domain.ChangeRequest, error)
 }
 
 func (s *stubChangeRequestRepo) SearchChangeRequests(context.Context, domain.SearchChangeRequestsRequest, *time.Time, *time.Time, *string, []string) ([]domain.SearchChangeRequestView, int, error) {
@@ -43,7 +44,10 @@ func (s *stubChangeRequestRepo) AggregateChangeRequests(context.Context, domain.
 func (s *stubChangeRequestRepo) GetChangeRequestByID(context.Context, string) (domain.ChangeRequest, error) {
 	panic("not implemented")
 }
-func (s *stubChangeRequestRepo) PatchChangeRequest(context.Context, string, domain.PatchChangeRequestRequest, string) (domain.ChangeRequest, error) {
+func (s *stubChangeRequestRepo) PatchChangeRequest(ctx context.Context, id string, req domain.PatchChangeRequestRequest, email string) (domain.ChangeRequest, error) {
+	if s.patchChangeRequest != nil {
+		return s.patchChangeRequest(ctx, id, req, email)
+	}
 	panic("not implemented")
 }
 func (s *stubChangeRequestRepo) CreateChangeRequestFromServiceNow(ctx context.Context, req domain.CreateChangeRequestRequest, id, number, createdBy string) (domain.CreateChangeRequestResponse, error) {
@@ -62,10 +66,15 @@ func (s *stubChangeRequestRepo) CreateChangeRequestFromServiceNow(ctx context.Co
 type stubMirrorChangeRequestService struct {
 	ChangeRequestService
 	createChangeRequest func(ctx context.Context, req domain.CreateChangeRequestRequest) (domain.CreateChangeRequestResponse, error)
+	patchChangeRequest  func(ctx context.Context, id string, req domain.PatchChangeRequestRequest) (domain.PatchChangeRequestResponse, error)
 }
 
 func (s *stubMirrorChangeRequestService) CreateChangeRequest(ctx context.Context, req domain.CreateChangeRequestRequest) (domain.CreateChangeRequestResponse, error) {
 	return s.createChangeRequest(ctx, req)
+}
+
+func (s *stubMirrorChangeRequestService) PatchChangeRequest(ctx context.Context, id string, req domain.PatchChangeRequestRequest) (domain.PatchChangeRequestResponse, error) {
+	return s.patchChangeRequest(ctx, id, req)
 }
 
 func validCreateChangeRequestRequest() domain.CreateChangeRequestRequest {
@@ -220,4 +229,76 @@ func TestChangeRequestService_CreateChangeRequest_DoesNotRetryValidationError(t 
 	if attempts != 1 {
 		t.Errorf("expected exactly 1 SN attempt (validation errors are not retried), got %d", attempts)
 	}
+}
+
+// TestChangeRequestService_PatchChangeRequest_MirrorsToServiceNow covers the
+// writeback wiring: on a successful Postgres patch, the mirror's
+// PatchChangeRequest is dispatched asynchronously and does not block or
+// affect the response.
+func TestChangeRequestService_PatchChangeRequest_MirrorsToServiceNow(t *testing.T) {
+	title := "new title"
+	req := domain.PatchChangeRequestRequest{Title: &title}
+
+	called := make(chan domain.PatchChangeRequestRequest, 1)
+	mirror := &stubMirrorChangeRequestService{
+		patchChangeRequest: func(_ context.Context, id string, mirrorReq domain.PatchChangeRequestRequest) (domain.PatchChangeRequestResponse, error) {
+			called <- mirrorReq
+			return domain.PatchChangeRequestResponse{}, nil
+		},
+	}
+	repo := &stubChangeRequestRepo{
+		patchChangeRequest: func(_ context.Context, id string, req domain.PatchChangeRequestRequest, email string) (domain.ChangeRequest, error) {
+			return domain.ChangeRequest{SearchChangeRequestView: domain.SearchChangeRequestView{ID: id}}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	svc := NewChangeRequestServiceWithSNWriteback(repo, mirror, dispatcher)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.PatchChangeRequest(ctx, testUUID, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case got := <-called:
+		if got.Title == nil || *got.Title != title {
+			t.Errorf("mirror got title %v, want %q", got.Title, title)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.PatchChangeRequest was never called")
+	}
+	if got := failures.count(); got != 0 {
+		t.Errorf("expected 0 sn_writeback_failures records for a successful mirror, got %d", got)
+	}
+}
+
+// TestChangeRequestService_PatchChangeRequest_MirrorFailureRecordsWritebackFailure
+// covers the failure half: Postgres already succeeded, so the call must
+// still report success, but the mirror error lands in sn_writeback_failures
+// for manual backfill.
+func TestChangeRequestService_PatchChangeRequest_MirrorFailureRecordsWritebackFailure(t *testing.T) {
+	title := "new title"
+	req := domain.PatchChangeRequestRequest{Title: &title}
+
+	mirror := &stubMirrorChangeRequestService{
+		patchChangeRequest: func(context.Context, string, domain.PatchChangeRequestRequest) (domain.PatchChangeRequestResponse, error) {
+			return domain.PatchChangeRequestResponse{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubChangeRequestRepo{
+		patchChangeRequest: func(_ context.Context, id string, req domain.PatchChangeRequestRequest, email string) (domain.ChangeRequest, error) {
+			return domain.ChangeRequest{SearchChangeRequestView: domain.SearchChangeRequestView{ID: id}}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	svc := NewChangeRequestServiceWithSNWriteback(repo, mirror, dispatcher)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.PatchChangeRequest(ctx, testUUID, req); err != nil {
+		t.Fatalf("expected the Postgres-side success to be reported despite the mirror failure, got %v", err)
+	}
+
+	waitFor(t, func() bool { return failures.count() == 1 })
 }
