@@ -1054,6 +1054,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	} else {
 		mux.HandleFunc("GET /accounts/{id}", accountHandler.GetAccount)
 		mux.HandleFunc("POST /accounts/search", accountHandler.SearchAccounts)
+		mux.HandleFunc("PATCH /accounts/{id}", accountHandler.PatchAccountTeams)
 	}
 	mux.HandleFunc("POST /accounts/{id}/contacts/search", accountContactHandler.SearchAccountContacts)
 	if opportunityHandler != nil {

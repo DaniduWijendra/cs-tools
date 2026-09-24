@@ -1865,6 +1865,72 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
+    patch:
+      summary: Update an account's CRE and/or SRE team.
+      description: >
+        Postgres data source only; there is no ServiceNow equivalent. Provide creTeamId,
+        sreTeamId, or both. A field left out of the request body leaves that team assignment
+        unchanged; there is currently no way to clear an assignment back to no team once set.
+        The request body is forwarded to the entity service as-is and the response is
+        returned verbatim.
+      operationId: patchAccountsId
+      parameters:
+        - name: id
+          in: path
+          description: ID of the account
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: Account team update payload
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAccountTeamsPayload'
+        required: true
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetail'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
 
   /accounts/search:
     post:
@@ -10422,6 +10488,33 @@ components:
             classification:
               type: string
               description: Filter by classification.
+
+    UpdateAccountTeamsPayload:
+      type: object
+      description: >
+        At least one of creTeamId/sreTeamId must be provided. A field left out of the
+        request body leaves that team assignment unchanged; there is currently no way to
+        clear an assignment back to no team once set.
+      properties:
+        creTeamId:
+          type: string
+          nullable: true
+          description: References an existing team by ID. Omit to leave the account's CRE team unchanged.
+        sreTeamId:
+          type: string
+          nullable: true
+          description: References an existing team by ID. Omit to leave the account's SRE team unchanged.
+      anyOf:
+        - required:
+            - creTeamId
+          properties:
+            creTeamId:
+              type: string
+        - required:
+            - sreTeamId
+          properties:
+            sreTeamId:
+              type: string
 
     AccountSearchResponse:
       type: object

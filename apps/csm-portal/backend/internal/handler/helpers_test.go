@@ -512,6 +512,7 @@ type mockEntityAccountClient struct {
 	getAccountFn            func(ctx context.Context, id string) ([]byte, error)
 	searchAccountsFn        func(ctx context.Context, body []byte) ([]byte, error)
 	searchAccountContactsFn func(ctx context.Context, accountID string, body []byte) ([]byte, error)
+	updateAccountTeamsFn    func(ctx context.Context, id string, body []byte) ([]byte, error)
 }
 
 func (m *mockEntityAccountClient) GetAccount(ctx context.Context, id string) ([]byte, error) {
@@ -531,6 +532,13 @@ func (m *mockEntityAccountClient) SearchAccounts(ctx context.Context, body []byt
 func (m *mockEntityAccountClient) SearchAccountContacts(ctx context.Context, accountID string, body []byte) ([]byte, error) {
 	if m.searchAccountContactsFn != nil {
 		return m.searchAccountContactsFn(ctx, accountID, body)
+	}
+	return []byte(`{}`), nil
+}
+
+func (m *mockEntityAccountClient) UpdateAccountTeams(ctx context.Context, id string, body []byte) ([]byte, error) {
+	if m.updateAccountTeamsFn != nil {
+		return m.updateAccountTeamsFn(ctx, id, body)
 	}
 	return []byte(`{}`), nil
 }

@@ -480,6 +480,27 @@ type AccountDetail struct {
 	HasPrimaryPartner *bool `json:"hasPrimaryPartner"`
 }
 
+// UpdateAccountTeamsRequest is the input for PATCH /accounts/{id} (Postgres
+// data source only). At least one of CreTeamID/SreTeamID must be provided.
+//
+// A nil field leaves that team assignment unchanged, the same "pointer nil
+// means don't touch this field" convention as UpdateCaseRequest's
+// scalar-valued fields. Unlike UpdateCaseRequest.WatchList, there is no
+// distinct signal here for "explicitly clear this to no team" -- WatchList's
+// trick (nil vs. non-nil-but-empty) works because it's a slice; a single
+// team ID field has no third state to spend on that without a wrapper type,
+// and no existing convention in this codebase does that for a scalar field.
+// If clearing a team assignment is needed later, this request shape will
+// need to grow one (e.g. a documented empty-string sentinel, or a
+// present-but-null wrapper).
+type UpdateAccountTeamsRequest struct {
+	ID string `json:"-"`
+	// CreTeamID references team.id. Nil leaves the current CRE team unchanged.
+	CreTeamID *string `json:"creTeamId"`
+	// SreTeamID references team.id. Nil leaves the current SRE team unchanged.
+	SreTeamID *string `json:"sreTeamId"`
+}
+
 const (
 	SalesforceEventCreated   = "CREATED"
 	SalesforceEventUpdated   = "UPDATED"

@@ -93,6 +93,17 @@ type AccountService interface {
 	// GetAccountByID returns the account with the given UUID. A ValidationError is
 	// returned for a malformed UUID; a NotFoundError if no account matches.
 	GetAccountByID(ctx context.Context, id string) (domain.AccountDetail, error)
+	// UpdateAccountTeams sets the account's CRE and/or SRE team (Postgres data
+	// source only). A ValidationError is returned for a malformed UUID, if
+	// neither field is provided, or if a provided team ID does not reference
+	// an existing team; a NotFoundError if no account matches.
+	//
+	// This is a temporary override, not a durable value: the ServiceNow-to-
+	// Postgres sync maps u_integration_cs_team/u_sre_team into these same
+	// columns, so a value set here can be silently reverted the next time the
+	// account's ServiceNow record changes for any reason. Intentional, by
+	// product decision — ServiceNow remains authoritative.
+	UpdateAccountTeams(ctx context.Context, req domain.UpdateAccountTeamsRequest) (domain.AccountDetail, error)
 }
 
 // SalesforceEventService handles POST /salesforce/events. Account fetch goes
