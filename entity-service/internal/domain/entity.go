@@ -120,6 +120,20 @@ type UserSortBy struct {
 	Order UserSortOrder `json:"order"`
 }
 
+// CreateUserRequest is the input for creating a new "user" row on the
+// Postgres data source. userType is never accepted here -- it is derived by
+// a database trigger from is_system_user and role membership (migration
+// 000007), never set directly by a caller. roles is optional; each name is
+// resolved against the role table (migration 000004) and rejected with a
+// ServiceUnavailableError if any is not seeded there -- the same posture
+// syncGlobalRoles uses for the Salesforce membership ingest.
+type CreateUserRequest struct {
+	FirstName string     `json:"firstName"`
+	LastName  string     `json:"lastName"`
+	Email     string     `json:"email"`
+	Roles     []UserRole `json:"roles"`
+}
+
 // SearchUsersRequest is the input for a user search operation.
 type SearchUsersRequest struct {
 	Pagination Pagination         `json:"pagination"`

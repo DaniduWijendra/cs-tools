@@ -23,6 +23,7 @@ const NONE = {
   canUseOperations: false,
   canUseTimeCardsAndUpdates: false,
   canWrite: false,
+  canCreateUser: false,
 };
 
 describe("getPortalAccess", () => {
@@ -62,7 +63,7 @@ describe("getPortalAccess", () => {
     });
   });
 
-  it("support engineer and admin can do everything", () => {
+  it("support engineer and admin can do everything except admin can also create users", () => {
     const all = {
       hasAnyRole: true,
       canEscalate: true,
@@ -71,8 +72,23 @@ describe("getPortalAccess", () => {
       canUseTimeCardsAndUpdates: true,
       canWrite: true,
     };
-    expect(getPortalAccess(["support_engineer"])).toEqual(all);
-    expect(getPortalAccess(["admin"])).toEqual(all);
+    expect(getPortalAccess(["support_engineer"])).toEqual({ ...all, canCreateUser: false });
+    expect(getPortalAccess(["admin"])).toEqual({ ...all, canCreateUser: true });
+  });
+
+  it("only admin can create a user -- support engineer does not share this one", () => {
+    expect(getPortalAccess(["admin"]).canCreateUser).toBe(true);
+    for (const role of [
+      "support_engineer",
+      "viewer",
+      "escalator",
+      "attachment_downloader",
+      "usage_metrics_viewer",
+      "timecard_approver",
+      "dashboard_designer",
+    ]) {
+      expect(getPortalAccess([role]).canCreateUser).toBe(false);
+    }
   });
 
   it("only support engineer, admin and the time-card approver get Time cards and Updates", () => {

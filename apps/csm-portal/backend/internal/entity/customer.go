@@ -155,6 +155,12 @@ func (c *CustomerEntityClient) SearchUsers(ctx context.Context, body []byte) ([]
 	return c.do(ctx, http.MethodPost, "/users/search", body)
 }
 
+// CreateUser calls POST /users on the entity service.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *CustomerEntityClient) CreateUser(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/users", body)
+}
+
 // GetProjectContact calls GET /projects/{id}/contacts/{contactId} on the entity service.
 // Response is returned as raw JSON.
 func (c *CustomerEntityClient) GetProjectContact(ctx context.Context, projectID, contactID string) ([]byte, error) {

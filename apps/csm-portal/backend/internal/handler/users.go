@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,6 +44,7 @@ type entityUserClient interface {
 	PatchUserMe(ctx context.Context, body []byte) ([]byte, error)
 	SearchUsers(ctx context.Context, body []byte) ([]byte, error)
 	GetUser(ctx context.Context, id string) ([]byte, error)
+	CreateUser(ctx context.Context, body []byte) ([]byte, error)
 	ListSavedFilterViews(ctx context.Context, listKey string) ([]byte, error)
 	SaveSavedFilterView(ctx context.Context, body []byte) ([]byte, error)
 	DeleteSavedFilterView(ctx context.Context, listKey, name string) ([]byte, error)
@@ -361,6 +363,55 @@ func (h *UsersHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	enriched = h.withExternalAccountStatus(r.Context(), enriched, user.UserID)
 
 	writeJSON(w, http.StatusOK, enriched)
+}
+
+// createUserRequest is the POST /users request shape, parsed here only to
+// validate roles against the directory's assignable-role allow-list --
+// entity-service deliberately does not validate role names itself (see
+// domain.UserRole's own doc comment there), so this is the one place that
+// does. The body is otherwise forwarded to the entity service unchanged.
+type createUserRequest struct {
+	FirstName string   `json:"firstName"`
+	LastName  string   `json:"lastName"`
+	Email     string   `json:"email"`
+	Roles     []string `json:"roles"`
+}
+
+// CreateUser handles POST /users. Restricted to admin via the route's
+// PermAdmin permission (cmd/server/main.go) — this handler itself only
+// validates the request shape, it does not re-check the caller's role.
+func (h *UsersHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	var req createUserRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	for _, role := range req.Roles {
+		if !h.dir.IsValidRole(role) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("roles contains invalid value: %s", role))
+			return
+		}
+	}
+
+	result, err := h.entity.CreateUser(r.Context(), body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity CreateUser failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to create the user.")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, result)
 }
 
 // ListSavedFilterViews handles GET /users/me/saved-filter-views.

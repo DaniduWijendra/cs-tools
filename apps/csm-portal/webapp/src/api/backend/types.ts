@@ -1679,6 +1679,18 @@ export interface BeUser {
   updatedAt?: string;
 }
 
+/**
+ * `POST /users` request body. At least one of firstName/lastName is
+ * required. `roles` is accepted by the backend but not currently sent by the
+ * webapp — there is no Asgardeo-backed way to browse/assign roles at
+ * account-creation time yet.
+ */
+export interface BeCreateUserPayload {
+  firstName?: string;
+  lastName?: string;
+  email: string;
+}
+
 export interface BeUserSearchFilters {
   /** Case-insensitive match against username and email. */
   searchQuery?: string;

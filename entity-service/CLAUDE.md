@@ -2460,6 +2460,31 @@ profile's team block) and, for customers only (`user_type` EXTERNAL, emitted as
   degrades to empty blocks; a database error here is a real fault).
 - Like the other user routes this does no per-caller scoping; the BFF gates it.
 
+## POST /users creates a new "user" row (Postgres-only)
+
+Before this, no code anywhere in this service wrote a `"user"` row at all — `UpsertFromSalesforce`
+(`account_repo.go`) only ever touches `account`, and `project_membership_repo.go`'s own user upsert
+only fires as a side effect of ingesting a Salesforce membership. `UserRepository.CreateUser`
+(`user_repo.go`) is the first direct write path: `user_name` is always `lower(email)` (matching the
+membership ingest's own convention), `is_active` is always `TRUE`, and `id`/`created_on`/
+`updated_on` are supplied inline (`gen_random_uuid(), NOW(), NOW()`) since the column has no DB-side
+default. `user_type` is never set directly — it's derived by a trigger (migration 000007) from
+`is_system_user` (left unset here, so NULL/false) and role membership, the same as every other write
+path in this codebase that touches `"user"`.
+
+`roles` is optional; when supplied, `grantRoles` resolves every name against `role` (migration
+000004) **before** inserting any `user_role` row — a partially-granted set on one unseeded name would
+be a confusing half-success — and fails the whole request with a `ServiceUnavailableError` naming
+the first bad one, the same posture `syncGlobalRoles` uses for the Salesforce membership ingest
+(a role name is deployment config, not something this service validates against a fixed enum — see
+`domain.UserRole`'s own doc comment). Everything happens in one transaction: a duplicate email (the
+`user_name` `UNIQUE` constraint) or a missing role rolls back the insert too, never leaving an
+orphaned `"user"` row with no roles.
+
+The acting caller is resolved from `x-user-id-token` (`emailFromJWT`, the same helper `GetMe` uses)
+and stamped as `created_by`/`updated_by` — this service still has no notion of "admin" itself;
+restricting who may call this is `apps/csm-portal/backend`'s job (see that repo's own `CLAUDE.md`).
+
 ## SearchDeployments crashed on any page containing a NULL deployment.type
 
 Reported live: `POST /deployments/search` failing with `cannot scan NULL into

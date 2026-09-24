@@ -239,3 +239,75 @@ func TestUserService_GetUser(t *testing.T) {
 		}
 	})
 }
+
+func TestUserService_CreateUser(t *testing.T) {
+	validReq := domain.CreateUserRequest{FirstName: "Jane", LastName: "Doe", Email: "jane.doe@example.com"}
+
+	t.Run("resolves the acting caller from the token and forwards it as actor", func(t *testing.T) {
+		var gotReq domain.CreateUserRequest
+		var gotActor string
+		repo := stubUserRepo{
+			createUser: func(_ context.Context, req domain.CreateUserRequest, actor string) (domain.User, error) {
+				gotReq, gotActor = req, actor
+				return domain.User{ID: userDetailTestID, Email: req.Email}, nil
+			},
+		}
+		ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "admin@example.com"))
+		got, err := NewUserService(repo).CreateUser(ctx, validReq)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gotActor != "admin@example.com" {
+			t.Errorf("actor = %q, want the caller's own email", gotActor)
+		}
+		if gotReq.Email != validReq.Email || gotReq.FirstName != validReq.FirstName || gotReq.LastName != validReq.LastName {
+			t.Errorf("repo saw %+v, want %+v", gotReq, validReq)
+		}
+		if got.ID != userDetailTestID {
+			t.Errorf("got = %+v, want the repository's row echoed back", got)
+		}
+	})
+
+	t.Run("requires a token, same as GetMe", func(t *testing.T) {
+		_, err := NewUserService(stubUserRepo{}).CreateUser(contextWithUserIDToken(""), validReq)
+		if _, ok := err.(*apierror.UnauthorizedError); !ok {
+			t.Fatalf("err = %v (%T), want *apierror.UnauthorizedError", err, err)
+		}
+	})
+
+	t.Run("rejects a missing or malformed email before reaching the repository", func(t *testing.T) {
+		ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "admin@example.com"))
+		for name, req := range map[string]domain.CreateUserRequest{
+			"empty":     {FirstName: "Jane", LastName: "Doe"},
+			"malformed": {FirstName: "Jane", LastName: "Doe", Email: "not-an-email"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, err := NewUserService(stubUserRepo{}).CreateUser(ctx, req)
+				if _, ok := err.(*apierror.ValidationError); !ok {
+					t.Fatalf("err = %v (%T), want *apierror.ValidationError", err, err)
+				}
+			})
+		}
+	})
+
+	t.Run("requires at least a first or last name", func(t *testing.T) {
+		ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "admin@example.com"))
+		_, err := NewUserService(stubUserRepo{}).CreateUser(ctx, domain.CreateUserRequest{Email: "jane.doe@example.com"})
+		if _, ok := err.(*apierror.ValidationError); !ok {
+			t.Fatalf("err = %v (%T), want *apierror.ValidationError", err, err)
+		}
+	})
+
+	t.Run("propagates the repository's conflict on a duplicate email", func(t *testing.T) {
+		repo := stubUserRepo{
+			createUser: func(context.Context, domain.CreateUserRequest, string) (domain.User, error) {
+				return domain.User{}, &apierror.ConflictError{Msg: "a user with this email already exists: jane.doe@example.com"}
+			},
+		}
+		ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "admin@example.com"))
+		_, err := NewUserService(repo).CreateUser(ctx, validReq)
+		if _, ok := err.(*apierror.ConflictError); !ok {
+			t.Fatalf("err = %v (%T), want *apierror.ConflictError", err, err)
+		}
+	})
+}

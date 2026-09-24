@@ -46,6 +46,15 @@ type UserService interface {
 	// ValidationError is returned for a malformed id and a NotFoundError when no
 	// user has it.
 	GetUser(ctx context.Context, id string) (domain.UserDetail, error)
+	// CreateUser inserts a new "user" row, optionally granting the roles named
+	// in req.Roles. The acting caller is resolved from x-user-id-token, the
+	// same way GetMe resolves its own caller, and stamped as created_by on
+	// every row this writes -- an UnauthorizedError is returned when that
+	// header is missing. A ValidationError is returned for a missing/malformed
+	// email; a ConflictError when a user with that email already exists; a
+	// ServiceUnavailableError naming any requested role not seeded in the role
+	// table.
+	CreateUser(ctx context.Context, req domain.CreateUserRequest) (domain.User, error)
 }
 
 // SavedFilterViewService is the caller's own named list-filter bookmarks

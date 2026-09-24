@@ -166,6 +166,14 @@ type stubUserRepo struct {
 	getUserRoles         func(ctx context.Context, id string) ([]string, error)
 	getUserGroups        func(ctx context.Context, id string) ([]domain.UserGroupRef, error)
 	getUserProjectAccess func(ctx context.Context, email string) ([]domain.UserContactAccess, error)
+	createUser           func(ctx context.Context, req domain.CreateUserRequest, actor string) (domain.User, error)
+}
+
+func (s stubUserRepo) CreateUser(ctx context.Context, req domain.CreateUserRequest, actor string) (domain.User, error) {
+	if s.createUser != nil {
+		return s.createUser(ctx, req, actor)
+	}
+	panic("not implemented")
 }
 
 func (s stubUserRepo) GetUserDetail(ctx context.Context, id string) (domain.UserDetail, error) {
