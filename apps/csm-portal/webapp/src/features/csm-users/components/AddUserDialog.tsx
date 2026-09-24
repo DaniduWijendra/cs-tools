@@ -24,7 +24,7 @@ import {
   TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import { useState, type JSX } from "react";
+import { useState, type FormEvent, type JSX } from "react";
 import { usePostUser } from "@features/csm-users/api/usePostUser";
 import { isPlausibleEmail } from "@features/csm-users/utils/isPlausibleEmail";
 
@@ -58,7 +58,8 @@ export default function AddUserDialog({ open, onClose, onCreated }: AddUserDialo
   const hasName = form.firstName.trim() !== "" || form.lastName.trim() !== "";
   const canSubmit = hasName && isPlausibleEmail(trimmedEmail);
 
-  const handleSubmit = (): void => {
+  const handleSubmit = (e: FormEvent<HTMLFormElement>): void => {
+    e.preventDefault();
     if (!canSubmit) return;
     mutate(
       {
@@ -79,63 +80,65 @@ export default function AddUserDialog({ open, onClose, onCreated }: AddUserDialo
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="xs" fullWidth>
       <DialogTitle>Add user</DialogTitle>
-      <DialogContent>
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 0.5 }}>
-          {error && (
-            <Typography variant="body2" color="error">
-              {error.message || "Failed to create the user."}
-            </Typography>
-          )}
-          <TextField
-            label="First name"
-            value={form.firstName}
-            onChange={(e) => setForm({ ...form, firstName: e.target.value })}
-            fullWidth
-            disabled={isPending}
-            autoFocus
-          />
-          <TextField
-            label="Last name"
-            value={form.lastName}
-            onChange={(e) => setForm({ ...form, lastName: e.target.value })}
-            fullWidth
-            disabled={isPending}
-          />
-          <TextField
-            label="Email"
-            type="email"
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-            fullWidth
-            disabled={isPending}
-            required
-            error={form.email.trim() !== "" && !isPlausibleEmail(trimmedEmail)}
-            helperText={
-              form.email.trim() !== "" && !isPlausibleEmail(trimmedEmail)
-                ? "Enter a valid email address."
-                : undefined
-            }
-          />
-          {!hasName && (
-            <Typography variant="caption" color="text.secondary">
-              At least a first or last name is required.
-            </Typography>
-          )}
-        </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button color="inherit" onClick={handleClose} disabled={isPending}>
-          Cancel
-        </Button>
-        <Button
-          variant="contained"
-          onClick={handleSubmit}
-          disabled={!canSubmit || isPending}
-          loading={isPending}
-        >
-          Add user
-        </Button>
-      </DialogActions>
+      <Box component="form" onSubmit={handleSubmit} noValidate>
+        <DialogContent>
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 0.5 }}>
+            {error && (
+              <Typography variant="body2" color="error">
+                {error.message || "Failed to create the user."}
+              </Typography>
+            )}
+            <TextField
+              label="First name"
+              value={form.firstName}
+              onChange={(e) => setForm({ ...form, firstName: e.target.value })}
+              fullWidth
+              disabled={isPending}
+              autoFocus
+            />
+            <TextField
+              label="Last name"
+              value={form.lastName}
+              onChange={(e) => setForm({ ...form, lastName: e.target.value })}
+              fullWidth
+              disabled={isPending}
+            />
+            <TextField
+              label="Email"
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              fullWidth
+              disabled={isPending}
+              required
+              error={form.email.trim() !== "" && !isPlausibleEmail(trimmedEmail)}
+              helperText={
+                form.email.trim() !== "" && !isPlausibleEmail(trimmedEmail)
+                  ? "Enter a valid email address."
+                  : undefined
+              }
+            />
+            {!hasName && (
+              <Typography variant="caption" color="text.secondary">
+                At least a first or last name is required.
+              </Typography>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button type="button" color="inherit" onClick={handleClose} disabled={isPending}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={!canSubmit || isPending}
+            loading={isPending}
+          >
+            Add user
+          </Button>
+        </DialogActions>
+      </Box>
     </Dialog>
   );
 }

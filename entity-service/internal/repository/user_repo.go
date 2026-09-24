@@ -459,6 +459,20 @@ func (r *userRepo) CreateUser(ctx context.Context, req domain.CreateUserRequest,
 		return domain.User{}, err
 	}
 
+	// user_type is trigger-derived from role membership (migration 000007),
+	// so the value RETURNING read above -- before any role was granted -- can
+	// already be stale once grantRoles has run. Only worth a second read when
+	// a role was actually granted; with none, nothing could have changed it.
+	if len(u.Roles) > 0 {
+		userType = nil
+		if err := tx.QueryRow(ctx, `SELECT user_type::TEXT FROM "user" WHERE id = $1`, u.ID).Scan(&userType); err != nil {
+			return domain.User{}, fmt.Errorf("create user: reload user type: %w", err)
+		}
+		if userType != nil {
+			u.UserType = userTypeFromEnum[*userType]
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return domain.User{}, fmt.Errorf("create user: commit: %w", err)
 	}
