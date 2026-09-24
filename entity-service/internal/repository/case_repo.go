@@ -230,6 +230,14 @@ type CaseRepository interface {
 	// caseID does not exist; a ValidationError if any userID does not
 	// exist.
 	SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error)
+	// AccountDefaultWatcherIDs returns the account owning projectID's four
+	// named stakeholder ids -- customer_success_manager_id, technical_owner_id,
+	// secondary_technical_owner_id, account_manager_id (migration 000008) --
+	// whichever are set, deduplicated, in that order. A project with no
+	// linked account, or a project id that does not exist, returns an empty
+	// slice rather than an error: this is a default watch list, not a
+	// requirement.
+	AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error)
 	// SearchCaseActivities returns a paginated, newest-first feed combining
 	// the case's comments (comment, migration 000037) and complete
 	// attachments (case_attachment, migration 000043) into one merged
@@ -1916,6 +1924,38 @@ func (r *caseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs 
 	}
 
 	return watchers, updatedOn, nil
+}
+
+// AccountDefaultWatcherIDs implements CaseRepository.
+func (r *caseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error) {
+	var csmID, towID, stowID, amID *string
+	err := r.db.QueryRow(ctx, `
+		SELECT a.customer_success_manager_id, a.technical_owner_id,
+		       a.secondary_technical_owner_id, a.account_manager_id
+		FROM project p
+		JOIN account a ON a.id = p.account_id
+		WHERE p.id = $1`, projectID,
+	).Scan(&csmID, &towID, &stowID, &amID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("account default watcher ids: %w", err)
+	}
+
+	ids := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for _, id := range []*string{csmID, towID, stowID, amID} {
+		if id == nil || *id == "" {
+			continue
+		}
+		if _, dup := seen[*id]; dup {
+			continue
+		}
+		seen[*id] = struct{}{}
+		ids = append(ids, *id)
+	}
+	return ids, nil
 }
 
 // scanTag scans a single (id, name) row into a domain.Tag. tag has no

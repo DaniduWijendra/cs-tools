@@ -1353,30 +1353,40 @@ changed.
   — `WatchListUser.User`'s own doc comment requires that field to stay null
   regardless of whether this data source happens to know it.
 
-  **`CreateCaseRequest.WatchList` reached ServiceNow but never the Postgres
-  mirror.** `createCaseSNFirst`'s `s.snMirror.CreateCase(ctx, req)` call
-  passes ServiceNow the full request, `WatchList` included, but
-  `CaseRepository.CreateCaseFromServiceNow`'s own insert only ever writes
-  `work_item`/the type-specific extension table — never
-  `work_item_watcher`. So a case created with an explicit watch list (the
-  Customer Portal always sends one — see `CreateCasePage.tsx`'s own
-  creator-plus-eligible-project-contacts default) had it on the ServiceNow
-  side only: every Postgres-sourced read (`GetCaseByID`, `SearchCases`)
-  showed no watchers at all, and worse, `publishCaseCreatedEvent`'s own
-  `Recipients` (built from a `GetCaseByID` call, not from `req.WatchList`
-  directly) went out to nobody — a real, silent regression from the
-  ServiceNow-only data source, where the same read naturally sees whatever
-  ServiceNow received. `createCaseSNFirst` now calls
-  `mirrorInitialWatchList` right after `CreateCaseFromServiceNow` succeeds
-  and before `publishCaseCreatedEvent`, resolving each `req.WatchList`
-  entry (an email — Customer Portal/Ballerina — or a user UUID — CSM, per
-  that field's own doc comment) to a real `"user"` id via `userRepo`, then
-  writing them with the same `CaseRepository.SetCaseWatchList` the
-  `UpdateCase` branch above already uses. An entry that can't be resolved
-  to a known user is dropped with a warning, not a failure — ServiceNow
-  already has the case by this point, so a partially-mirrored watch list
-  must not be reported as a failed create, same posture as every other
-  post-ServiceNow-success step in this file (event publishing included).
+  **A new case always gets no watchers at all on the SN-first create
+  path.** `CreateCaseFromServiceNow`'s insert only ever writes `work_item`/
+  the type-specific extension table — never `work_item_watcher` — so every
+  Postgres-sourced read of a freshly created case (`GetCaseByID`,
+  `SearchCases`) showed no watchers, and `publishCaseCreatedEvent`'s own
+  `Recipients` (built from a `GetCaseByID` call) went out to nobody. An
+  earlier revision of this fix mirrored `req.WatchList` (whatever the
+  caller sent, forwarded to ServiceNow via `s.snMirror.CreateCase`) into
+  `work_item_watcher` — deliberately replaced: that design still routed the
+  default watch list through ServiceNow-shaped concepts (email vs. UUID
+  resolution, `userRepo.GetUserByEmail` lookups) for something this schema
+  can answer directly.
+
+  **Every case now gets its account's four named stakeholders as watchers,
+  unconditionally, from a pure Postgres lookup — no ServiceNow involved.**
+  `account.customer_success_manager_id`/`technical_owner_id`/
+  `secondary_technical_owner_id`/`account_manager_id` (migration 000008)
+  are already `"user"` ids, so there's no email/UUID ambiguity to resolve
+  at all. `createCaseSNFirst` calls `addAccountDefaultWatchers` right after
+  `CreateCaseFromServiceNow` succeeds and before `publishCaseCreatedEvent`;
+  it resolves those four ids for the case's project via
+  `CaseRepository.AccountDefaultWatcherIDs` (a `project JOIN account`,
+  whichever of the four are set, deduplicated) and writes them with the
+  same `CaseRepository.SetCaseWatchList` the `UpdateCase` branch above
+  already uses. A project with no linked account, or an account with none
+  of the four roles set, is a normal state (an empty slice, `SetCaseWatchList`
+  never called) — not an error. A repository failure here is logged, not
+  returned: ServiceNow already has the case by this point, so a missing
+  default watch list must not be reported as a failed create, same posture
+  as every other post-ServiceNow-success step in this file (event
+  publishing included). `req.WatchList` itself is unaffected by any of
+  this — it's still forwarded to ServiceNow as part of the create request
+  the normal way; this addition is purely about what the Postgres mirror
+  also guarantees.
 - **Account contacts** (`account_contact`, migration 000020) and **project
   contacts** (`project_contact` + `project_contact_group`/`project_group`/
   `project_group_role`/`project_role`, migrations 000022-000025): new
