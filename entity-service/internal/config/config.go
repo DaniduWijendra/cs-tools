@@ -258,7 +258,7 @@ func Load() *Config {
 		GithubLabelsClass:                        os.Getenv("GITHUB_LABELS_CLASS"),
 		GithubLabelStatusAssigned:                os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
-		SalesforceMembershipIngestEnabled:        os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		SalesforceMembershipIngestEnabled:        os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
 		CSMMigrationPortalWritesEnabled:          os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
 		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
 		CRNoticePollInterval:                     envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),

@@ -49,7 +49,7 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `SALES_ENTITY_CLIENT_ID` | no* | — | Choreo connection client id |
 | `SALES_ENTITY_CLIENT_SECRET` | no* | — | Choreo connection client secret |
 | `SALES_ENTITY_SCOPES` | no | — | Optional space-separated OAuth2 scopes for REST `sales/sales-entity-service` |
-| `SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes (see "Salesforce membership ingest" below). The Account branch is unaffected |
+| `CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes (see "Salesforce membership ingest" below). The Account branch is unaffected |
 | `CSM_MIGRATION_PORTAL_WRITES_ENABLED` | no | `false` | Must be `"true"` to register the four portal-driven membership write routes under `/projects/{id}/contacts` (see "Portal-driven membership writes" below). Also needs `DATA_SOURCE=postgres`, a pool, and the full `SALES_ENTITY_*` set (`Config.HasPortalMembershipWrites`). Off means the routes are **not registered at all**, not 403 |
 
 \* `DB_USER`/`DB_PASSWORD`/`DB_NAME` are required when `DATA_SOURCE=postgres`
@@ -193,7 +193,7 @@ retry forever). DELETED soft-deletes by setting `deactivation_date`; never
 
 The same `POST /salesforce/events` endpoint also ingests customer **memberships**
 — Salesforce `Project_Contact__c` (a Contact's membership of a project) and
-`Contact` — when `SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true`. Off by default:
+`Contact` — when `CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true`. Off by default:
 `routes.go` then constructs the service with `NewSalesforceEventService`, which
 acknowledges those entities with 204 and ignores them (the behaviour before this
 branch existed). On, it uses `NewSalesforceEventServiceWithMembershipIngest`

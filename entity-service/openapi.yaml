@@ -27,7 +27,7 @@ paths:
         POST /customer-search (isRealTime true), not GraphQL
         sales/entity-graphql-service, and upserts the csm-platform account table.
         Entity Project_Contact__c (also accepted as Project_Contact), only when
-        SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
+        CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
         the membership and its Contact (POST /project-contacts/search,
         POST /contacts/search) and upsert user, user_role, account_contact,
         project_contact and project_contact_group in one transaction, record the
@@ -13915,7 +13915,7 @@ components:
           description: >-
             Salesforce sObject name. Account is always processed.
             Project_Contact__c (also accepted as Project_Contact) and Contact
-            are processed only when SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
+            are processed only when CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
             true; otherwise, like every other value, they are acknowledged
             with 204 and ignored.
         referenceId:
