@@ -22,7 +22,7 @@ ALTER TABLE service DROP COLUMN IF EXISTS managed_by_group_id;
 ALTER TABLE service DROP COLUMN IF EXISTS approval_group_id;
 ALTER TABLE service DROP COLUMN IF EXISTS user_group_id;
 ALTER TABLE communication_plan DROP COLUMN IF EXISTS assignment_group_id;
-ALTER TABLE account DROP COLUMN IF EXISTS integration_cs_team_id;
+ALTER TABLE account DROP COLUMN IF EXISTS cre_team_id;
 ALTER TABLE account DROP COLUMN IF EXISTS sre_team_id;
 ALTER TABLE project DROP COLUMN IF EXISTS assignment_group_id;
 ALTER TABLE incident_alert DROP COLUMN IF EXISTS assignment_group_id;
