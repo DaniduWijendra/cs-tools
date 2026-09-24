@@ -116,12 +116,11 @@ export default function AnnouncementDetailsPanel({
   const statusColorPath = getStatusColor(statusLabel ?? undefined);
   const resolvedStatusColor = resolveColorFromTheme(statusColorPath, theme);
   const updatedOnLabel = formatAnnouncementDateDisplay(data.updatedOn);
-  // Matches the CSM portal's own SECURITY_ANNOUNCEMENT_TAG_LABEL constant --
-  // the two apps have no shared code to import it from, so it's duplicated
-  // here as a literal, same as every other cross-app label match in this file.
-  const isSecurityAnnouncement = (data.tags ?? []).some(
-    (t) => t.label.toLowerCase() === "security announcement",
-  );
+  // Reads the case's own announcement_type classification directly (the
+  // real ServiceNow field migrated into Postgres) rather than scanning tags
+  // for the "Security Announcement" label -- the source of truth for
+  // general vs. security is this column, not the mandatory tag.
+  const isSecurityAnnouncement = data.announcementType === "SECURITY";
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
