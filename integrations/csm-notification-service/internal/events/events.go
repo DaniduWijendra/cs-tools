@@ -90,6 +90,18 @@ const (
 	// internal/events/events.go, so the two schemas never drift even while
 	// this type is otherwise dormant.
 	TypeCaseBillableStatusChanged Type = "case.billable_status_changed"
+
+	// TypeProjectContactInvited is published by entity-service's Salesforce
+	// membership ingest once a Project_Contact__c in state INVITED /
+	// RE-INVITED has been written to Postgres (see that repo's own CLAUDE.md,
+	// "Salesforce membership ingest and onboarding steps"). This service is
+	// its consumer: dispatch.handleProjectContactInvited provisions the
+	// invitee's Asgardeo identity through the SCIM operations service
+	// (internal/scim) and sends the invitation email, recording each step's
+	// outcome back on entity-service's onboarding-step ledger
+	// (internal/entity.RecordOnboardingStep). Keyed by the Salesforce
+	// membership Id — see ProjectContactInvitedPayload.
+	TypeProjectContactInvited Type = "project_contact.invited"
 )
 
 // KnownTypes lists every Type this service accepts, in the order they're
@@ -99,6 +111,7 @@ var KnownTypes = []Type{
 	TypeCaseCreated, TypeCommentAdded, TypeStatusChanged, TypeCaseAssigned, TypeCaseAcknowledged, TypeSeverityChanged, TypeIncidentCreated,
 	TypeSLATierReached, TypeCaseBillableStatusChanged,
 	TypeCRApprovalRequested, TypeCRPlanDateNotice,
+	TypeProjectContactInvited,
 }
 
 // Envelope is the wire shape of every record on the event bus: Payload's
@@ -390,4 +403,41 @@ type CRApprovalRequestedPayload struct {
 	// Recipients are already resolved and de-duplicated. Never empty — a notice
 	// with nobody to send to is not published.
 	Recipients []string `json:"recipients"`
+}
+
+// ProjectContactInvitedPayload is TypeProjectContactInvited's payload —
+// mirrors entity-service's own ProjectContactInvitedPayload exactly (keep
+// the two in sync by hand, the same way every other shared payload here
+// is): everything this service needs to provision the invited person and
+// address the invitation, so it never has to re-read Salesforce.
+//
+// MembershipSfID is the Salesforce Project_Contact__c Id — also the
+// envelope's EntityID (Validate enforces the match, like the case.* types'
+// CaseID) and the key every onboarding-step write is recorded under.
+// ContactSfID is the Salesforce Contact Id, passed through to the step
+// ledger for cross-referencing. GivenName/FamilyName may both be empty
+// (Salesforce doesn't require a first name) — dispatch falls back to the
+// email's local part for display. Roles are the raw Salesforce
+// Project_Role__c values (e.g. "Admin", "Portal user"), shown in the email
+// when non-empty. IsIntegrationUser=true means the contact is a machine
+// account that never signs in: dispatch records IDENTITY and EMAIL as
+// SKIPPED and does nothing else. Type is the Salesforce Contact_Type__c
+// ("OWN CONTACT" / "PARTNER CONTACT" / an integration-user type) — carried
+// for completeness, not used to branch on here today.
+type ProjectContactInvitedPayload struct {
+	MembershipSfID    string   `json:"membershipSfId"`
+	ContactSfID       string   `json:"contactSfId"`
+	Email             string   `json:"email"`
+	GivenName         string   `json:"givenName"`
+	FamilyName        string   `json:"familyName"`
+	ProjectName       string   `json:"projectName"`
+	ProjectKey        string   `json:"projectKey"`
+	Roles             []string `json:"roles"`
+	IsIntegrationUser bool     `json:"isIntegrationUser"`
+	Type              string   `json:"type"`
+	// EventModifiedOn is the Salesforce LastModifiedDate of the membership
+	// version this event describes (RFC 3339); dispatch stamps its
+	// onboarding-step writes with it. Optional: an empty value means
+	// entity-service could not parse the Salesforce date.
+	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
 }

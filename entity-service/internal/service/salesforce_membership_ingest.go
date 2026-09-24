@@ -189,7 +189,7 @@ func (s *salesforceEventService) ingestMembership(ctx context.Context, membershi
 		"createdUser", res.CreatedUser, "createdAccountContact", res.CreatedAccountContact, "createdProjectContact", res.CreatedProjectContact)
 
 	if in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited {
-		s.publishProjectContactInvited(ctx, in, pc)
+		s.publishProjectContactInvited(ctx, in, pc, eventModifiedOn, hasModified)
 	}
 	return nil
 }
@@ -212,9 +212,13 @@ func (s *salesforceEventService) recordDatabaseStepFailed(ctx context.Context, s
 // csm-notification-service can provision the Asgardeo identity and send the
 // invitation. Failures are logged, never returned: the database write is
 // already committed and EventPublisherService records the failure durably.
-func (s *salesforceEventService) publishProjectContactInvited(ctx context.Context, in domain.SalesforceMembershipUpsert, pc salesentity.ProjectContact) {
+func (s *salesforceEventService) publishProjectContactInvited(ctx context.Context, in domain.SalesforceMembershipUpsert, pc salesentity.ProjectContact, eventModifiedOn time.Time, hasModified bool) {
 	if s.membership.Publisher == nil {
 		return
+	}
+	modifiedOn := ""
+	if hasModified {
+		modifiedOn = eventModifiedOn.UTC().Format(time.RFC3339Nano)
 	}
 	roles := pc.Roles
 	if len(roles) == 0 {
@@ -234,6 +238,7 @@ func (s *salesforceEventService) publishProjectContactInvited(ctx context.Contex
 		Roles:             roles,
 		IsIntegrationUser: in.IsCsIntegrationUser,
 		Type:              in.Type,
+		EventModifiedOn:   modifiedOn,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "salesforce: encode project_contact.invited payload", "membershipSfId", in.MembershipSfID, "err", err)

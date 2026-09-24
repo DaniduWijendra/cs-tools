@@ -302,4 +302,11 @@ type ProjectContactInvitedPayload struct {
 	Roles             []string `json:"roles"`
 	IsIntegrationUser bool     `json:"isIntegrationUser"`
 	Type              string   `json:"type"`
+	// EventModifiedOn is the Salesforce LastModifiedDate of the membership
+	// version this event describes, RFC 3339 UTC. The consumer stamps its
+	// onboarding-step writes with it so a delayed older invitation cannot
+	// overwrite a newer one's outcome (the step upsert only applies writes
+	// whose eventModifiedOn is not older than the stored one). Empty only
+	// when Salesforce returned no parseable date.
+	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
 }
