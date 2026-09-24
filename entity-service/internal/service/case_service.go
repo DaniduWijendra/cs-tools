@@ -79,6 +79,14 @@ type snCommentMirror interface {
 	CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error)
 }
 
+// snWatchListPatcher is implemented by *snCaseService (see
+// patchCaseWatchList's own doc comment). A narrow interface for the same
+// reason snFieldPatcher is one: updateCaseWatchList's mirror needs a bare
+// watch-list-only PATCH, not the full CaseService surface.
+type snWatchListPatcher interface {
+	patchCaseWatchList(ctx context.Context, caseID string, userIDs []string) (domain.UpdatedCase, error)
+}
+
 // NewCaseService constructs a CaseService backed by the given repositories.
 // publisher may be nil (see caseService.publisher's own doc comment). access
 // scopes GetCaseByID/SearchCases's reads (see AccessService).
@@ -849,6 +857,30 @@ func (s *caseService) updateCaseWatchList(ctx context.Context, req domain.Update
 		return domain.UpdateCaseResponse{}, err
 	}
 
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback/snMirror are both nil otherwise -- see
+	// NewCaseServiceWithSNWriteback's own doc comment). Postgres has already
+	// committed by this point; this fires after, asynchronously, and never
+	// affects this response. Safe to mirror by id -- case CREATE is
+	// ServiceNow-first under this data source (createCaseSNFirst), so req.ID
+	// IS the real ServiceNow sys_id round-tripped through sysidToUUID.
+	// patchCaseWatchList (sn_case_service.go) is a bare PATCH with none of
+	// snCaseService.UpdateCase's own read-before-write/event-publish
+	// behavior, reached through the snWatchListPatcher interface, same
+	// pattern as the State/Severity/WorkState mirror above.
+	if s.snWriteback != nil {
+		if patcher, ok := s.snMirror.(snWatchListPatcher); ok {
+			mirrorUserIDs := append([]string(nil), userIDs...)
+			s.snWriteback.Dispatch(ctx, "case", req.ID, "update",
+				map[string]any{"id": req.ID, "watchList": mirrorUserIDs},
+				func(writeCtx context.Context) error {
+					_, err := patcher.patchCaseWatchList(writeCtx, req.ID, mirrorUserIDs)
+					return err
+				},
+			)
+		}
+	}
+
 	return domain.UpdateCaseResponse{
 		Message: "Case updated successfully",
 		Case: domain.UpdatedCase{
@@ -1385,7 +1417,39 @@ func (s *caseService) addCaseTagAs(ctx context.Context, caseID, label, actorEmai
 
 	s.detectPatchTagBillableOverride(ctx, caseID, label)
 
-	return s.repo.AddCaseTag(ctx, caseID, label, actorEmail)
+	tag, err := s.repo.AddCaseTag(ctx, caseID, label, actorEmail)
+	if err != nil {
+		return domain.Tag{}, err
+	}
+
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback/snMirror are both nil otherwise -- see
+	// NewCaseServiceWithSNWriteback's own doc comment). Postgres has already
+	// committed by this point; this fires after, asynchronously, and never
+	// affects this response. Mirrors by label, not by the Postgres tag id
+	// (which has no ServiceNow counterpart -- SN's own tag/label-entry id is
+	// generated independently on its own POST) -- snMirror.AddCaseTagAs
+	// (sn_case_service.go) is already a bare, idempotent-by-label POST with
+	// no GET-before-write or notification side effects, so it's called
+	// directly here through the full CaseService interface rather than a
+	// narrower one, same as snMirror.CreateCase above.
+	//
+	// RemoveCaseTag has NO equivalent mirror (see its own doc comment for
+	// why): it identifies the tag to remove by the Postgres tag id alone,
+	// and there is no stored mapping from that id to ServiceNow's own tag
+	// sys_id to remove there too.
+	if s.snWriteback != nil {
+		mirrorCaseID, mirrorLabel, mirrorActorEmail := caseID, label, actorEmail
+		s.snWriteback.Dispatch(ctx, "case_tag", caseID, "add",
+			map[string]any{"caseId": mirrorCaseID, "label": mirrorLabel},
+			func(writeCtx context.Context) error {
+				_, err := s.snMirror.AddCaseTagAs(writeCtx, mirrorCaseID, mirrorLabel, mirrorActorEmail)
+				return err
+			},
+		)
+	}
+
+	return tag, nil
 }
 
 // detectPatchTagBillableOverride DETECTS AND LOGS ONLY — it does not
@@ -1449,6 +1513,18 @@ func (s *caseService) detectPatchTagBillableOverride(ctx context.Context, caseID
 }
 
 // RemoveCaseTag implements CaseService.
+//
+// Deliberately NOT mirrored to ServiceNow under
+// DATA_SOURCE=postgres-servicenow-dual-write (unlike AddCaseTag -- see that
+// method's own doc comment): tagID here is the Postgres "tag" table's own
+// primary key, and there is nowhere this schema records the corresponding
+// ServiceNow label-entry sys_id AddCaseTag's mirror created (SN's AddCaseTag
+// response is discarded after firing -- see that mirror's own comment).
+// Resolving one from the other would need either a new mapping column/table
+// (a schema change, out of scope here) or a fragile runtime lookup (list
+// ServiceNow's tags for the case and match by label, which breaks on
+// multiple same-label tags and silently no-ops when the original AddCaseTag
+// mirror itself never landed). Left unmirrored rather than guessed at.
 func (s *caseService) RemoveCaseTag(ctx context.Context, caseID, tagID string) error {
 	if err := validateUUIDs("caseId", []string{caseID}); err != nil {
 		return err
