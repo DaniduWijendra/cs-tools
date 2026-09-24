@@ -1,3 +1,19 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
 -- PLG Customer Success Portal — core schema.
 --
 -- This migration owns every plg_* table, enum, view and trigger. It attaches to
@@ -55,7 +71,8 @@
 --   registration     REGISTRATION that ends the pairing at ABANDONED — and
 --                    unlike a stage, a playbook can record WHY, through the
 --                    checklist reasons plg_run_task_reason_v already reports.
-CREATE TYPE plg_lifecycle_stage_enum AS ENUM (
+DO $$ BEGIN
+    CREATE TYPE plg_lifecycle_stage_enum AS ENUM (
     'REGISTRATION',
     'PLG_CS_ELIGIBLE',
     'FIRST_VALUE_ACHIEVED',
@@ -63,6 +80,7 @@ CREATE TYPE plg_lifecycle_stage_enum AS ENUM (
     'COMMERCIAL',
     'ABANDONED'
 );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- How a pairing is doing, wherever it has got to.
 --
@@ -72,7 +90,9 @@ CREATE TYPE plg_lifecycle_stage_enum AS ENUM (
 -- definition, no stage.
 --
 -- Set by an engineer, not derived. Defaults to HEALTHY.
-CREATE TYPE plg_health_enum AS ENUM ('HEALTHY', 'AT_RISK');
+DO $$ BEGIN
+    CREATE TYPE plg_health_enum AS ENUM ('HEALTHY', 'AT_RISK');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- What a playbook is for. The lifecycle seen from the playbook's side.
 --
@@ -91,7 +111,9 @@ CREATE TYPE plg_health_enum AS ENUM ('HEALTHY', 'AT_RISK');
 -- Which kinds a pairing is offered is a function of health, and that function
 -- is plg_applicable_playbook_types below. It is not stored on the pairing: a
 -- stored copy is a second opinion waiting to disagree with the first.
-CREATE TYPE plg_playbook_type_enum AS ENUM ('PROGRESSIVE', 'RECOVERY', 'SUSTAINING');
+DO $$ BEGIN
+    CREATE TYPE plg_playbook_type_enum AS ENUM ('PROGRESSIVE', 'RECOVERY', 'SUSTAINING');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Which kinds of playbook a pairing in this health state may be offered.
 --
@@ -104,7 +126,7 @@ CREATE TYPE plg_playbook_type_enum AS ENUM ('PROGRESSIVE', 'RECOVERY', 'SUSTAINI
 --
 -- IMMUTABLE so the planner can inline it into the EXISTS and the lateral below
 -- rather than calling it per row.
-CREATE FUNCTION plg_applicable_playbook_types(h plg_health_enum)
+CREATE OR REPLACE FUNCTION plg_applicable_playbook_types(h plg_health_enum)
 RETURNS plg_playbook_type_enum[]
 LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
     SELECT CASE h
@@ -120,8 +142,10 @@ $$;
 -- they differ only in how many may be chosen. Both require `options`, and both
 -- report through plg_run_task_reason_v, so "why was this disqualified" and
 -- "which plan did they pick" are the same query.
-CREATE TYPE plg_task_value_type_enum AS ENUM (
+DO $$ BEGIN
+    CREATE TYPE plg_task_value_type_enum AS ENUM (
     'BOOLEAN', 'STRING', 'NUMBER', 'CHECKLIST', 'SINGLE_SELECT');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Recorded by hand — there is no subscription feed.
 --
@@ -134,8 +158,9 @@ CREATE TYPE plg_task_value_type_enum AS ENUM (
 -- behind it. TRIAL_EXTENDED replaced it because that IS a state the portal acts
 -- on: it has its own end date, and a customer sitting in it is one whose trial
 -- has already been rescued once.
-CREATE TYPE plg_subscription_tier_enum AS ENUM
-    ('FREE', 'TRIAL', 'TRIAL_EXTENDED', 'PAYG');
+DO $$ BEGIN
+    CREATE TYPE plg_subscription_tier_enum AS ENUM ('FREE', 'TRIAL', 'TRIAL_EXTENDED', 'PAYG');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Which of a pairing's two trial dates is the one currently running.
 --
@@ -147,7 +172,7 @@ CREATE TYPE plg_subscription_tier_enum AS ENUM
 --
 -- NULL for FREE and PAYG, and that is the answer rather than missing data:
 -- neither tier has a period that ends.
-CREATE FUNCTION plg_current_period_end_date(
+CREATE OR REPLACE FUNCTION plg_current_period_end_date(
     tier plg_subscription_tier_enum, trial DATE, extended DATE)
 RETURNS DATE
 LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
@@ -174,7 +199,7 @@ $$;
 -- Prefixed plg_product, not `products`: entity-service already has a `products`
 -- table holding WSO2 products, and this is a different thing — the five cloud
 -- platforms a PLG pairing can be on. Only `"user"` is deliberately shared.
-CREATE TABLE plg_product (
+CREATE TABLE IF NOT EXISTS plg_product (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code          TEXT        NOT NULL UNIQUE,
     name          TEXT        NOT NULL,
@@ -184,7 +209,7 @@ CREATE TABLE plg_product (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TRIGGER trg_plg_product_updated_at BEFORE UPDATE ON plg_product
+CREATE OR REPLACE TRIGGER trg_plg_product_updated_at BEFORE UPDATE ON plg_product
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- The platform name arrives already normalised to one of these codes: the
@@ -194,7 +219,8 @@ INSERT INTO plg_product (code, name, display_order) VALUES
     ('API_PLATFORM',         'API Platform',                 2),
     ('INTEGRATION_PLATFORM', 'Integration Platform',         3),
     ('AGENT_PLATFORM',       'Agent Platform',               4),
-    ('ENG_PLATFORM',         'Engineering Platform',         5);
+    ('ENG_PLATFORM',         'Engineering Platform',         5)
+ON CONFLICT (code) DO NOTHING;
 
 -- The stage catalogue. `name` exists because no string transform turns PAYG
 -- into "PayG" — you get "Payg". The label has to be authored somewhere, and the
@@ -209,7 +235,7 @@ INSERT INTO plg_product (code, name, display_order) VALUES
 -- changes which moves are legal. ABANDONED sits outside the progression at 99
 -- deliberately: it is reachable from anywhere rather than being the step after
 -- COMMERCIAL.
-CREATE TABLE plg_lifecycle_stage (
+CREATE TABLE IF NOT EXISTS plg_lifecycle_stage (
     stage         plg_lifecycle_stage_enum PRIMARY KEY,
     name          TEXT NOT NULL,
     display_order INT  NOT NULL UNIQUE,
@@ -222,7 +248,8 @@ INSERT INTO plg_lifecycle_stage (stage, name, display_order, description) VALUES
     ('FIRST_VALUE_ACHIEVED', 'First Value Achieved', 3,  'The product did something useful for them for the first time.'),
     ('ACTIVATED',            'Activated',            4,  'Using the product repeatedly and under their own steam.'),
     ('COMMERCIAL',           'Commercial',           5,  'Paying. Which plan is the subscription tier''s business, not the lifecycle''s.'),
-    ('ABANDONED',            'Abandoned',            99, 'Gone. Terminal — reachable from any stage, and nothing leaves it.');
+    ('ABANDONED',            'Abandoned',            99, 'Gone. Terminal — reachable from any stage, and nothing leaves it.')
+ON CONFLICT (stage) DO NOTHING;
 
 -- PLG_PLAYBOOK_STAGE_PATH IS GONE.
 --
@@ -248,7 +275,7 @@ INSERT INTO plg_lifecycle_stage (stage, name, display_order, description) VALUES
 -- the same shape `"user"` has. Email is on every payload the source sends —
 -- including the sparse second-registration one — which is what makes the second
 -- organisation resolvable without a mapping table.
-CREATE TABLE plg_person (
+CREATE TABLE IF NOT EXISTS plg_person (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email      TEXT        NOT NULL UNIQUE,
     first_name TEXT,
@@ -257,7 +284,7 @@ CREATE TABLE plg_person (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TRIGGER trg_plg_person_updated_at BEFORE UPDATE ON plg_person
+CREATE OR REPLACE TRIGGER trg_plg_person_updated_at BEFORE UPDATE ON plg_person
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- One Asgardeo organisation.
@@ -266,7 +293,7 @@ CREATE TRIGGER trg_plg_person_updated_at BEFORE UPDATE ON plg_person
 -- redelivered webhook event idempotent (the source's record id is absent on second
 -- registrations, so there is nothing else to deduplicate on), and it is the key
 -- passed to the runtime product-analytics API.
-CREATE TABLE plg_organization (
+CREATE TABLE IF NOT EXISTS plg_organization (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_name        TEXT        NOT NULL UNIQUE,
     created_on               TIMESTAMPTZ NOT NULL,
@@ -303,11 +330,11 @@ CREATE TABLE plg_organization (
     CONSTRAINT uq_plg_organization_moesif_company UNIQUE (moesif_company_id)
 );
 
-CREATE INDEX idx_plg_organization_registrant ON plg_organization (registered_user);
-CREATE INDEX idx_plg_organization_owner      ON plg_organization (plg_cs_owner);
-CREATE INDEX idx_plg_organization_created    ON plg_organization (created_on DESC);
+CREATE INDEX IF NOT EXISTS idx_plg_organization_registrant ON plg_organization (registered_user);
+CREATE INDEX IF NOT EXISTS idx_plg_organization_owner      ON plg_organization (plg_cs_owner);
+CREATE INDEX IF NOT EXISTS idx_plg_organization_created    ON plg_organization (created_on DESC);
 
-CREATE TRIGGER trg_plg_organization_updated_at BEFORE UPDATE ON plg_organization
+CREATE OR REPLACE TRIGGER trg_plg_organization_updated_at BEFORE UPDATE ON plg_organization
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- The organisation+platform pairing — the unit of work, and the registration.
@@ -316,7 +343,7 @@ CREATE TRIGGER trg_plg_organization_updated_at BEFORE UPDATE ON plg_organization
 -- no platform creates the organisation and no pairing: the organisation exists
 -- with zero platforms until we learn one, rather than the registration being
 -- rejected.
-CREATE TABLE plg_org_platform (
+CREATE TABLE IF NOT EXISTS plg_org_platform (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id       UUID NOT NULL REFERENCES plg_organization (id) ON DELETE CASCADE,
     product_id            UUID NOT NULL REFERENCES plg_product (id)      ON DELETE RESTRICT,
@@ -385,16 +412,16 @@ CREATE TABLE plg_org_platform (
     CONSTRAINT uq_plg_org_platform UNIQUE (organization_id, product_id)
 );
 
-CREATE INDEX idx_plg_org_platform_stage       ON plg_org_platform (lifecycle_stage);
+CREATE INDEX IF NOT EXISTS idx_plg_org_platform_stage       ON plg_org_platform (lifecycle_stage);
 -- The work queue filters on the pair, and offers playbooks by health.
-CREATE INDEX idx_plg_org_platform_health      ON plg_org_platform (health_state, lifecycle_stage);
-CREATE INDEX idx_plg_org_platform_product     ON plg_org_platform (product_id, lifecycle_stage);
-CREATE INDEX idx_plg_org_platform_registered  ON plg_org_platform (registered_on DESC);
+CREATE INDEX IF NOT EXISTS idx_plg_org_platform_health      ON plg_org_platform (health_state, lifecycle_stage);
+CREATE INDEX IF NOT EXISTS idx_plg_org_platform_product     ON plg_org_platform (product_id, lifecycle_stage);
+CREATE INDEX IF NOT EXISTS idx_plg_org_platform_registered  ON plg_org_platform (registered_on DESC);
 -- Drives the "New registrations" tile and panel.
-CREATE INDEX idx_plg_org_platform_unack       ON plg_org_platform (registered_on DESC)
+CREATE INDEX IF NOT EXISTS idx_plg_org_platform_unack       ON plg_org_platform (registered_on DESC)
     WHERE acknowledged_on IS NULL;
 
-CREATE TRIGGER trg_plg_org_platform_updated_at BEFORE UPDATE ON plg_org_platform
+CREATE OR REPLACE TRIGGER trg_plg_org_platform_updated_at BEFORE UPDATE ON plg_org_platform
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- A pairing moves forward, or out. Never back, and never out of ABANDONED.
@@ -440,7 +467,7 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER trg_plg_org_platform_stage_move
+CREATE OR REPLACE TRIGGER trg_plg_org_platform_stage_move
     BEFORE UPDATE OF lifecycle_stage ON plg_org_platform
     FOR EACH ROW EXECUTE FUNCTION plg_check_stage_move();
 
@@ -456,7 +483,7 @@ CREATE TRIGGER trg_plg_org_platform_stage_move
 -- records none of them. The genesis row
 -- still has from_stage NULL and is written at ingest, so the history is never
 -- blank.
-CREATE TABLE plg_lifecycle_history (
+CREATE TABLE IF NOT EXISTS plg_lifecycle_history (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_platform_id  UUID NOT NULL REFERENCES plg_org_platform (id) ON DELETE CASCADE,
 
@@ -490,7 +517,7 @@ CREATE TABLE plg_lifecycle_history (
         CHECK (BTRIM(reason) <> '')
 );
 
-CREATE INDEX idx_plg_lifecycle_history_pairing
+CREATE INDEX IF NOT EXISTS idx_plg_lifecycle_history_pairing
     ON plg_lifecycle_history (org_platform_id, changed_on DESC);
 
 -- ---------------------------------------------------------------------------
@@ -499,7 +526,7 @@ CREATE INDEX idx_plg_lifecycle_history_pairing
 
 -- A playbook belongs to one product and one source stage. Its job is to move a
 -- pairing along one of the seven paths.
-CREATE TABLE plg_playbook (
+CREATE TABLE IF NOT EXISTS plg_playbook (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id      UUID NOT NULL REFERENCES plg_product (id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
@@ -538,15 +565,15 @@ CREATE TABLE plg_playbook (
 -- What is left is duller and smaller: a plain FK on the stage, NOT NULL on the
 -- type, and the CHECK above.
 
-CREATE INDEX idx_plg_playbook_product_stage
+CREATE INDEX IF NOT EXISTS idx_plg_playbook_product_stage
     ON plg_playbook (product_id, lifecycle_stage, display_order);
 
-CREATE TRIGGER trg_plg_playbook_updated_at BEFORE UPDATE ON plg_playbook
+CREATE OR REPLACE TRIGGER trg_plg_playbook_updated_at BEFORE UPDATE ON plg_playbook
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- Template tasks. `code` is the stable identity across template revisions, so
 -- renaming a task keeps its meaning; the two bookend codes are reserved.
-CREATE TABLE plg_playbook_task (
+CREATE TABLE IF NOT EXISTS plg_playbook_task (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     playbook_id UUID NOT NULL REFERENCES plg_playbook (id) ON DELETE CASCADE,
     code        TEXT NOT NULL,
@@ -588,7 +615,7 @@ CREATE TABLE plg_playbook_task (
     )
 );
 
-CREATE TRIGGER trg_plg_playbook_task_updated_at BEFORE UPDATE ON plg_playbook_task
+CREATE OR REPLACE TRIGGER trg_plg_playbook_task_updated_at BEFORE UPDATE ON plg_playbook_task
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- ---------------------------------------------------------------------------
@@ -596,7 +623,7 @@ CREATE TRIGGER trg_plg_playbook_task_updated_at BEFORE UPDATE ON plg_playbook_ta
 -- ---------------------------------------------------------------------------
 
 -- One playbook running against one pairing.
-CREATE TABLE plg_playbook_run (
+CREATE TABLE IF NOT EXISTS plg_playbook_run (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_platform_id UUID NOT NULL REFERENCES plg_org_platform (id) ON DELETE CASCADE,
     playbook_id     UUID NOT NULL REFERENCES plg_playbook (id)     ON DELETE RESTRICT,
@@ -607,9 +634,9 @@ CREATE TABLE plg_playbook_run (
     CONSTRAINT uq_plg_playbook_run UNIQUE (org_platform_id, playbook_id)
 );
 
-CREATE INDEX idx_plg_playbook_run_playbook ON plg_playbook_run (playbook_id);
+CREATE INDEX IF NOT EXISTS idx_plg_playbook_run_playbook ON plg_playbook_run (playbook_id);
 
-CREATE TRIGGER trg_plg_playbook_run_updated_at BEFORE UPDATE ON plg_playbook_run
+CREATE OR REPLACE TRIGGER trg_plg_playbook_run_updated_at BEFORE UPDATE ON plg_playbook_run
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- A playbook must belong to the same product as the pairing running it.
@@ -631,7 +658,7 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER trg_plg_playbook_run_product
+CREATE OR REPLACE TRIGGER trg_plg_playbook_run_product
     BEFORE INSERT OR UPDATE OF playbook_id, org_platform_id ON plg_playbook_run
     FOR EACH ROW EXECUTE FUNCTION plg_check_run_product();
 
@@ -640,7 +667,7 @@ CREATE TRIGGER trg_plg_playbook_run_product
 -- Template edits reach new runs only; runs in flight keep the list they started
 -- with, and there are no ad-hoc tasks, so a run differing from its template has
 -- exactly one explanation.
-CREATE TABLE plg_playbook_run_task (
+CREATE TABLE IF NOT EXISTS plg_playbook_run_task (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     playbook_run_id  UUID NOT NULL REFERENCES plg_playbook_run (id)  ON DELETE CASCADE,
     playbook_task_id UUID NOT NULL REFERENCES plg_playbook_task (id) ON DELETE RESTRICT,
@@ -713,14 +740,14 @@ CREATE TABLE plg_playbook_run_task (
     )
 );
 
-CREATE INDEX idx_plg_run_task_run  ON plg_playbook_run_task (playbook_run_id, sequence_no);
-CREATE INDEX idx_plg_run_task_open ON plg_playbook_run_task (playbook_run_id)
+CREATE INDEX IF NOT EXISTS idx_plg_run_task_run  ON plg_playbook_run_task (playbook_run_id, sequence_no);
+CREATE INDEX IF NOT EXISTS idx_plg_run_task_open ON plg_playbook_run_task (playbook_run_id)
     WHERE NOT is_completed;
 -- "How many were disqualified for an unreachable email?" is an index scan, not
 -- a sequential one.
-CREATE INDEX idx_plg_run_task_checked ON plg_playbook_run_task USING GIN (value_checked);
+CREATE INDEX IF NOT EXISTS idx_plg_run_task_checked ON plg_playbook_run_task USING GIN (value_checked);
 
-CREATE TRIGGER trg_plg_run_task_updated_at BEFORE UPDATE ON plg_playbook_run_task
+CREATE OR REPLACE TRIGGER trg_plg_run_task_updated_at BEFORE UPDATE ON plg_playbook_run_task
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
 -- ---------------------------------------------------------------------------
@@ -732,7 +759,7 @@ CREATE TRIGGER trg_plg_run_task_updated_at BEFORE UPDATE ON plg_playbook_run_tas
 -- being overwritten, so the trail stays truthful about what was understood in
 -- July even after August corrected it. No delete. This is also where
 -- customer-specific work lands, now that ad-hoc tasks are ruled out.
-CREATE TABLE plg_note (
+CREATE TABLE IF NOT EXISTS plg_note (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_platform_id UUID NOT NULL REFERENCES plg_org_platform (id) ON DELETE CASCADE,
     body            TEXT NOT NULL,
@@ -745,10 +772,10 @@ CREATE TABLE plg_note (
     updated_by      UUID REFERENCES "user" (id) ON DELETE SET NULL
 );
 
-CREATE INDEX idx_plg_note_pairing ON plg_note (org_platform_id, created_on DESC);
+CREATE INDEX IF NOT EXISTS idx_plg_note_pairing ON plg_note (org_platform_id, created_on DESC);
 
 -- Authorship is checked on edit, so it is read on every note PATCH.
-CREATE INDEX idx_plg_note_author  ON plg_note (author);
+CREATE INDEX IF NOT EXISTS idx_plg_note_author  ON plg_note (author);
 
 -- ---------------------------------------------------------------------------
 -- Added after the core: the overflow table, the ingest log, note revisions
@@ -764,7 +791,7 @@ CREATE INDEX idx_plg_note_author  ON plg_note (author);
 --
 -- Only fields named in the attribute map are stored (backend/source-map.json).
 -- Everything else on the payload is ignored.
-CREATE TABLE plg_organization_attribute (
+CREATE TABLE IF NOT EXISTS plg_organization_attribute (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     -- Always set. An attribute belongs to a customer.
@@ -797,16 +824,16 @@ CREATE TABLE plg_organization_attribute (
         UNIQUE NULLS NOT DISTINCT (organization_id, org_platform_id, attribute_name)
 );
 
-CREATE INDEX idx_plg_org_attribute_org  ON plg_organization_attribute (organization_id);
-CREATE INDEX idx_plg_org_attribute_pair ON plg_organization_attribute (org_platform_id)
+CREATE INDEX IF NOT EXISTS idx_plg_org_attribute_org  ON plg_organization_attribute (organization_id);
+CREATE INDEX IF NOT EXISTS idx_plg_org_attribute_pair ON plg_organization_attribute (org_platform_id)
     WHERE org_platform_id IS NOT NULL;
 
 -- Analysis reads this one far more often than the primary key: "every
 -- organisation whose lead source was X".
-CREATE INDEX idx_plg_org_attribute_lookup
+CREATE INDEX IF NOT EXISTS idx_plg_org_attribute_lookup
     ON plg_organization_attribute (attribute_name, attribute_value);
 
-CREATE TRIGGER trg_plg_organization_attribute_updated_at
+CREATE OR REPLACE TRIGGER trg_plg_organization_attribute_updated_at
     BEFORE UPDATE ON plg_organization_attribute
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
@@ -822,7 +849,7 @@ CREATE TRIGGER trg_plg_organization_attribute_updated_at
 --
 -- Rows here are meant to be looked at. A non-empty table means registrations
 -- were delivered and not recorded.
-CREATE TABLE plg_ingest_failure (
+CREATE TABLE IF NOT EXISTS plg_ingest_failure (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     -- The queue's own event id, so a row here can be matched against the
@@ -846,13 +873,13 @@ CREATE TABLE plg_ingest_failure (
 );
 
 -- The query this table exists to answer: what is still outstanding?
-CREATE INDEX idx_plg_ingest_failure_open ON plg_ingest_failure (created_at DESC)
+CREATE INDEX IF NOT EXISTS idx_plg_ingest_failure_open ON plg_ingest_failure (created_at DESC)
     WHERE resolved_on IS NULL;
 
 -- One row per edit, holding the body as it was *before* that edit — not after.
 -- Reading them in edited_on order therefore replays the note's history, and the
 -- current body is the one on PLG_NOTE rather than the newest revision.
-CREATE TABLE plg_note_revision (
+CREATE TABLE IF NOT EXISTS plg_note_revision (
     id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     note_id   UUID        NOT NULL REFERENCES plg_note (id) ON DELETE CASCADE,
     body      TEXT        NOT NULL,
@@ -864,7 +891,7 @@ COMMENT ON TABLE plg_note_revision IS
     'Superseded note bodies. Each row is what the note said before the edit that created the row.';
 
 -- The only query this table serves: one note's history, oldest first.
-CREATE INDEX idx_plg_note_revision_note ON plg_note_revision (note_id, edited_on);
+CREATE INDEX IF NOT EXISTS idx_plg_note_revision_note ON plg_note_revision (note_id, edited_on);
 
 COMMENT ON COLUMN plg_note.updated_on IS
     'When the body was last changed. NULL means never edited.';
@@ -906,7 +933,7 @@ COMMENT ON COLUMN plg_note.updated_on IS
 -- is a blank label on a row that plainly has an author. Filtering here would
 -- silently erase attribution, which is the opposite of what the audit columns
 -- are for.
-CREATE VIEW plg_user_v AS
+CREATE OR REPLACE VIEW plg_user_v AS
 SELECT u.id,
        u.email,
        -- `name` first, because upstream populates it and it is the name as the
@@ -924,7 +951,7 @@ SELECT u.id,
        u.user_type
 FROM   "user" u;
 
-CREATE VIEW plg_playbook_run_v AS
+CREATE OR REPLACE VIEW plg_playbook_run_v AS
 SELECT r.id                                    AS playbook_run_id,
        r.org_platform_id,
        r.playbook_id,
@@ -963,7 +990,7 @@ GROUP  BY r.id, r.org_platform_id, r.playbook_id, r.added_by, r.created_at,
           op.organization_id, o.organization_name, o.plg_cs_owner,
           op.product_id, pr.code, pr.name, op.lifecycle_stage;
 
-CREATE VIEW plg_organization_v AS
+CREATE OR REPLACE VIEW plg_organization_v AS
 SELECT o.id                    AS organization_id,
        o.organization_name,
        o.created_on,
@@ -1004,7 +1031,7 @@ JOIN   plg_person p  ON p.id = o.registered_user
 -- and is not a key.
 LEFT   JOIN plg_user_v u ON u.id = o.plg_cs_owner;
 
-CREATE VIEW plg_org_platform_v AS
+CREATE OR REPLACE VIEW plg_org_platform_v AS
 SELECT op.id                     AS org_platform_id,
        op.organization_id,
        v.organization_name,
@@ -1088,7 +1115,7 @@ LEFT   JOIN LATERAL (
            WHERE  rv.org_platform_id = op.id
        ) rs ON TRUE;
 
-CREATE VIEW plg_work_queue_v AS
+CREATE OR REPLACE VIEW plg_work_queue_v AS
 SELECT op.id                       AS org_platform_id,
        op.organization_id,
        o.organization_name,
@@ -1224,7 +1251,7 @@ WHERE  op.acknowledged_on IS NOT NULL
 -- "how many chose X" — and a caller should not have to know which kind of
 -- control an author happened to pick. `single_choice` is there for the caller
 -- that does care.
-CREATE VIEW plg_run_task_reason_v AS
+CREATE OR REPLACE VIEW plg_run_task_reason_v AS
 SELECT t.id                AS playbook_run_task_id,
        t.playbook_run_id,
        t.code              AS task_code,
