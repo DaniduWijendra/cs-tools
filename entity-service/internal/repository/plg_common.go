@@ -112,12 +112,9 @@ func uuidArg(id string) *string {
 	return &id
 }
 
-// isUniqueViolation reports whether err is a unique-constraint violation, so
-// callers can answer 409 rather than 500.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
+// isUniqueViolation lives in github_mutation_repo.go — same package, identical
+// implementation. PLG had its own copy until upstream added one; the duplicate
+// went rather than the two being kept in step.
 
 // isConstraintViolation reports whether err is a foreign-key or check violation.
 //
