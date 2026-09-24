@@ -64,7 +64,7 @@ interface AbtDashboardHeaderProps {
  * team in the registry — see `selectedTeamId`'s own doc comment above.
  * The dashboard switcher itself is hidden when `dashboardList` has one entry
  * or fewer — a caller with only one dashboard available (e.g. every
- * portal role but support engineer/admin, once the restricted ones are
+ * portal role but CS engineer/admin, once the restricted ones are
  * filtered server-side) has nothing to switch between, so the control would
  * only ever show its own single option.
  */

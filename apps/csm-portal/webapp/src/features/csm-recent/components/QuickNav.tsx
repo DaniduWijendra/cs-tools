@@ -268,7 +268,7 @@ export default function QuickNav(): JSX.Element | null {
   // don't get a dedicated skeleton: their sections simply appear once data
   // lands, same as Pinned/Recent/Pages.
   // Incidents, change requests and problems are Operations data the backend
-  // only serves to support engineers and admins, so a view-only user's search
+  // only serves to CS engineers and admins, so a view-only user's search
   // skips them rather than surfacing 403s.
   const incidentSearch = useQuickIncidentSearch(
     open && access.canUseOperations && incidentSearchShouldRun ? debouncedQuery : "",

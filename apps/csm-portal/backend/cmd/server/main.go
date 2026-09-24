@@ -171,6 +171,7 @@ func main() {
 	accessGuard := handler.NewAccessGuard(loadAccessConfig())
 	usersHandler := handler.NewUsersHandler(scimClient, customerEntityClient, dir, sftpgoAttachmentStorageEnabled).WithAccessGuard(accessGuard)
 	dashboardHandler := handler.NewDashboardHandler(accessGuard)
+	caseHandler = caseHandler.WithAccessGuard(accessGuard)
 
 	authCfg := middleware.Config{
 		JWKSEndpoint:          mustEnv("AUTH_JWKS_ENDPOINT"),
@@ -305,8 +306,8 @@ func main() {
 	route("DELETE /time-cards/{id}", handler.PermTimeCardsAndUpdates, timeCardHandler.DeleteTimeCard)
 	route("POST /catalogs/search", handler.PermView, catalogHandler.SearchCatalogs)
 	route("GET /catalogs/{catalogId}/items/{catalogItemId}/variables", handler.PermView, catalogHandler.GetCatalogItemVariables)
-	route("POST /products/vulnerabilities/search", handler.PermView, productVulnerabilityHandler.SearchProductVulnerabilities)
-	route("GET /products/vulnerabilities/{id}", handler.PermView, productVulnerabilityHandler.GetProductVulnerability)
+	route("POST /products/vulnerabilities/search", handler.PermViewSecurityCenter, productVulnerabilityHandler.SearchProductVulnerabilities)
+	route("GET /products/vulnerabilities/{id}", handler.PermViewSecurityCenter, productVulnerabilityHandler.GetProductVulnerability)
 	route("GET /conversations/{id}/messages", handler.PermView, conversationHandler.GetConversationMessages)
 	route("POST /conversations/search", handler.PermView, conversationHandler.SearchConversations)
 	route("POST /slas/search", handler.PermView, taskSlaHandler.SearchTaskSlas)
@@ -598,10 +599,13 @@ func loadAccessConfig() handler.AccessConfig {
 		Escalator:            roles("AUTH_ESCALATOR_ROLES"),
 		AttachmentDownloader: roles("AUTH_ATTACHMENT_DOWNLOADER_ROLES"),
 		UsageMetricsViewer:   roles("AUTH_USAGE_METRICS_VIEWER_ROLES"),
-		SupportEngineer:      roles("AUTH_SUPPORT_ENGINEER_ROLES"),
-		Admin:                roles("AUTH_ADMIN_ROLES"),
-		TimecardApprover:     roles("AUTH_TIMECARD_APPROVER_ROLES"),
-		DashboardDesigner:    roles("AUTH_DASHBOARD_DESIGNER_ROLES"),
+		// The env var name stays AUTH_SUPPORT_ENGINEER_ROLES even though the
+		// portal role itself was renamed to cs_engineer -- see
+		// handler.AccessConfig.CsEngineer's own doc comment for why.
+		CsEngineer:        roles("AUTH_SUPPORT_ENGINEER_ROLES"),
+		Admin:             roles("AUTH_ADMIN_ROLES"),
+		TimecardApprover:  roles("AUTH_TIMECARD_APPROVER_ROLES"),
+		DashboardDesigner: roles("AUTH_DASHBOARD_DESIGNER_ROLES"),
 	}
 	if len(unset) > 0 {
 		slog.Warn("access-control role variables are unset, so no token role grants them", "variables", unset)

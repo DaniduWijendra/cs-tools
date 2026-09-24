@@ -19,11 +19,11 @@ Go HTTP server (`net/http`, Go 1.26+) that acts as a backend-for-frontend (BFF) 
 
 - **Per-role config.** Each role has an `AUTH_<ROLE>_ROLES` env var (comma-separated role names, any one grants the role), read once at startup by `loadAccessConfig` in `cmd/server/main.go`. There is deliberately **no default** (role names are organisation vocabulary and must not be committed, same as `CSM_TEAM_REGISTRY`): an unset/empty variable means nobody holds that role, and startup warns naming each one. Tests use dummy names via `testAccessConfig()` in `access_test.go`, never real ones. Matching is exact and case-sensitive. Adding a role means a new `AccessConfig` field, its env var, and its place in `NewAccessGuard`.
 - **The `roles` claim is a string for one role and an array for several** (Asgardeo does this). `middleware.stringList` accepts both; a plain `[]string` would reject a single-role user's whole token with a 401. Any other shape fails the token.
-- **Every route goes through `route(pattern, perm, handler)` in `cmd/server/main.go`.** `perm` is a required argument with no default — pick `PermView` for reads/searches/aggregates, `PermViewOperations` for reads under the Operations area (incidents, change requests, problems, incident tasks, outages, alerts), `PermTimeCardsAndUpdates` for every time-card route and the update-level lookups (support engineer, admin and time-card approver), `PermWrite` for other state changes, `PermAdmin` for the handful of actions reserved for admin alone (currently just `POST /users`, creating a new platform user), or one of the narrower ones (`PermEscalate`, `PermDownloadAttachment`). Case, incident and change-request comments are `PermWrite`. `PermAuthenticated` (no role needed) is only for the caller's own `/users/me`. `/health` is the only route registered directly on the mux.
-- **The policy is `NewAccessGuard`.** `admin` satisfies every permission, including `PermAdmin`; `support_engineer` satisfies every other route permission (view, escalate, download, write, including comments) but **not** `PermAdmin` — that is the one permission admin does not share with support_engineer; `escalator`/`attachment-downloader` grant only their one ability plus view (so a view-only role cannot read Operations — `PermViewOperations` is support engineer and admin only, matching the frontend's `canUseOperations`); `timecard-approver` grants view plus `PermTimeCardsAndUpdates`; `usage-metrics-viewer`/`dashboard-designer` grant only view here (no backend route for those features); the frontend gates them. Every role implies view.
+- **Every route goes through `route(pattern, perm, handler)` in `cmd/server/main.go`.** `perm` is a required argument with no default — pick `PermView` for reads/searches/aggregates, `PermViewOperations` for reads under the Operations area (incidents, change requests, problems, incident tasks, outages, alerts), `PermTimeCardsAndUpdates` for every time-card route and the update-level lookups (CS engineer, admin and time-card approver), `PermWrite` for other state changes, `PermAdmin` for the handful of actions reserved for admin alone (currently just `POST /users`, creating a new platform user), `PermViewSecurityCenter` for Security Center (both `/products/vulnerabilities/*` routes; see "Security Center access" below for how `/cases/*` is handled), or one of the narrower ones (`PermEscalate`, `PermDownloadAttachment`). Case, incident and change-request comments are `PermWrite`. `PermAuthenticated` (no role needed) is only for the caller's own `/users/me`. `/health` is the only route registered directly on the mux.
+- **The policy is `NewAccessGuard`.** `admin` satisfies every permission, including `PermAdmin`; `cs_engineer` satisfies every other route permission (view, escalate, download, write, including comments, security center) but **not** `PermAdmin` — that is the one permission admin does not share with cs_engineer; `escalator`/`attachment-downloader` grant only their one ability plus view (so a view-only role cannot read Operations — `PermViewOperations` is CS engineer and admin only, matching the frontend's `canUseOperations`); `timecard-approver` grants view plus `PermTimeCardsAndUpdates`; `usage-metrics-viewer`/`dashboard-designer` grant only view here (no backend route for those features); the frontend gates them. Every role implies view, **except** `PermViewSecurityCenter` — a plain viewer/escalator/attachment_downloader/usage_metrics_viewer/timecard_approver/dashboard_designer holds `PermView` but not this.
 - **`GET /users/me` reports `roles`** (from `AccessGuard.RolesFor`): the stable keys of the portal roles the token roles grant — several possible, fixed order — and is **not** the entity service's role data, which the response no longer carries. The frontend decides what to show or hide from these roles (there is deliberately no derived `permissions` list); the backend's `403` is the real gate. Dashboard-designer access is only the `AUTH_DASHBOARD_DESIGNER_ROLES` role (the old `DASHBOARD_DESIGNER_EMAILS` email allow-list is gone).
 - The role check is separate from resource-level guards inside handlers (e.g. the assigned-engineer check on public case comments) — both must pass.
-- **`PermViewAllDashboards` (support engineer and admin) is the one permission with no route.** A `dashboard.Dashboard` may set `"restricted": true`; `DashboardHandler` calls the newly-exported `AccessGuard.Permits(perm, roles)` itself to filter it out of `GET /dashboards` and 403 a direct `GET /dashboards/{id}` for anyone else, while both routes stay `PermView` so the list route still runs for every viewer. `Permits` exists specifically for this — a handler that must gate one specific resource against a caller's roles from inside its own logic, not a whole route via `Require`.
+- **`PermViewAllDashboards` (CS engineer and admin) is the one permission with no route.** A `dashboard.Dashboard` may set `"restricted": true`; `DashboardHandler` calls the newly-exported `AccessGuard.Permits(perm, roles)` itself to filter it out of `GET /dashboards` and 403 a direct `GET /dashboards/{id}` for anyone else, while both routes stay `PermView` so the list route still runs for every viewer. `Permits` exists specifically for this — a handler that must gate one specific resource against a caller's roles from inside its own logic, not a whole route via `Require`.
 - Handler tests call handlers directly and bypass the guard; test the guard in `access_test.go`. `dashboards_test.go`'s `withRestrictedDashboard` temporarily swaps the package-level `dashboard.Active()` registry for one that adds a `Restricted` dashboard, restored via `t.Cleanup` — every other test in that file depends on the shared two-dashboard fixture's exact count, so never add a permanent third dashboard to it.
 
 ## Creating a user (POST /users)
@@ -37,6 +37,38 @@ doc comment), so this is the one place that does. `roles` is optional and curren
 frontend (no role-picker UI yet, since there is no Asgardeo-backed way to browse/assign roles at
 account-creation time today) — the field exists end-to-end and works if sent, it's just not wired
 into the Add User form yet.
+
+## Security Center access (PermViewSecurityCenter)
+
+Security Center (the webapp's Security reports + Vulnerabilities tabs) is restricted to `cs_engineer`
+and `admin` only — every other role, even though it holds `PermView`, is denied. This needed two
+different mechanisms, because the feature isn't backed by its own exclusive routes:
+
+- **`/products/vulnerabilities/search` and `/products/vulnerabilities/{id}`** are genuinely
+  Security-Center-exclusive, so they're gated the ordinary way: `route(..., handler.PermViewSecurityCenter, ...)`
+  in `cmd/server/main.go`.
+- **`POST /cases/search`** is the shared, generic case-search endpoint every case-type tab uses
+  (Support, Operations sub-tabs, Engagements, Security reports) — it stays registered at `PermView`,
+  since narrowing that route-level permission would lock out every other tab too. Instead,
+  `CaseHandler.SearchCases` inspects the request body itself: `caseSearchTargetsSecurityReports`
+  (`internal/handler/cases.go`) reads the generic filter expression (`filters.filters[]`, and each
+  `filters.anyOf[]` branch) for a `{field: "type", op: "in", values: [...]}` predicate naming
+  `security_report_analysis`, and if one is found, additionally requires `PermViewSecurityCenter` via
+  `CaseHandler.access` (wired with `WithAccessGuard`, the same pattern `UsersHandler` uses) —
+  a plain `PermView` caller gets 403 instead of the search running. This only catches an *explicit*
+  request for that type, the same way Security Center's own `caseTypes`-locked search
+  (`CsmIssuesView`, webapp) always sends one; a hypothetical unfiltered "every case type" search that
+  happens to also return security-report rows is a known, narrower gap, not handled here.
+- **`GET /cases/{id}` has no equivalent check, deliberately.** `CaseView.type` (entity-service's own
+  `openapi.yaml`) is only populated for ServiceNow cases — null on Postgres — so there is no reliable
+  way for this handler to tell a security-report case apart from any other by inspecting the response
+  alone, and a check that silently does nothing on one data source would be worse than no check at
+  all (it would look like protection without being any). See `CaseHandler.WithAccessGuard`'s own doc
+  comment for the full reasoning. Practically: since `SearchCases` is now locked down, a non-`cs_engineer`/
+  `admin` caller can no longer *discover* a security-report case's id through the portal at all — the
+  residual gap is a caller who already has one (a pre-existing bookmark, or a guess) fetching it
+  directly by id. Closing that fully needs entity-service itself to resolve and enforce it (it has
+  reliable type data on either data source), not this BFF layer.
 
 ## Upstream service modules
 

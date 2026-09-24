@@ -197,7 +197,7 @@ schema.
 | `DASHBOARDS_HOT_RELOAD` | Re-read `DASHBOARDS_DIR` on every request instead of serving the startup snapshot. Parsed with `strconv.ParseBool`, so `1`/`t`/`true`/`yes`-style values are not interchangeable — `1`, `t`, `T`, `TRUE`, `true`, `True` are true, and an unparseable non-empty value logs a warning and is treated as false. **Local development only**; default false |
 | `DASHBOARDS_CONFIG` | **Deprecated.** The whole registry crammed into one JSON array variable. Honoured only when `DASHBOARDS_DIR` is unset, and warns when used. Malformed content is fatal |
 
-A dashboard definition may set `"restricted": true` — then only a caller holding the `support_engineer`
+A dashboard definition may set `"restricted": true` — then only a caller holding the `cs_engineer`
 or `admin` role can see it: `GET /dashboards` leaves it out of the list for everyone else, and
 `GET /dashboards/{id}` returns `403` for a direct request to its id. Every other role sees only the
 unrestricted dashboards. Unset (the default, `false`) means every portal role can see it, same as
@@ -267,7 +267,7 @@ configured at all, nobody can use the portal.
 | `AUTH_VIEWER_ROLES` | view |
 | `AUTH_ESCALATOR_ROLES` | view, escalate |
 | `AUTH_ATTACHMENT_DOWNLOADER_ROLES` | view, download_attachment |
-| `AUTH_SUPPORT_ENGINEER_ROLES` | view, view_operations, time_cards_and_updates, escalate, download_attachment, write (which includes posting comments) — everything except `admin`-only routes |
+| `AUTH_SUPPORT_ENGINEER_ROLES` | view, view_operations, time_cards_and_updates, escalate, download_attachment, write (which includes posting comments), security_center — everything except `admin`-only routes. Grants the `cs_engineer` portal role (renamed from `support_engineer`; the env var name was deliberately left as-is to avoid a coordinated deployment config change) |
 | `AUTH_ADMIN_ROLES` | everything, including `admin`-only routes no other role holds |
 | `AUTH_USAGE_METRICS_VIEWER_ROLES` | view |
 | `AUTH_TIMECARD_APPROVER_ROLES` | view, time_cards_and_updates |
@@ -282,20 +282,21 @@ AUTH_ESCALATOR_ROLES=example-escalators-role,example-leads-role
 |---|---|
 | authenticated | `GET`/`PATCH /users/me` — any valid token, no role needed, so a user holding no portal role can still load their profile and be shown a "no access" screen |
 | `view` | every other `GET`, `*/search` and `*/aggregate` |
-| `view_operations` | the same reads under `/incidents`, `/change-requests`, `/problems`, `/incident-tasks`, `/outages`, `/alerts` and `/smart-alerts` — support engineer and admin only, so a view-only role sees cases and customers but not Operations |
-| `time_cards_and_updates` | every time-card route (`POST /time-cards/search`, `POST /time-cards`, `PATCH`/`DELETE /time-cards/{id}`) and the update-level lookups (`GET /updates/product-update-levels`, `POST /updates/levels/search`) — support engineer, admin and time-card approver only, so a view-only role sees neither area, and an approver can approve without being a support engineer |
+| `view_operations` | the same reads under `/incidents`, `/change-requests`, `/problems`, `/incident-tasks`, `/outages`, `/alerts` and `/smart-alerts` — CS engineer and admin only, so a view-only role sees cases and customers but not Operations |
+| `time_cards_and_updates` | every time-card route (`POST /time-cards/search`, `POST /time-cards`, `PATCH`/`DELETE /time-cards/{id}`) and the update-level lookups (`GET /updates/product-update-levels`, `POST /updates/levels/search`) — CS engineer, admin and time-card approver only, so a view-only role sees neither area, and an approver can approve without being a CS engineer |
 | `escalate` | `POST /cases/{id}/escalations` |
 | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` |
 | `write` | every other `POST`/`PATCH`/`DELETE`, including case, incident and change-request comments — except the `admin`-only routes below |
-| `admin` | `POST /users` (create a new platform user) — held by the `admin` role alone; `support_engineer` does not grant it |
+| `admin` | `POST /users` (create a new platform user) — held by the `admin` role alone; `cs_engineer` does not grant it |
+| `security_center` | `POST /products/vulnerabilities/search`, `GET /products/vulnerabilities/{id}`, plus security-report cases (a `POST /cases/search`/`GET /cases/{id}` request naming case type `security_report_analysis`) — `cs_engineer` and `admin` only, even though every other role also holding `view` can otherwise read cases and products freely. See `CaseHandler.WithAccessGuard`'s own doc comment for why `GET /cases/{id}` cannot enforce this per-case (the response's `type` field is null on the Postgres data source) |
 
 A caller whose token holds none of the required roles gets `403`. Escalation and
-attachment-download are separate from `support_engineer` so other staff can be granted just that one
+attachment-download are separate from `cs_engineer` so other staff can be granted just that one
 ability. Posting a public case comment still additionally requires being the case's assigned
 engineer (see `CreateCaseComment`); the role is necessary, not sufficient.
 
 `GET /users/me` returns `roles` — which portal roles the caller holds, as stable keys (`viewer`,
-`escalator`, `attachment_downloader`, `support_engineer`, `usage_metrics_viewer`,
+`escalator`, `attachment_downloader`, `cs_engineer`, `usage_metrics_viewer`,
 `timecard_approver`, `dashboard_designer`, `admin`). A caller can hold several; it is `[]` for a caller
 holding no portal role. It comes from the same guard that authorises the routes, so what the frontend
 is told and what the backend enforces cannot disagree. This is the portal roles only: the entity

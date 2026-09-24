@@ -76,7 +76,7 @@ function blobToDataUrl(blob: Blob): Promise<string | null> {
  *    for each referenced attachment and uses its `shareUrl` directly as the
  *    `<img>` src.
  *
- * A caller without the `attachment_downloader`/`support_engineer`/`admin` role
+ * A caller without the `attachment_downloader`/`cs_engineer`/`admin` role
  * (see `usePortalAccess`'s `canDownloadAttachment`) never issues either
  * request — the backend would 403 both anyway — and every referenced image is
  * replaced with a "no permission" placeholder instead of a blank `<img>`.

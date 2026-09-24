@@ -21,7 +21,11 @@ export const PORTAL_ROLE = {
   viewer: "viewer",
   escalator: "escalator",
   attachmentDownloader: "attachment_downloader",
-  supportEngineer: "support_engineer",
+  // Renamed from support_engineer -- the wire value must stay byte-for-byte
+  // in sync with the backend's own AccessGuard portalRoles key
+  // (apps/csm-portal/backend/internal/handler/access.go), which returns this
+  // exact string in GET /users/me's roles array.
+  csEngineer: "cs_engineer",
   usageMetricsViewer: "usage_metrics_viewer",
   timecardApprover: "timecard_approver",
   dashboardDesigner: "dashboard_designer",
@@ -44,23 +48,31 @@ export interface PortalAccess {
   /**
    * The Time Cards and Updates sections, and every time-card and update-level
    * call behind them. Full-access roles have it, and so does the time-card
-   * approver, so approving does not require being a support engineer.
+   * approver, so approving does not require being a CS engineer.
    */
   canUseTimeCardsAndUpdates: boolean;
   /** Every other state-changing action (create/update cases, tasks, ...). */
   canWrite: boolean;
   /**
    * Creating a new platform user. Unlike every other flag here, this is
-   * `admin` only — `support_engineer` does not hold it, mirroring the
-   * backend's `PermAdmin` (the one permission `support_engineer` does not
+   * `admin` only — `cs_engineer` does not hold it, mirroring the
+   * backend's `PermAdmin` (the one permission `cs_engineer` does not
    * share with `admin`).
    */
   canCreateUser: boolean;
+  /**
+   * The Security Center section (Security reports + Vulnerabilities tabs)
+   * and the API calls behind it. `admin` and `cs_engineer` only — mirrors
+   * the backend's `PermViewSecurityCenter`, which (unlike `PermView`) plain
+   * viewer/escalator/attachment_downloader/usage_metrics_viewer/
+   * timecard_approver/dashboard_designer do not hold.
+   */
+  canUseSecurityCenter: boolean;
 }
 
 /**
  * What a user's `GET /users/me` roles let them see and do. Matched
- * case-insensitively. `admin` and `support_engineer` can do everything;
+ * case-insensitively. `admin` and `cs_engineer` can do everything;
  * `escalator` and `attachment_downloader` each add just that one ability; every other role is view-only here.
  *
  * Mirrors the backend's `AccessGuard` policy so controls can be hidden up
@@ -71,7 +83,7 @@ export interface PortalAccess {
 export function getPortalAccess(roles: string[] | undefined): PortalAccess {
   const held = new Set((roles ?? []).map((r) => r.toLowerCase()));
   const has = (role: string): boolean => held.has(role);
-  const full = has(PORTAL_ROLE.admin) || has(PORTAL_ROLE.supportEngineer);
+  const full = has(PORTAL_ROLE.admin) || has(PORTAL_ROLE.csEngineer);
   return {
     hasAnyRole: ALL_PORTAL_ROLES.some(has),
     canEscalate: full || has(PORTAL_ROLE.escalator),
@@ -80,5 +92,6 @@ export function getPortalAccess(roles: string[] | undefined): PortalAccess {
     canUseTimeCardsAndUpdates: full || has(PORTAL_ROLE.timecardApprover),
     canWrite: full,
     canCreateUser: has(PORTAL_ROLE.admin),
+    canUseSecurityCenter: full,
   };
 }

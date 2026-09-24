@@ -21,7 +21,7 @@ import { ApiError, parseApiResponseMessage } from "@utils/ApiError";
 
 // Matches csm-portal-backend openapi UserResponse. Identity fields
 // (id/firstName/lastName/timeZone) come from the entity service; `roles` is the
-// caller's portal roles (viewer, support_engineer, admin, ...) decided from their
+// caller's portal roles (viewer, cs_engineer, admin, ...) decided from their
 // token, not entity-service role data — see `getPortalAccess`; `id` is
 // the caller's platform UUID, consumed by the cases assignee filter to resolve
 // the `@me` sentinel. `id` is optional because the contract omits it when the

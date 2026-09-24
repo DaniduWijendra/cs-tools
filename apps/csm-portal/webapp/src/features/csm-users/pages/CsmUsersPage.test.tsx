@@ -408,7 +408,7 @@ describe("CsmUsersPage — Add User (admin only)", () => {
   });
 
   it("is hidden for a caller with no admin role", async () => {
-    mockRoles = ["support_engineer"];
+    mockRoles = ["cs_engineer"];
     renderPage("/admin/users");
     await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: "Add user" })).not.toBeInTheDocument();

@@ -124,11 +124,38 @@ type CaseHandler struct {
 	// engineering, when non-nil, files GitHub issues from a case instead of
 	// the entity service — see WithEngineeringClient.
 	engineering engineeringGitIssueClient
+	// access backs the security-report type check in SearchCases -- see
+	// WithAccessGuard. nil fails that check closed (denied), never open:
+	// unlike UsersHandler's own optional use of this field (a display-only
+	// enrichment, harmless if skipped), this one gates real access to data.
+	access *AccessGuard
 }
 
 // NewCaseHandler creates a CaseHandler backed by the given entity client.
 func NewCaseHandler(entity entityCaseClient) *CaseHandler {
 	return &CaseHandler{entity: entity}
+}
+
+// WithAccessGuard wires the same guard that authorises every route into this
+// handler, so SearchCases can additionally require PermViewSecurityCenter for
+// a security_report_analysis-typed request — a restriction PermView alone
+// (the route-level permission it already carries, shared with every other
+// case-type view) cannot express. Returns h for chaining at the construction
+// site.
+//
+// GetCase deliberately gets no equivalent check: CaseView.type is only
+// populated for ServiceNow cases (null on Postgres — see entity-service's own
+// openapi.yaml), so there is no reliable way to tell a security-report case
+// apart from any other by inspecting its GetCase response alone, and a
+// broken check would be worse than none. A caller who already knows a
+// security-report case's id (from before this restriction, or by guessing)
+// can still fetch it directly by id; the real access boundary this change
+// adds is discovery via search, not a hard per-case-type ACL. Closing this
+// fully would need entity-service to resolve and enforce it (it has reliable
+// type data either data source), not this BFF layer.
+func (h *CaseHandler) WithAccessGuard(g *AccessGuard) *CaseHandler {
+	h.access = g
+	return h
 }
 
 // WithInlineImageProcessor enables server-side inline-image extraction on
@@ -615,6 +642,68 @@ func (h *CaseHandler) SearchCaseActivities(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, result)
 }
 
+// securityReportCaseType is the one case type value Security Center is
+// restricted to — see caseSearchTargetsSecurityReports's own doc comment.
+const securityReportCaseType = "security_report_analysis"
+
+// caseFieldFilterFragment is the subset of CaseFieldFilter (entity-service's
+// openapi.yaml) this handler needs to read out of an otherwise-opaque,
+// forwarded-verbatim request body: which field a predicate names and what
+// values it matches. Untyped fields (op, and every other CaseFieldFilter
+// property) are simply not decoded.
+type caseFieldFilterFragment struct {
+	Field  string   `json:"field"`
+	Values []string `json:"values"`
+}
+
+// caseSearchTargetsSecurityReports reports whether body's type filter --
+// either the top-level filters.filters array or any filters.anyOf branch --
+// includes securityReportCaseType. Best-effort JSON inspection, not a full
+// parse of the generic filter grammar (entity-service's own CaseFieldFilter):
+// a body this can't make sense of is treated as not targeting it, since a
+// genuinely malformed request is rejected by entity-service's own validation
+// regardless of what this check decides. This only catches requests that
+// explicitly ask for this type, the same way Security Center's own
+// caseTypes-locked search does (CsmIssuesView, webapp) -- a hypothetical
+// unfiltered "every case type" search that happens to also return
+// security-report rows is a known, narrower gap, not handled here.
+func caseSearchTargetsSecurityReports(body []byte) bool {
+	var req struct {
+		Filters struct {
+			Filters []caseFieldFilterFragment `json:"filters"`
+			AnyOf   []struct {
+				Filters []caseFieldFilterFragment `json:"filters"`
+			} `json:"anyOf"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	if filtersNameSecurityReportType(req.Filters.Filters) {
+		return true
+	}
+	for _, branch := range req.Filters.AnyOf {
+		if filtersNameSecurityReportType(branch.Filters) {
+			return true
+		}
+	}
+	return false
+}
+
+func filtersNameSecurityReportType(filters []caseFieldFilterFragment) bool {
+	for _, f := range filters {
+		if f.Field != "type" {
+			continue
+		}
+		for _, v := range f.Values {
+			if v == securityReportCaseType {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SearchCases handles POST /cases/search.
 // Project IDs and other filters are accepted directly in the request body.
 func (h *CaseHandler) SearchCases(w http.ResponseWriter, r *http.Request) {
@@ -637,6 +726,11 @@ func (h *CaseHandler) SearchCases(w http.ResponseWriter, r *http.Request) {
 
 	if !json.Valid(body) {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	if caseSearchTargetsSecurityReports(body) && !(h.access != nil && h.access.Permits(PermViewSecurityCenter, user.Roles)) {
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
 		return
 	}
 

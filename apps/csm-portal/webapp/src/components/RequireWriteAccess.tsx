@@ -30,7 +30,7 @@ interface RequireWriteAccessProps {
 /**
  * Route-level guard for a create/edit page whose only normal entry point
  * (a "Create …" button) is already hidden for a caller without `canWrite`
- * (support engineer/admin only — see `usePortalAccess`). A direct URL visit
+ * (CS engineer/admin only — see `usePortalAccess`). A direct URL visit
  * would otherwise still reach a live form: the backend's `PermWrite` gate
  * would reject the submit with a 403, but the caller could fill out the
  * whole form first with no indication anything was wrong. Used at the

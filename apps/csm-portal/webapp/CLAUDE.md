@@ -34,7 +34,7 @@ no backend of its own to enforce it."
 
 **Add User** (`CsmUsersPage.tsx`'s "Add user" button, `AddUserDialog.tsx`) is a second deliberate
 exception, gated on `usePortalAccess().canCreateUser` (`portalAccess.ts`) — `admin` only, unlike
-every other flag on `PortalAccess`, which `support_engineer` also holds. Here the backend genuinely
+every other flag on `PortalAccess`, which `cs_engineer` also holds. Here the backend genuinely
 does enforce it (`POST /users` requires `PermAdmin` — see `apps/csm-portal/backend`'s own `CLAUDE.md`),
 so this isn't the same "no backend to fall back on" situation Dashboard Builder was — it's client-side
 gating on top of a real server-side gate, by explicit choice rather than by the show-and-let-it-reject

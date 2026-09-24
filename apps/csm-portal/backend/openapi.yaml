@@ -11,11 +11,13 @@ info:
     |---|---|---|
     | (any authenticated caller) | `GET`/`PATCH /users/me` | none needed |
     | `view` | every other `GET`, `*/search` and `*/aggregate` | any role below |
-    | `view_operations` | the same reads under `/incidents`, `/change-requests`, `/problems`, `/incident-tasks`, `/outages`, `/alerts`, `/smart-alerts` | support-engineer, admin |
-    | `time_cards_and_updates` | every `/time-cards` route and `GET /updates/product-update-levels`, `POST /updates/levels/search` | support-engineer, time-card-approver, admin |
-    | `escalate` | `POST /cases/{id}/escalations` | escalator, support-engineer, admin |
-    | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` | attachment-downloader, support-engineer, admin |
-    | `write` | every other `POST`/`PATCH`/`DELETE`, including case, incident and change-request comments | support-engineer, admin |
+    | `view_operations` | the same reads under `/incidents`, `/change-requests`, `/problems`, `/incident-tasks`, `/outages`, `/alerts`, `/smart-alerts` | cs-engineer, admin |
+    | `time_cards_and_updates` | every `/time-cards` route and `GET /updates/product-update-levels`, `POST /updates/levels/search` | cs-engineer, time-card-approver, admin |
+    | `escalate` | `POST /cases/{id}/escalations` | escalator, cs-engineer, admin |
+    | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` | attachment-downloader, cs-engineer, admin |
+    | `write` | every other `POST`/`PATCH`/`DELETE`, including case, incident and change-request comments | cs-engineer, admin |
+    | `admin` | `POST /users` | admin only |
+    | `security_center` | `POST /products/vulnerabilities/search`, `GET /products/vulnerabilities/{id}`, and a `POST /cases/search`/`GET /cases/{id}` naming case type security_report_analysis | cs-engineer, admin |
 security:
   - bearerAuth: []
 servers:
@@ -3469,7 +3471,7 @@ paths:
         files (one file per dashboard, its filename irrelevant), held in
         memory; not user-configurable at runtime. A dashboard marked
         restricted in its definition is silently left out of this list for a
-        caller who is not a support engineer or admin — the request still
+        caller who is not a CS engineer or admin — the request still
         succeeds, just with a shorter list.
       operationId: getDashboards
       responses:
@@ -3634,7 +3636,7 @@ paths:
         templates are a registry loaded at startup from a directory of
         per-dashboard JSON files, held in memory; not user-configurable at
         runtime. A dashboard marked restricted in its definition returns 403
-        for a caller who is not a support engineer or admin, even with a
+        for a caller who is not a CS engineer or admin, even with a
         correct id.
       operationId: getDashboardDetail
       parameters:
@@ -9901,7 +9903,7 @@ components:
           type: array
           items:
             type: string
-            enum: [viewer, escalator, attachment_downloader, support_engineer, usage_metrics_viewer, timecard_approver, dashboard_designer, admin]
+            enum: [viewer, escalator, attachment_downloader, cs_engineer, usage_metrics_viewer, timecard_approver, dashboard_designer, admin]
           description: >
             The portal roles the caller holds, decided from the roles on their token. A caller can
             hold several. Always present; empty when they hold none. This is not the entity

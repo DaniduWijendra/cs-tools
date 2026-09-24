@@ -306,7 +306,7 @@ type Dashboard struct {
 	// picker); it is not enforced anywhere. GET /dashboards still returns
 	// every dashboard to every caller regardless of team membership.
 	TargetTeam string `json:"targetTeam"`
-	// Restricted marks a dashboard only support_engineer/admin may see —
+	// Restricted marks a dashboard only cs_engineer/admin may see —
 	// unlike TargetTeam, this IS enforced: handler.DashboardHandler filters a
 	// restricted dashboard out of GET /dashboards and 403s a direct
 	// GET /dashboards/{id} for anyone else. Every other portal role sees only

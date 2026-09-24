@@ -176,6 +176,7 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     label: "Security Center",
     href: "/security-center",
     icon: Shield,
+    requires: "canUseSecurityCenter",
     children: [
       {
         id: "security-center.reports",
@@ -325,6 +326,7 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
         id: "help.security-center",
         label: "Security Center",
         href: "/help#security-center",
+        requires: "canUseSecurityCenter",
       },
       {
         id: "help.updates",
