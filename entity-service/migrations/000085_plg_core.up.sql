@@ -588,8 +588,6 @@ CREATE TABLE plg_playbook_task (
     )
 );
 
-CREATE INDEX idx_plg_playbook_task_playbook ON plg_playbook_task (playbook_id, sequence_no);
-
 CREATE TRIGGER trg_plg_playbook_task_updated_at BEFORE UPDATE ON plg_playbook_task
     FOR EACH ROW EXECUTE FUNCTION plg_set_updated_at();
 
@@ -609,7 +607,6 @@ CREATE TABLE plg_playbook_run (
     CONSTRAINT uq_plg_playbook_run UNIQUE (org_platform_id, playbook_id)
 );
 
-CREATE INDEX idx_plg_playbook_run_pairing  ON plg_playbook_run (org_platform_id);
 CREATE INDEX idx_plg_playbook_run_playbook ON plg_playbook_run (playbook_id);
 
 CREATE TRIGGER trg_plg_playbook_run_updated_at BEFORE UPDATE ON plg_playbook_run
