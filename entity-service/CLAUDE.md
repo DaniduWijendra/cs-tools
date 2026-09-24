@@ -274,11 +274,12 @@ The DATABASE `onboarding_step` is written **inside the same transaction**
 `DATABASE = FAILED` with `lastError` best-effort and returns the original error.
 `project_contact.invited` (`events.ProjectContactInvitedPayload`: membership /
 contact Salesforce ids, email, given / family name, project name and key, the
-raw Salesforce roles, `isIntegrationUser`, `type`, and an optional `resend`
-marker) is published only after the transaction committed, only for INVITED /
-RE-INVITED, **and only when the ingest actually created the `project_contact`
-row** (`SalesforceMembershipUpsertResult.CreatedProjectContact`); a nil
-publisher skips it, a publish failure is logged (and recorded by
+raw Salesforce roles, `isIntegrationUser`, `type`, `eventModifiedOn` = the
+membership's Salesforce LastModifiedDate, and an optional `resend` marker) is
+published only after the transaction committed, only for INVITED / RE-INVITED,
+**and only when the ingest actually created the `project_contact` row**
+(`SalesforceMembershipUpsertResult.CreatedProjectContact`); a nil publisher
+skips it, a publish failure is logged (and recorded by
 `EventPublisherService`), never returned. csm-notification-service consumes it,
 provisions the Asgardeo user via the SCIM service and sends the invitation,
 then records IDENTITY and EMAIL through the endpoints below (SKIPPED for an
