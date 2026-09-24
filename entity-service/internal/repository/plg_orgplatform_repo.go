@@ -831,8 +831,18 @@ func (r *orgPlatformRepository) PatchRunTask(ctx context.Context, req domain.Pat
 		WHERE  id::TEXT = $1
 		RETURNING is_completed`
 
+	// Both writes go in one transaction. is_completed is generated from the
+	// value, so the first statement decides it and the second has to agree; if
+	// the second failed on its own the task would read completed with no
+	// completed_on — exactly the split state the comment below rules out.
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("begin patch run task: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var completed bool
-	if err := r.db.QueryRow(ctx, q, req.ID, req.ClearValue,
+	if err := tx.QueryRow(ctx, q, req.ID, req.ClearValue,
 		req.BoolValue, req.NumberValue, req.TextValue, req.CheckedCodes).Scan(&completed); err != nil {
 		if isConstraintViolation(err) {
 			return "", "", &apierror.ValidationError{Msg: "that value does not match the task's type"}
@@ -842,12 +852,16 @@ func (r *orgPlatformRepository) PatchRunTask(ctx context.Context, req domain.Pat
 
 	// Stamp or clear the completion trail to match what the generated column now
 	// says, so the two can never describe different states.
-	if _, err := r.db.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE plg_playbook_run_task
 		SET    completed_on = CASE WHEN is_completed THEN COALESCE(completed_on, NOW()) ELSE NULL END,
 		       completed_by = CASE WHEN is_completed THEN COALESCE(completed_by, $2::UUID) ELSE NULL END
 		WHERE  id::TEXT = $1`, req.ID, uuidArg(actor)); err != nil {
 		return "", "", actorWrite(err, actor, "stamp completion")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", fmt.Errorf("commit patch run task: %w", err)
 	}
 
 	return r.LocatePairing(ctx, pairingID)
