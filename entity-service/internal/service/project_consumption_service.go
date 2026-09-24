@@ -164,10 +164,12 @@ func (s *projectConsumptionService) UpdateProjectConsumption(ctx context.Context
 // validateConsumptionArtefacts checks that a caller recording a step has
 // actually supplied that step's output.
 //
-// The same rules exist as CHECK constraints on the table. They are repeated
-// here so the caller gets a specific 400 naming the missing field instead of a
-// constraint violation, and so the rule is visible at the layer that owns the
-// state machine's meaning.
+// This is the ONLY enforcement of these rules. They were once CHECK
+// constraints as well, on the superseded project_consumption table; that table
+// is gone and the state now lives on project, which carries no CHECK
+// constraint for any of them. So do not remove this validation on the
+// assumption that the database will catch it -- nothing will, and a step would
+// record as complete with its own output missing.
 func validateConsumptionArtefacts(status domain.ConsumptionStatus, req domain.UpdateProjectConsumptionRequest) error {
 	missing := func(field string) error {
 		return &apierror.ValidationError{Msg: fmt.Sprintf("%s is required when status is %d", field, status)}
@@ -262,8 +264,15 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	return s.downloadDeploymentLicense(ctx, projectID, deploymentID, email)
 }
 
-// ensureProjectProvisioned advances a project through the 4 setup steps (statuses 1 -> 4 -> 5)
-// until it reaches ConsumptionStatusGeneratedSecretKeys. It is idempotent and safe for repeated calls.
+// ensureProjectProvisioned advances a project through the four setup steps,
+// one status at a time (1 -> 2 -> 3 -> 4 -> 5), until it reaches
+// ConsumptionStatusGeneratedSecretKeys: create the application (2), subscribe
+// it (3), generate credentials (4), generate secret keys (5). No status is
+// skipped -- each step records its own outcome before the next begins, which
+// is what makes the sequence resumable.
+//
+// Idempotent and safe to call repeatedly: it resumes from the stored status,
+// so a project already at 5 does no upstream work.
 func (s *projectConsumptionService) ensureProjectProvisioned(ctx context.Context, projectID, deploymentID, email string) error {
 	statusRes, err := s.choreoClient.GetConsumptionStatus(ctx, projectID, choreosubscription.ConsumptionStatusRequest{
 		Email:        email,
