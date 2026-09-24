@@ -1693,6 +1693,66 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /users:
+    post:
+      summary: Create a new user.
+      description: >
+        Inserts a new platform user. Admin-only — every other portal role gets
+        403. Postgres data source only. roles is optional and currently unused
+        by the CSM portal frontend (no UI to pick a role yet); each name, if
+        supplied, is checked against the same configured role allow-list
+        POST /roles/search serves.
+      operationId: postUsers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserPayload'
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        "400":
+          description: Bad request — missing/invalid email, neither firstName nor lastName supplied, or an unrecognized role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — caller does not hold the admin role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: A user with this email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /users/search:
     post:
       summary: Search users with optional filters, sort, and pagination.
@@ -10314,6 +10374,26 @@ components:
         updatedOn:
           type: string
           format: date-time
+
+    CreateUserPayload:
+      type: object
+      required: [email]
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+          format: email
+        roles:
+          type: array
+          items:
+            type: string
+          description: >-
+            Role names to grant. Optional; omit or leave empty to create the
+            user with no roles. Not currently exposed in the CSM portal UI.
+      description: At least one of firstName/lastName is required.
 
     AccountSearchPayload:
       type: object

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -295,4 +296,28 @@ func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, erro
 		Roles:     roles,
 		Groups:    groups,
 	}, nil
+}
+
+// CreateUser implements UserService.
+func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (domain.User, error) {
+	token := middleware.UserIDTokenFromContext(ctx)
+	if token == "" {
+		return domain.User{}, &apierror.UnauthorizedError{Msg: "x-user-id-token header is required"}
+	}
+	actor, err := emailFromJWT(token)
+	if err != nil {
+		return domain.User{}, &apierror.ValidationError{Msg: "x-user-id-token: " + err.Error()}
+	}
+
+	if err := validateEmail(req.Email); err != nil {
+		return domain.User{}, err
+	}
+	if strings.TrimSpace(req.FirstName) == "" && strings.TrimSpace(req.LastName) == "" {
+		return domain.User{}, &apierror.ValidationError{Msg: "firstName or lastName is required"}
+	}
+	if len(req.Roles) > 50 {
+		return domain.User{}, &apierror.ValidationError{Msg: "roles cannot contain more than 50 values"}
+	}
+
+	return s.repo.CreateUser(ctx, req, actor)
 }

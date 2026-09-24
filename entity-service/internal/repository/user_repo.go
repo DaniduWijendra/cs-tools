@@ -23,9 +23,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -56,6 +58,14 @@ type UserRepository interface {
 	// GetUserGroups returns every team userID belongs to via team_member
 	// (migration 000028), empty if none.
 	GetUserGroups(ctx context.Context, userID string) ([]domain.UserGroupRef, error)
+	// CreateUser inserts a new "user" row (user_name = lower(email), matching
+	// the Salesforce membership ingest's own convention) and, if req.Roles is
+	// non-empty, grants each role via user_role in the same transaction.
+	// actor is the acting caller's email, stamped as created_by/updated_by on
+	// every row this writes. Returns a ConflictError if email is already in
+	// use (user_name is UNIQUE), a ServiceUnavailableError naming any
+	// requested role not seeded in the role table.
+	CreateUser(ctx context.Context, req domain.CreateUserRequest, actor string) (domain.User, error)
 }
 
 type userRepo struct {
@@ -412,6 +422,117 @@ func (r *userRepo) GetUserProjectAccess(ctx context.Context, email string) ([]do
 		return nil, fmt.Errorf("iterate user project access: %w", err)
 	}
 	return access, nil
+}
+
+// CreateUser implements UserRepository.
+func (r *userRepo) CreateUser(ctx context.Context, req domain.CreateUserRequest, actor string) (domain.User, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("create user: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	var u domain.User
+	var firstName, lastName, userType *string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO "user" (id, created_on, updated_on, created_by, updated_by,
+			user_name, first_name, last_name, email, is_active)
+		VALUES (gen_random_uuid(), NOW(), NOW(), $1, $1, $2, $3, $4, $2, TRUE)
+		RETURNING id, user_name, first_name, last_name, email, user_type::TEXT, created_on, updated_on`,
+		actor, email, nullIfBlank(req.FirstName), nullIfBlank(req.LastName),
+	).Scan(&u.ID, &u.UserName, &firstName, &lastName, &u.Email, &userType, &u.CreatedOn, &u.UpdatedOn)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.User{}, &apierror.ConflictError{Msg: "a user with this email already exists: " + email}
+		}
+		return domain.User{}, fmt.Errorf("create user: insert user: %w", err)
+	}
+	u.FirstName = stringOrEmpty(firstName)
+	u.LastName = stringOrEmpty(lastName)
+	if userType != nil {
+		u.UserType = userTypeFromEnum[*userType]
+	}
+
+	u.Roles, err = grantRoles(ctx, tx, u.ID, req.Roles, actor)
+	if err != nil {
+		return domain.User{}, err
+	}
+
+	// user_type is trigger-derived from role membership (migration 000007),
+	// so the value RETURNING read above -- before any role was granted -- can
+	// already be stale once grantRoles has run. Only worth a second read when
+	// a role was actually granted; with none, nothing could have changed it.
+	if len(u.Roles) > 0 {
+		userType = nil
+		if err := tx.QueryRow(ctx, `SELECT user_type::TEXT FROM "user" WHERE id = $1`, u.ID).Scan(&userType); err != nil {
+			return domain.User{}, fmt.Errorf("create user: reload user type: %w", err)
+		}
+		if userType != nil {
+			u.UserType = userTypeFromEnum[*userType]
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.User{}, fmt.Errorf("create user: commit: %w", err)
+	}
+	return u, nil
+}
+
+// grantRoles resolves each of names (role.name, migration 000004) to its id
+// and inserts a user_role row for it, all inside tx. Every name must exist in
+// role before anything is inserted -- a partially-granted set on an unseeded
+// role name would be a confusing half-success. Returns the granted names,
+// sorted, for the response (never nil, so it serializes as [] when names is
+// empty).
+func grantRoles(ctx context.Context, tx pgx.Tx, userID string, names []domain.UserRole, actor string) ([]string, error) {
+	if len(names) == 0 {
+		return []string{}, nil
+	}
+	wanted := make([]string, len(names))
+	for i, n := range names {
+		wanted[i] = string(n)
+	}
+
+	roleIDs := map[string]string{}
+	rows, err := tx.Query(ctx, `SELECT id, name FROM role WHERE name = ANY($1::text[])`, wanted)
+	if err != nil {
+		return nil, fmt.Errorf("create user: resolve roles: %w", err)
+	}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("create user: scan role: %w", err)
+		}
+		roleIDs[name] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("create user: iterate roles: %w", err)
+	}
+	for _, name := range wanted {
+		if _, ok := roleIDs[name]; !ok {
+			return nil, &apierror.ServiceUnavailableError{Msg: fmt.Sprintf("role %q is not seeded in the role table", name)}
+		}
+	}
+
+	granted := make([]string, 0, len(wanted))
+	seen := map[string]bool{}
+	for _, name := range wanted {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO user_role (id, created_on, updated_on, created_by, updated_by, user_id, role_id)
+			VALUES (gen_random_uuid(), NOW(), NOW(), $1, $1, $2, $3)`, actor, userID, roleIDs[name]); err != nil {
+			return nil, fmt.Errorf("create user: grant role %s: %w", name, err)
+		}
+		granted = append(granted, name)
+	}
+	sort.Strings(granted)
+	return granted, nil
 }
 
 // GetUserGroups implements UserRepository.

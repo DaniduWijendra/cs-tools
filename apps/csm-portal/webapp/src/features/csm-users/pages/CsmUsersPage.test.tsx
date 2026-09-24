@@ -45,6 +45,17 @@ vi.mock("@api/backend/client", () => ({
   useBackendApi: () => ({ post: postMock }),
 }));
 
+// usePortalAccess (which the Add User gating reads) derives from
+// useCurrentUser's roles -- mocked the same way CsmAdminLayout.test.tsx does,
+// with a mutable roles list a test can set before rendering. Defaults to no
+// roles, matching every pre-existing test in this file (no CurrentUserProvider
+// in their render tree previously either -- usePortalAccess's own doc comment
+// says it reports no access rather than throwing in that case).
+let mockRoles: string[] | undefined;
+vi.mock("@context/current-user/CurrentUserContext", () => ({
+  useCurrentUser: () => ({ user: { roles: mockRoles }, isLoading: false, isError: false }),
+}));
+
 import CsmUsersPage from "@features/csm-users/pages/CsmUsersPage";
 
 function jsonResponse(body: unknown): Response {
@@ -129,6 +140,7 @@ function renderPageWithLocationProbe(
 
 describe("CsmUsersPage", () => {
   beforeEach(() => {
+    mockRoles = undefined;
     authFetchMock.mockReset();
     postMock.mockReset();
     postMock.mockImplementation((path: string) => {
@@ -228,6 +240,7 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
   };
 
   beforeEach(() => {
+    mockRoles = undefined;
     authFetchMock.mockReset();
     postMock.mockReset();
     postMock.mockImplementation((path: string) => {
@@ -369,5 +382,89 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
     expect(await screen.findByTestId("location-state-probe")).toHaveTextContent(
       JSON.stringify({ from: "/admin/users", parentState: { from: "/dashboard" } }),
     );
+  });
+});
+
+describe("CsmUsersPage — Add User (admin only)", () => {
+  beforeEach(() => {
+    mockRoles = undefined;
+    authFetchMock.mockReset();
+    postMock.mockReset();
+    postMock.mockImplementation((path: string) => {
+      if (path === "/roles/search") {
+        return Promise.resolve({ roles: [], total: 0, limit: 50, offset: 0 });
+      }
+      if (path === "/teams/search") {
+        return Promise.resolve({ teams: [], total: 0, limit: 50, offset: 0 });
+      }
+      if (path === "/users") {
+        return Promise.resolve({ id: "new-user-1", email: "new.user@example.com" });
+      }
+      return Promise.resolve({ groups: [], total: 0, limit: 20, offset: 0 });
+    });
+    authFetchMock.mockResolvedValue(
+      jsonResponse({ users: [], total: 0, limit: 20, offset: 0, hasMore: false }),
+    );
+  });
+
+  it("is hidden for a caller with no admin role", async () => {
+    mockRoles = ["support_engineer"];
+    renderPage("/admin/users");
+    await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Add user" })).not.toBeInTheDocument();
+  });
+
+  it("is hidden with no roles at all", async () => {
+    renderPage("/admin/users");
+    await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Add user" })).not.toBeInTheDocument();
+  });
+
+  it("is shown for an admin, opens the form, and creates a user on submit", async () => {
+    mockRoles = ["admin"];
+    renderPage("/admin/users");
+
+    const addButton = await screen.findByRole("button", { name: "Add user" });
+    fireEvent.click(addButton);
+
+    expect(await screen.findByRole("heading", { name: "Add user" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("First name"), { target: { value: "Jane" } });
+    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: "new.user@example.com" } });
+
+    const submitButton = screen.getByRole("button", { name: "Add user" });
+    await waitFor(() => expect(submitButton).not.toBeDisabled());
+    fireEvent.click(submitButton);
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        "/users",
+        expect.objectContaining({ firstName: "Jane", email: "new.user@example.com" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Add user" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("disables submit until at least a name and a plausible email are entered", async () => {
+    mockRoles = ["admin"];
+    renderPage("/admin/users");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add user" }));
+    await screen.findByRole("heading", { name: "Add user" });
+
+    const submitButton = screen.getByRole("button", { name: "Add user" });
+    expect(submitButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Last name"), { target: { value: "Doe" } });
+    expect(submitButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: "not-an-email" } });
+    expect(submitButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: "jane.doe@example.com" } });
+    expect(submitButton).not.toBeDisabled();
+    expect(postMock).not.toHaveBeenCalledWith("/users", expect.anything());
   });
 });

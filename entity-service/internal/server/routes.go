@@ -917,6 +917,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("GET /users/{id}", userHandler.GetUser)
 		mux.HandleFunc("GET /users/me", userHandler.GetMe)
 		mux.HandleFunc("POST /users/search", userHandler.SearchUsers)
+		mux.HandleFunc("POST /users", userHandler.CreateUser)
 	}
 	if snAccountHandler != nil {
 		mux.HandleFunc("GET /accounts/{id}", snAccountHandler.GetAccount)

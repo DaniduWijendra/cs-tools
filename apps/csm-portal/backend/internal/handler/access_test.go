@@ -56,7 +56,11 @@ func serveWithRoles(g *AccessGuard, perm Permission, roles []string) (status int
 }
 
 func TestAccessGuard_PermissionMatrix(t *testing.T) {
-	all := []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermEscalate, PermDownloadAttachment, PermWrite}
+	// allExceptAdmin is every route permission support_engineer also holds;
+	// PermAdmin is deliberately excluded from it and tested separately below
+	// -- it is the one permission admin does not share with support_engineer.
+	allExceptAdmin := []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermEscalate, PermDownloadAttachment, PermWrite}
+	all := append(append([]Permission{}, allExceptAdmin...), PermAdmin)
 	tests := []struct {
 		name  string
 		roles []string
@@ -65,8 +69,8 @@ func TestAccessGuard_PermissionMatrix(t *testing.T) {
 		{"viewer reads only", []string{"test-viewer"}, []Permission{PermView}},
 		{"escalator can view and escalate", []string{"test-escalator"}, []Permission{PermView, PermEscalate}},
 		{"downloader can view and download", []string{"test-attachment-downloader"}, []Permission{PermView, PermDownloadAttachment}},
-		{"support engineer can do every route permission", []string{"test-support-engineer"}, all},
-		{"admin can do every route permission", []string{"test-admin"}, all},
+		{"support engineer can do every route permission except admin-only ones", []string{"test-support-engineer"}, allExceptAdmin},
+		{"admin can do every route permission, including admin-only ones", []string{"test-admin"}, all},
 		{"usage metrics viewer can view only", []string{"test-usage-metrics-viewer"}, []Permission{PermView}},
 		{"timecard approver can view and use time cards and updates", []string{"test-timecard-approver"}, []Permission{PermView, PermTimeCardsAndUpdates}},
 		{"dashboard designer can view only", []string{"test-dashboard-designer"}, []Permission{PermView}},
@@ -224,7 +228,7 @@ func TestAccessGuard_ViewAllDashboardsIsForSupportEngineersAndAdmins(t *testing.
 
 func TestAccessGuard_UnconfiguredRolesAreHeldByNobody(t *testing.T) {
 	g := NewAccessGuard(AccessConfig{})
-	for _, perm := range []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermEscalate, PermDownloadAttachment, PermWrite} {
+	for _, perm := range []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermEscalate, PermDownloadAttachment, PermWrite, PermAdmin} {
 		if status, _ := serveWithRoles(g, perm, []string{"test-admin", "test-viewer", ""}); status != http.StatusForbidden {
 			t.Errorf("permission %d with no roles configured: status = %d, want 403", perm, status)
 		}
