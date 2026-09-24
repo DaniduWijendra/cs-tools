@@ -26,7 +26,10 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 )
 
-const userTokenHeader = "x-user-id-token" // #nosec G101 -- header name, not a credential
+const (
+	userTokenHeader       = "x-user-id-token" // #nosec G101 -- header name, not a credential
+	clientAssertionHeader = "x-jwt-assertion" // #nosec G101 -- header name, not a credential
+)
 
 // Identity is the caller identity established for a request.
 type Identity struct {
@@ -42,8 +45,8 @@ type Identity struct {
 	UserEmail   string
 	UserSubject string
 	UserID      string
-	// ClientID comes from a validated Authorization: Bearer token; empty when
-	// the request carried none.
+	// ClientID comes from a validated x-jwt-assertion token; empty when the
+	// request carried none.
 	ClientID string
 }
 
@@ -124,10 +127,10 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 
 			id := Identity{Validated: true}
 
-			if raw := bearerToken(r); raw != "" {
+			if raw := strings.TrimSpace(r.Header.Get(clientAssertionHeader)); raw != "" {
 				cc, err := v.ValidateClientToken(raw)
 				if err != nil {
-					reject(w, r, "authorization bearer token", err)
+					reject(w, r, clientAssertionHeader, err)
 					return
 				}
 				id.ClientID = cc.ClientID
@@ -153,14 +156,6 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
 		})
 	}
-}
-
-func bearerToken(r *http.Request) string {
-	h := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(h) < 8 || !strings.EqualFold(h[:7], "bearer ") {
-		return ""
-	}
-	return strings.TrimSpace(h[7:])
 }
 
 // reject logs why (never the token itself) and answers 401 with a generic body.

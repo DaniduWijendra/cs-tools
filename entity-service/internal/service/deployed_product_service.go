@@ -110,7 +110,7 @@ func (s *deployedProductService) UpdateDeployedProduct(_ context.Context, _ doma
 }
 
 // SearchDeployedProductMetrics implements DeployedProductService, backed by
-// usage_count (migration 000054) -- see DeployedProductRepository's own doc
+// hourly_usage_summary (migration 000054) -- see DeployedProductRepository's own doc
 // comment on resolveDeployedProductNodes for how a deployed product's
 // instances are resolved.
 func (s *deployedProductService) SearchDeployedProductMetrics(ctx context.Context, id string, req domain.DeployedProductMetricsRequest) (domain.DeployedProductMetricsResponse, error) {

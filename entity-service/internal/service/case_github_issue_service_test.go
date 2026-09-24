@@ -121,21 +121,35 @@ func TestCreateCaseGithubIssue_FilesAndLinks(t *testing.T) {
 	}
 }
 
-// The type label is what the inbound webhook gates on. An issue filed without
-// it would be invisible to our own sync.
-func TestCreateCaseGithubIssue_CarriesTheTypeLabel(t *testing.T) {
+// An issue filed from a case must be recognisable by our own inbound sync,
+// which keys on the [CR]: title prefix and a CR class label -- not on a type
+// label, which no product repository applies.
+func TestCreateCaseGithubIssue_IsRecognisableByOurOwnInbound(t *testing.T) {
 	gh := &fakeIssueCreator{}
 	if _, err := cgiService(gh, cgiMappedRepo(), domain.CaseStateOpen).
 		CreateCaseGithubIssue(context.Background(), cgiRequest()); err != nil {
 		t.Fatalf("CreateCaseGithubIssue: %v", err)
 	}
-	want := DefaultGithubLabels().ChangeRequest
-	for _, l := range gh.labels {
-		if l == want {
-			return
-		}
+	if !IsChangeRequestTitle(gh.title) {
+		t.Errorf("title %q carries no [CR]: prefix, so our webhook would ignore it", gh.title)
 	}
-	t.Errorf("labels %v do not include %q", gh.labels, want)
+	if _, ok := DefaultGithubLabels().ClassOf(gh.labels); !ok {
+		t.Errorf("labels %v carry no single CR class label", gh.labels)
+	}
+}
+
+// A title that already has the prefix is not given a second one.
+func TestCreateCaseGithubIssue_DoesNotDoublePrefix(t *testing.T) {
+	gh := &fakeIssueCreator{}
+	req := cgiRequest()
+	req.Title = "[CR]: already prefixed"
+	if _, err := cgiService(gh, cgiMappedRepo(), domain.CaseStateOpen).
+		CreateCaseGithubIssue(context.Background(), req); err != nil {
+		t.Fatalf("CreateCaseGithubIssue: %v", err)
+	}
+	if gh.title != "[CR]: already prefixed" {
+		t.Errorf("title = %q", gh.title)
+	}
 }
 
 func TestCreateCaseGithubIssue_RepoOverrideWins(t *testing.T) {

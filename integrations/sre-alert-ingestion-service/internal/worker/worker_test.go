@@ -252,9 +252,12 @@ func TestRunOnce_RetriesOnTransientErrorBelowThreshold(t *testing.T) {
 }
 
 // The upstream 401 case is the load-bearing test: csm-integration-service's
-// CreateIncident always 401s today (missing end-user identity forwarding),
-// and that must be treated exactly like any other transient
-// CSM-unavailability signal — retried, not treated as a permanent failure.
+// CreateIncident can still 401 (e.g. if the target ServiceNow environment's
+// M2M integration credential isn't configured — it is not an unconditional
+// limitation; a live end-to-end call against wso2sndev on 2026-09-20
+// succeeded with no 401), and if it does occur that must be treated exactly
+// like any other transient CSM-unavailability signal — retried, not treated
+// as a permanent failure.
 func TestRunOnce_401IsRetryableNotTerminal(t *testing.T) {
 	row := rowWithPayload(t, "alert-1", 0, nil)
 	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
@@ -498,9 +501,9 @@ func TestRunOnce_RetryFindsExistingIncident_SkipsDuplicateCreate(t *testing.T) {
 }
 
 // TestRunOnce_RetrySearchFailsOpen_ProceedsToCreate covers both "no match"
-// and "the search call itself errored" (e.g. the same 401 CreateIncident
-// gets today) — both must fail open toward attempting delivery, not toward
-// silently giving up.
+// and "the search call itself errored" (e.g. the same 401 CreateIncident can
+// return, see CreateIncident's doc comment) — both must fail open toward
+// attempting delivery, not toward silently giving up.
 func TestRunOnce_RetrySearchFailsOpen_ProceedsToCreate(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -699,11 +702,12 @@ func TestRunOnce_GroupSearchUsesConfiguredWindow(t *testing.T) {
 // TestRunOnce_GroupingFallsThroughOnNoMatchOrSearchFailure covers both
 // "not groupable" branches: no matching incident found (already excludes
 // closed/resolved/out-of-window incidents server-side, per the search's own
-// state+createdOn filters), and the search call itself erroring (the
-// fail-open case this feature will actually hit in production today — see
-// tryGroup's doc comment). Both must fall through unchanged to the existing
-// create-or-dedup-search flow: CreateIncident is still called exactly once,
-// and the row is still delivered against the newly-created incident.
+// state+createdOn filters), and the search call itself erroring (a
+// fail-open case this feature could hit in production if it recurs — see
+// tryGroup's doc comment and CreateIncident's doc comment). Both must fall
+// through unchanged to the existing create-or-dedup-search flow:
+// CreateIncident is still called exactly once, and the row is still
+// delivered against the newly-created incident.
 func TestRunOnce_GroupingFallsThroughOnNoMatchOrSearchFailure(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -716,7 +720,7 @@ func TestRunOnce_GroupingFallsThroughOnNoMatchOrSearchFailure(t *testing.T) {
 			},
 		},
 		{
-			name: "search call itself errors (e.g. the same 401 CreateIncident gets today)",
+			name: "search call itself errors (e.g. the same 401 CreateIncident can return, see CreateIncident's doc comment)",
 			searchGroupFn: func(ctx context.Context, tag string, since time.Time) (*csmclient.CreateIncidentResult, bool, error) {
 				return nil, false, &apierror.Error{StatusCode: 401, Body: "Missing or invalid user ID token header."}
 			},
@@ -1012,5 +1016,44 @@ func TestRunOnce_ShortCircuitRetryFails_FallsBackToAttemptFailed(t *testing.T) {
 	}
 	if len(s.attemptFailed) != 1 || s.attemptFailed[0].id != "alert-1" {
 		t.Errorf("attemptFailed = %+v, want one row for alert-1", s.attemptFailed)
+	}
+}
+
+// TestRunOnce_ShortCircuitRetryBudgetExhausted_Escalates is the regression
+// test for the bug this branch's own comment already warned about: it
+// always returns, so nothing past it (including the normal path's
+// nextRetryCount check) ever runs for this row. Without a budget check
+// here too, a row stuck retrying MarkDelivered for an already-recorded
+// incident would retry forever and never escalate, since CreateIncident is
+// never called again once row.IncidentID is set.
+func TestRunOnce_ShortCircuitRetryBudgetExhausted_Escalates(t *testing.T) {
+	row := rowWithPayload(t, "alert-1", 2, nil) // RetryCount 2, MaxRetries 3 -> next attempt exhausts the budget
+	row.IncidentID = "inc-already-created"
+	s := &mockStore{
+		pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+			return []store.AlertRecord{row}, nil
+		},
+		markDeliveredErr: errors.New("db: connection reset"),
+	}
+	csm := &mockIncidentCreator{createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+		t.Fatal("CreateIncident must not be called when row.IncidentID is already set")
+		return nil, nil
+	}}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3})
+	w.RunOnce(context.Background())
+
+	if len(tw.messages) != 1 {
+		t.Fatalf("Escalate called %d times, want 1", len(tw.messages))
+	}
+	if len(s.escalated) != 1 || s.escalated[0].id != "alert-1" {
+		t.Fatalf("escalated = %+v, want one row for alert-1", s.escalated)
+	}
+	if len(s.attemptFailed) != 0 {
+		t.Errorf("attemptFailed = %+v, want none — the budget was exhausted, so this must escalate, not retry again", s.attemptFailed)
+	}
+	if len(s.delivered) != 0 {
+		t.Errorf("delivered = %+v, want none — MarkDelivered failed again", s.delivered)
 	}
 }

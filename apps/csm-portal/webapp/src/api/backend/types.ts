@@ -1353,6 +1353,7 @@ export interface BeCaseUpdateRequestTemplates {
 // ---------------------------------------------------------------------------
 
 export type BeConversationState =
+  | "OPEN"
   | "ACTIVE"
   | "RESOLVED"
   | "CONVERTED"

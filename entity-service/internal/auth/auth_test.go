@@ -178,7 +178,7 @@ func runWithHolder(t *testing.T, v *Validator, headers map[string]string) (holde
 // some caller wires this middleware incorrectly -- it must still fail safe
 // (pass through, never trust the token) rather than panic.
 func TestMiddleware_NilValidatorIsADefensiveFallbackNotADeploymentMode(t *testing.T) {
-	code, id, called := run(t, nil, map[string]string{"x-user-id-token": "garbage", "Authorization": "Bearer garbage"})
+	code, id, called := run(t, nil, map[string]string{"x-user-id-token": "garbage", "x-jwt-assertion": "garbage"})
 	if code != http.StatusOK || !called {
 		t.Fatalf("a nil validator must pass through, got %d called=%v", code, called)
 	}
@@ -191,7 +191,7 @@ func TestMiddleware_Enabled(t *testing.T) {
 	key := newKey(t)
 	v := staticValidator(key)
 	user := sign(t, key, userClaims(nil))
-	bearer := sign(t, key, clientClaims(nil))
+	clientAssertion := sign(t, key, clientClaims(nil))
 
 	t.Run("no tokens passes as validated-but-anonymous", func(t *testing.T) {
 		code, id, called := run(t, v, nil)
@@ -199,32 +199,32 @@ func TestMiddleware_Enabled(t *testing.T) {
 			t.Fatalf("got %d %+v called=%v", code, id, called)
 		}
 	})
-	t.Run("m2m: bearer only", func(t *testing.T) {
-		_, id, _ := run(t, v, map[string]string{"Authorization": "Bearer " + bearer})
+	t.Run("m2m: client assertion only", func(t *testing.T) {
+		_, id, _ := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion})
 		if !id.Validated || id.ClientID != testM2M || id.UserEmail != "" {
 			t.Fatalf("got %+v", id)
 		}
 	})
-	t.Run("on behalf of a user: bearer + user token", func(t *testing.T) {
-		_, id, _ := run(t, v, map[string]string{"authorization": "bearer " + bearer, "x-user-id-token": user})
+	t.Run("on behalf of a user: client assertion + user token", func(t *testing.T) {
+		_, id, _ := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": user})
 		if id.ClientID != testM2M || id.UserEmail != "Jane@Example.com" || id.UserSubject != "user-1" || id.UserID != "asgardeo-uuid-1" {
 			t.Fatalf("got %+v", id)
 		}
 	})
 	t.Run("invalid user token is rejected, not downgraded to anonymous", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": "garbage"})
+		code, _, called := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
 	})
-	t.Run("invalid bearer is rejected", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"Authorization": "Bearer garbage"})
+	t.Run("invalid client assertion is rejected", func(t *testing.T) {
+		code, _, called := run(t, v, map[string]string{"x-jwt-assertion": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
 	})
 	t.Run("a client-credentials token is not accepted as a user token", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"x-user-id-token": bearer})
+		code, _, called := run(t, v, map[string]string{"x-user-id-token": clientAssertion})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
@@ -239,7 +239,7 @@ func TestMiddleware_IdentityHolder(t *testing.T) {
 	key := newKey(t)
 	v := staticValidator(key)
 	user := sign(t, key, userClaims(nil))
-	bearer := sign(t, key, clientClaims(nil))
+	clientAssertion := sign(t, key, clientClaims(nil))
 
 	t.Run("no tokens: holder stays empty", func(t *testing.T) {
 		holder, _, _, _ := runWithHolder(t, v, nil)
@@ -248,19 +248,19 @@ func TestMiddleware_IdentityHolder(t *testing.T) {
 		}
 	})
 	t.Run("m2m: holder carries the client id", func(t *testing.T) {
-		holder, _, _, _ := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer})
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion})
 		if holder.ClientID != testM2M || holder.UserID != "" {
 			t.Fatalf("got %+v", holder)
 		}
 	})
 	t.Run("on behalf of a user: holder carries the user UUID, not sub", func(t *testing.T) {
-		holder, _, _, _ := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": user})
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": user})
 		if holder.UserID != "asgardeo-uuid-1" || holder.ClientID != testM2M {
 			t.Fatalf("got %+v", holder)
 		}
 	})
-	t.Run("invalid user token: holder stays empty, even though the bearer alone would have validated", func(t *testing.T) {
-		holder, code, _, called := runWithHolder(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": "garbage"})
+	t.Run("invalid user token: holder stays empty, even though the client assertion alone would have validated", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
@@ -268,8 +268,8 @@ func TestMiddleware_IdentityHolder(t *testing.T) {
 			t.Fatalf("a rejected request must never attribute the access log to an unproven claim, got %+v", holder)
 		}
 	})
-	t.Run("invalid bearer: holder stays empty", func(t *testing.T) {
-		holder, code, _, called := runWithHolder(t, v, map[string]string{"Authorization": "Bearer garbage"})
+	t.Run("invalid client assertion: holder stays empty", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"x-jwt-assertion": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}

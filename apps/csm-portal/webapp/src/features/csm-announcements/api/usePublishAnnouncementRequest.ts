@@ -61,6 +61,25 @@ export interface UsePublishAnnouncementRequestResult {
   published: AnnouncementRequest | null;
   handlePublish: () => Promise<void>;
   /**
+   * Marks the request published using only the projects that have already
+   * succeeded, permanently giving up on whatever's still in
+   * `failedProjectIds` — for when one or more projects can never be
+   * delivered to (a broken/invalid project id, an account that will never
+   * accept a case) and waiting for a retry that will never succeed is
+   * blocking every already-succeeded customer from being reachable via
+   * "Post an update". The backend's own `/publish` call has no "every
+   * project must have succeeded" requirement of its own — that rule lives
+   * entirely in `handlePublish` above, so this is a deliberate, explicit
+   * bypass of it, not a workaround. Requires at least one succeeded
+   * project and, unlike `handlePublish`, does *not* retry or wait on
+   * `failedProjectIds` at all — they keep their last-recorded "failed"
+   * ledger status. Still refuses while `failedTagProjectIds` is non-empty:
+   * a missing mandatory security tag is a content-completeness guarantee,
+   * not just a delivery attempt count, so it can't be bypassed the same
+   * way.
+   */
+  publishGivingUpOnFailed: () => Promise<void>;
+  /**
    * False while `request` is `approved` and the delivery ledger hasn't been
    * loaded (and folded into local state) yet for this request id —
    * `handlePublish` refuses to run in that window, since `succeededProjectIds`
@@ -392,6 +411,36 @@ export function usePublishAnnouncementRequest(
     }
   };
 
+  const publishGivingUpOnFailed = async (): Promise<void> => {
+    if (!request || request.state !== "approved" || publishing) return;
+    if (!readyToPublish) return;
+    if (failedTagProjectIds.length > 0) return;
+    if (succeededProjectIds.length === 0) return;
+
+    setPublishing(true);
+    try {
+      const result = await api.post<{ caseIds: string[] }, AnnouncementRequest>(
+        `/announcement-requests/${encodeURIComponent(request.id)}/publish`,
+        { caseIds: Object.values(caseIdByProjectId) },
+      );
+      setPublished(result);
+      queryClient.invalidateQueries({
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, request.id],
+      });
+      queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
+      queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.CSM_ANNOUNCEMENTS] });
+    } catch {
+      // Same reasoning as handlePublish's own catch: the succeeded cases are
+      // real either way, only the request's own bookkeeping row failed to
+      // flip — retrying this call never resends anything.
+      showError(
+        "Marking the request published failed. Try again — it won't resend any cases.",
+      );
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return {
     publishing,
     progress,
@@ -400,6 +449,7 @@ export function usePublishAnnouncementRequest(
     failedTagProjectIds,
     published,
     handlePublish,
+    publishGivingUpOnFailed,
     readyToPublish,
     hydratingDeliveries,
     hydrationFailed,

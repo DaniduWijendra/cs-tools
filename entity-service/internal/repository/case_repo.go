@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -676,7 +677,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		// response, matching CaseView.InternalID's own doc comment on why
 		// it can't become *string.
 		internalID                               *string
-		aeID, aeName                             *string
+		aeID, aeName, aeEmail                    *string
 		pcID, pcNum, pcType                      *string
 		rcID, rcNum                              *string
 		accountID, accountName                   *string
@@ -715,7 +716,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		        dp.id, prod.name || COALESCE(' ' || pv.version, ''),
 		        prod.id, prod.name,
 		        a.id, a.name,
-		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')),
+		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
 		        pw.id, pw.number, pw.type::TEXT,
 		        rc_wi.id, rc_wi.number
 		 FROM work_item wi
@@ -746,7 +747,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		&dpID, &dpDisplayName,
 		&prodID, &prodName,
 		&accountID, &accountName,
-		&aeID, &aeName,
+		&aeID, &aeName, &aeEmail,
 		&pcID, &pcNum, &pcType,
 		&rcID, &rcNum,
 	)
@@ -859,7 +860,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		if aeName != nil {
 			aName = *aeName
 		}
-		cv.AssignedEngineer = domain.NewUserReference(*aeID, "", aName)
+		cv.AssignedEngineer = domain.NewUserReference(*aeID, stringOrEmpty(aeEmail), aName)
 	}
 	if pcID != nil {
 		// work_item.parent_id (migration 000036) is a generic self-reference
@@ -885,7 +886,50 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		return domain.CaseView{}, err
 	}
 	cv.WatchList = watchers
+
+	// Mirrors sn_case_service.go's GetCaseByID: a tags lookup failure must
+	// not fail the whole case read (see CaseView.Tags' own doc comment) --
+	// cv.Tags is left nil and the failure is logged instead.
+	tags, err := fetchCaseTags(ctx, r.db, id)
+	if err != nil {
+		slog.WarnContext(ctx, "get case: case tags lookup failed", "caseId", id, "error", err)
+	} else {
+		cv.Tags = tags
+	}
 	return cv, nil
+}
+
+// fetchCaseTags reads the tags currently attached to the case (== work_item)
+// identified by caseID, via work_item_tag joined to tag -- the same rows
+// AddCaseTag/RemoveCaseTag write. There is no case-scoped "list tags" route
+// on this data source (only POST .../tags and DELETE .../tags/{tagId}), so
+// GetCaseByID is the only place a caller ever sees a case's current tag set;
+// unlike sn_case_service.go's listCaseTags, which calls a real case-scoped
+// ServiceNow endpoint, this reads work_item_tag directly.
+func fetchCaseTags(ctx context.Context, q rowsQuerier, caseID string) ([]domain.Tag, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.id, t.name
+		FROM work_item_tag wit
+		JOIN tag t ON t.id = wit.tag_id
+		WHERE wit.work_item_id = $1
+		ORDER BY t.name`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch case tags: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []domain.Tag
+	for rows.Next() {
+		tag, err := scanTag(rows)
+		if err != nil {
+			return nil, fmt.Errorf("fetch case tags: scan: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("fetch case tags: %w", err)
+	}
+	return tags, nil
 }
 
 // caseCommentTypeEnum maps a domain.CommentType to its comment_type_enum
@@ -1627,7 +1671,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		        d.id, d.name,
 		        dp.id, prod.name || COALESCE(' ' || pv.version, ''),
 		        prod.id, prod.name,
-		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')),
+		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
 		        pw.id, pw.number,
 		        rc_wi.id, rc_wi.number
 		 FROM work_item wi %s %s
@@ -1664,7 +1708,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			var description *string
 			var severity, issueType, engagementType, workState, state, escalationLevel *string
 			var createdAt, updatedAt time.Time
-			var aeID, aeName *string
+			var aeID, aeName, aeEmail *string
 			var pcID, pcNumber *string
 			var rcID, rcNumber *string
 			var prodID, prodName *string
@@ -1681,7 +1725,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 				&depID, &depName,
 				&dpID, &dpName,
 				&prodID, &prodName,
-				&aeID, &aeName,
+				&aeID, &aeName, &aeEmail,
 				&pcID, &pcNumber,
 				&rcID, &rcNumber,
 			); err != nil {
@@ -1738,7 +1782,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			// display name, so the canonical reference keeps a null id.
 			cv.CreatedBy = domain.NewUserReference("", creatorEmail, "")
 			if aeID != nil {
-				cv.AssignedEngineer = domain.NewUserReference(*aeID, "", stringOrEmpty(aeName))
+				cv.AssignedEngineer = domain.NewUserReference(*aeID, stringOrEmpty(aeEmail), stringOrEmpty(aeName))
 			}
 			if pcID != nil {
 				cv.ParentCase = &domain.EntityRef{ID: *pcID, Name: stringOrEmpty(pcNumber)}

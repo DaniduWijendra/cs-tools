@@ -21,9 +21,9 @@
 //   - x-user-id-token: the end user's ID token (email claim, audience = one of
 //     the accepted application client ids). Present when a portal backend acts
 //     for a user.
-//   - Authorization: Bearer: the calling application's client-credentials
-//     access token (client_id/azp claim). Present on every service-to-service
-//     call; it is the ONLY token a machine-to-machine caller (e.g.
+//   - x-jwt-assertion: the calling application's own client-credentials access
+//     token (client_id/azp claim). Present on every service-to-service call;
+//     it is the ONLY token a machine-to-machine caller (e.g.
 //     csm-integration-service) sends.
 package auth
 

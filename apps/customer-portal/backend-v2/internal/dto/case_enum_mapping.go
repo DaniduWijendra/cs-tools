@@ -370,3 +370,65 @@ func caseEscalationLevelRef(id *string) *IDLabelRef {
 	}
 	return &IDLabelRef{ID: trimmed, Label: label}
 }
+
+// caseSeverityEnumToDomain mirrors entity-service's private caseSeverityFromEnum
+// (internal/repository/case_repo.go): case_severity_enum's labels are 'S0'..'S4',
+// an entirely different vocabulary from domain.CaseSeverity's
+// catastrophic/critical/high/medium/low.
+//
+// It is needed because a choice list's vocabulary depends on the data source.
+// ServiceNow returns its own numeric ids with display text; Postgres returns the
+// raw enum label as both id and label (see entity-service's choiceListFromLabels).
+// The frontend was built against the first and matches on it exactly, so the
+// second has to be translated here -- the same reason the tables above exist.
+var caseSeverityEnumToDomain = map[string]string{
+	"s0": "catastrophic",
+	"s1": "critical",
+	"s2": "high",
+	"s3": "medium",
+	"s4": "low",
+}
+
+// normalizeCaseSeverityChoices rewrites a severity choice list into the
+// vocabulary the frontend matches on: the ServiceNow numeric id and display
+// label ("Critical (P1)").
+//
+// Accepts any of the three spellings that can arrive -- the Postgres enum label
+// ("S1"), entity-service's domain enum ("critical"), or ServiceNow's numeric id
+// ("10") -- and leaves anything unrecognised untouched, so an id this does not
+// know still renders rather than vanishing. Counts pass through unchanged.
+func normalizeCaseSeverityChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, caseSeverityEnumToDomain, caseSeverityIDs, caseSeverityDisplayLabels)
+}
+
+// normalizeCaseStateChoices is normalizeCaseSeverityChoices for case states.
+// case_state_enum's labels are the UPPER_SNAKE form of the domain values, so
+// lower-casing is the whole conversion -- no lookup table is needed for that
+// half.
+func normalizeCaseStateChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseStateIDs, caseStateDisplayLabels)
+}
+
+// normalizeChoices maps each item's id to the frontend's {id, label} pair.
+// enumToDomain converts a data-source-specific enum label to the domain value
+// first, when the two differ; a nil table means lower-casing is enough.
+func normalizeChoices(items []ReferenceItem, enumToDomain, domainToID, domainToLabel map[string]string) []ReferenceItem {
+	out := make([]ReferenceItem, 0, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.ID))
+		if enumToDomain != nil {
+			if mapped, ok := enumToDomain[key]; ok {
+				key = mapped
+			}
+		}
+		id, ok := domainToID[key]
+		if !ok {
+			// Not a vocabulary this knows -- most often ServiceNow's own
+			// numeric id, which is already what the frontend wants.
+			out = append(out, item)
+			continue
+		}
+		out = append(out, ReferenceItem{ID: id, Label: displayLabelOr(domainToLabel, key), Count: item.Count})
+	}
+	return out
+}
