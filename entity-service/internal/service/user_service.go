@@ -36,6 +36,21 @@ var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 // backend (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`).
 var emailRE = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
+// validateEmail returns a ValidationError unless email is present and matches
+// emailRE. Used where a caller-supplied address is documented as
+// `format: email` in openapi.yaml and would otherwise be forwarded upstream
+// unchecked — a schema constraint the service does not enforce is not a
+// constraint.
+func validateEmail(email string) error {
+	if email == "" {
+		return &apierror.ValidationError{Msg: "email is required"}
+	}
+	if !emailRE.MatchString(email) {
+		return &apierror.ValidationError{Msg: "email is not a valid email address"}
+	}
+	return nil
+}
+
 // validateUUIDs returns a ValidationError if any element of ids is not a valid UUID.
 func validateUUIDs(field string, ids []string) error {
 	for _, id := range ids {

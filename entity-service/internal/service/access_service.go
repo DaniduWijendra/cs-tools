@@ -137,20 +137,26 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 	return access.ResolveScope(ctx)
 }
 
-// authorizeProject refuses a caller who may not see projectID.
+// authorizeProject refuses a caller who may not act on this project.
 //
-// Endpoints that return data for one project named in the path need this:
-// the id is caller-controlled, so validating only that the project EXISTS
-// lets anyone read any project's data by id (an IDOR). Scoped list endpoints
-// get this for free by folding the scope into their WHERE clause; a
-// by-id read has no such clause, so the check has to be explicit.
+// Two kinds of endpoint need this. A by-id read takes the project id straight
+// from the request path, so validating only that the project EXISTS lets
+// anyone read any project's data by id -- an IDOR. And a write, or a call that
+// leaves the service entirely (the Choreo provisioning sequence), has nothing
+// to attach a scope predicate to in the first place. Scoped list endpoints get
+// this for free by folding the caller's AccessScope into their WHERE clause;
+// these check membership here instead, before doing anything.
 //
-// An out-of-scope project is reported as NotFound, never Forbidden, matching
-// GetProjectByID/GetCaseByID: a 403 would confirm the project exists to
-// someone not entitled to know that. Scope is resolved before any existence
-// lookup, so a caller cannot distinguish the two cases by timing either.
+// Refused as NotFound, never Forbidden, matching GetProjectByID/GetCaseByID: a
+// 403 would confirm the project exists to someone not entitled to know that.
+// Scope is resolved before any existence lookup, so the two cases are not
+// distinguishable by timing either.
+//
+// projectID is compared case-insensitively. Postgres renders uuid values in
+// lower case, but the id here comes from the request path, and a caller who
+// upper-cases a UUID they legitimately hold must not be locked out.
 func authorizeProject(ctx context.Context, access AccessService, projectID string) error {
-	scope, err := access.ResolveScope(ctx)
+	scope, err := resolveScopeForID(ctx, access, projectID)
 	if err != nil {
 		return err
 	}

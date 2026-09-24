@@ -21,6 +21,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 )
 
 // AccessUser is one "user" row matching a caller's email, reduced to what an
@@ -54,14 +56,28 @@ type accessRepo struct {
 }
 
 // NewAccessRepository constructs an AccessRepository backed by the given connection pool.
+// db may be nil: a deployment with no DB_* configured gets no pool, and the
+// deployment-licence route is registered without one (see server.NewRouter).
+// Scoping a caller then fails closed rather than dereferencing the nil pool.
 func NewAccessRepository(db *pgxpool.Pool) AccessRepository {
 	return &accessRepo{db: db}
+}
+
+// errNoPool is what both reads return when this service runs without a
+// database. Only a user-token caller reaches them — an internal client is
+// resolved as unrestricted before any query — so this refuses exactly the
+// callers whose scope genuinely cannot be determined.
+func (r *accessRepo) errNoPool() error {
+	return &apierror.ServiceUnavailableError{Msg: "the caller's access scope cannot be resolved: this deployment has no database configured"}
 }
 
 // UsersByEmail implements AccessRepository. user.is_active is nullable; a NULL
 // counts as active (only an explicit FALSE deactivates), matching how the
 // rest of this schema treats an unset flag.
 func (r *accessRepo) UsersByEmail(ctx context.Context, email string) ([]AccessUser, error) {
+	if r.db == nil {
+		return nil, r.errNoPool()
+	}
 	rows, err := r.db.Query(ctx,
 		`SELECT COALESCE(user_type::TEXT, ''), (is_active IS DISTINCT FROM FALSE)
 		 FROM "user" WHERE LOWER(email) = LOWER($1)`, email)
@@ -83,6 +99,9 @@ func (r *accessRepo) UsersByEmail(ctx context.Context, email string) ([]AccessUs
 
 // RegisteredProjectIDs implements AccessRepository.
 func (r *accessRepo) RegisteredProjectIDs(ctx context.Context, email string) ([]string, error) {
+	if r.db == nil {
+		return nil, r.errNoPool()
+	}
 	rows, err := r.db.Query(ctx,
 		`SELECT DISTINCT project_id::TEXT FROM project_contact
 		 WHERE LOWER(email) = LOWER($1) AND state::TEXT = $2
