@@ -513,10 +513,6 @@ type mockEntityAccountClient struct {
 	searchAccountsFn        func(ctx context.Context, body []byte) ([]byte, error)
 	searchAccountContactsFn func(ctx context.Context, accountID string, body []byte) ([]byte, error)
 	updateAccountTeamsFn    func(ctx context.Context, id string, body []byte) ([]byte, error)
-	// getUserMeFn defaults to an "admin" caller so existing UpdateAccountTeams
-	// tests (written before the admin gate) keep exercising the success path
-	// without every one needing to stub this out explicitly.
-	getUserMeFn func(ctx context.Context) ([]byte, error)
 }
 
 func (m *mockEntityAccountClient) GetAccount(ctx context.Context, id string) ([]byte, error) {
@@ -545,13 +541,6 @@ func (m *mockEntityAccountClient) UpdateAccountTeams(ctx context.Context, id str
 		return m.updateAccountTeamsFn(ctx, id, body)
 	}
 	return []byte(`{}`), nil
-}
-
-func (m *mockEntityAccountClient) GetUserMe(ctx context.Context) ([]byte, error) {
-	if m.getUserMeFn != nil {
-		return m.getUserMeFn(ctx)
-	}
-	return []byte(`{"roles":["admin"]}`), nil
 }
 
 // ----- mock entity project client -----
