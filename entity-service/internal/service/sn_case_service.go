@@ -4577,6 +4577,16 @@ type snAddTagResponse struct {
 }
 
 // AddCaseTag attaches a free-text label to the case identified by caseID.
+// AddCaseTagAs implements CaseService. Unlike the Postgres data source,
+// snCaseService's AddCaseTag never hard-requires a token locally -- it just
+// forwards whatever x-user-id-token is on ctx (possibly empty) to ServiceNow
+// -- so there is nothing this caller-supplied actorEmail needs to override;
+// this is a plain passthrough, kept only so this type still satisfies
+// CaseService.
+func (s *snCaseService) AddCaseTagAs(ctx context.Context, caseID, label, _ string) (domain.Tag, error) {
+	return s.AddCaseTag(ctx, caseID, label)
+}
+
 func (s *snCaseService) AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error) {
 	if err := validateUUIDs("id", []string{caseID}); err != nil {
 		return domain.Tag{}, err
