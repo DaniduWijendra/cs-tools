@@ -75,9 +75,14 @@ type fakeMembershipRepo struct {
 	// project_contact rather than creating one -- which is what a portal
 	// write's own Salesforce echo looks like by the time it reaches here.
 	rowAlreadyExisted bool
-	deactivated       []string
-	deactivateOK      bool
-	deactivateErr     error
+	// previousState is the state that existing row carried BEFORE the
+	// upsert. A portal write's echo finds it equal to the incoming state
+	// (the portal stored it first); a re-invitation made in Salesforce
+	// finds DEACTIVATED there. Only meaningful with rowAlreadyExisted.
+	previousState string
+	deactivated   []string
+	deactivateOK  bool
+	deactivateErr error
 }
 
 func (f *fakeMembershipRepo) Upsert(_ context.Context, in domain.SalesforceMembershipUpsert, step domain.UpsertOnboardingStepRequest) (domain.SalesforceMembershipUpsertResult, error) {
@@ -91,6 +96,7 @@ func (f *fakeMembershipRepo) Upsert(_ context.Context, in domain.SalesforceMembe
 		ProjectContactID:      "pc-1",
 		CreatedUser:           true,
 		CreatedProjectContact: !f.rowAlreadyExisted,
+		PreviousState:         f.previousState,
 	}, nil
 }
 
@@ -401,15 +407,17 @@ func TestMembershipIngest_EventOnlyForInvitedStates(t *testing.T) {
 // TestMembershipIngest_EchoOfAPortalWriteDoesNotPublish is the echo
 // suppression. Every portal membership write also writes Salesforce, and that
 // Salesforce write comes back here through the Service Bus subscriber as an
-// ordinary CREATED/UPDATED envelope. By then the row already exists — the
-// portal write wrote it first — so the event is our own write returning.
-// Without this, one invitation sent by a customer admin would produce TWO
-// e-mails: one from the portal write, one from its own echo.
+// ordinary CREATED/UPDATED envelope. By then the row already exists AND
+// already carries the state the echo is announcing — the portal write wrote
+// both first — so the event is our own write returning. Without this, one
+// invitation sent by a customer admin would produce TWO e-mails: one from
+// the portal write, one from its own echo.
 func TestMembershipIngest_EchoOfAPortalWriteDoesNotPublish(t *testing.T) {
 	for _, state := range []string{"INVITED", "RE-INVITED"} {
 		t.Run(state, func(t *testing.T) {
 			h := newIngestHarness(sampleProjectContact(state, "Portal user"), sampleContact(), true)
 			h.repo.rowAlreadyExisted = true
+			h.repo.previousState = state
 
 			if err := h.svc.HandleEvent(context.Background(), membershipEvent("UPDATED", "Project_Contact__c")); err != nil {
 				t.Fatalf("HandleEvent: %v", err)
@@ -438,6 +446,28 @@ func TestMembershipIngest_GenuinelySalesforceOriginatedInvitationStillPublishes(
 	}
 	if len(h.pub.published) != 1 {
 		t.Errorf("published = %d, want 1 for a row this ingest created", len(h.pub.published))
+	}
+}
+
+// TestMembershipIngest_SalesforceReInvitationOfADeactivatedRowPublishes is the
+// case the old "did we insert a row" gate silently dropped. Re-inviting in
+// Salesforce moves an EXISTING DEACTIVATED project_contact to RE-INVITED, so
+// nothing is created and the person would never have been told. The previous
+// state is what distinguishes it from a portal echo, which arrives with the
+// row already in the state it announces.
+func TestMembershipIngest_SalesforceReInvitationOfADeactivatedRowPublishes(t *testing.T) {
+	h := newIngestHarness(sampleProjectContact("RE-INVITED", "Portal user"), sampleContact(), true)
+	h.repo.rowAlreadyExisted = true
+	h.repo.previousState = "DEACTIVATED"
+
+	if err := h.svc.HandleEvent(context.Background(), membershipEvent("UPDATED", "Project_Contact__c")); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if len(h.repo.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(h.repo.upserts))
+	}
+	if len(h.pub.published) != 1 {
+		t.Fatalf("published = %d, want 1: a Salesforce re-invitation must still send an e-mail", len(h.pub.published))
 	}
 }
 

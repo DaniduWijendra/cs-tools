@@ -111,12 +111,13 @@ type Config struct {
 	// constructs EventPublisherService when both this is true AND
 	// EventHubBroker is set.
 	EventPublishingEnabled bool
-	// SalesforceMembershipIngestEnabled turns on the Project_Contact__c /
-	// Contact branch of POST /salesforce/events (the customer onboarding
-	// database write). Defaults to false: those envelopes are then
-	// acknowledged and ignored, as before the branch existed. The Account
-	// branch is unaffected by this flag.
-	SalesforceMembershipIngestEnabled bool
+	// CSMMigrationSalesforceMembershipIngestEnabled turns on the
+	// Project_Contact__c / Contact branch of POST /salesforce/events (the
+	// customer onboarding database write), from
+	// CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true. Defaults to
+	// false: those envelopes are then acknowledged and ignored, as before
+	// the branch existed. The Account branch is unaffected by this flag.
+	CSMMigrationSalesforceMembershipIngestEnabled bool
 	// CSMMigrationPortalWritesEnabled turns on the portal-driven membership
 	// write endpoints (POST/PATCH/DELETE /projects/{id}/contacts[/{email}]
 	// and the resend-invitation call). Both portals invite, re-role and
@@ -290,22 +291,22 @@ func Load() *Config {
 		GithubLabelsClass:                        os.Getenv("GITHUB_LABELS_CLASS"),
 		GithubLabelStatusAssigned:                os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
-		SalesforceMembershipIngestEnabled:        os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
-		CSMMigrationPortalWritesEnabled:          os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
-		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
-		ProjectEventHubTopic:                     getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
-		CRNoticePollInterval:                     envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
-		AuthIssuer:                               os.Getenv("AUTH_ISSUER"),
-		AuthJWKSURL:                              os.Getenv("AUTH_JWKS_URL"),
-		AuthUserTokenAudiences:                   splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
-		AuthClockSkew:                            envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
-		AuthInternalClientIDsRaw:                 os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
-		CustomerRoles:                            splitComma(os.Getenv("CUSTOMER_ROLES")),
-		SalesEntityBaseURL:                       os.Getenv("SALES_ENTITY_BASE_URL"),
-		SalesEntityTokenURL:                      os.Getenv("SALES_ENTITY_TOKEN_URL"),
-		SalesEntityClientID:                      os.Getenv("SALES_ENTITY_CLIENT_ID"),
-		SalesEntityClientSecret:                  os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
-		SalesEntityScopes:                        os.Getenv("SALES_ENTITY_SCOPES"),
+		CSMMigrationSalesforceMembershipIngestEnabled: os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		CSMMigrationPortalWritesEnabled:               os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
+		CREventHubTopic:                               getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
+		ProjectEventHubTopic:                          getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
+		CRNoticePollInterval:                          envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
+		AuthIssuer:                                    os.Getenv("AUTH_ISSUER"),
+		AuthJWKSURL:                                   os.Getenv("AUTH_JWKS_URL"),
+		AuthUserTokenAudiences:                        splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
+		AuthClockSkew:                                 envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
+		AuthInternalClientIDsRaw:                      os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
+		CustomerRoles:                                 splitComma(os.Getenv("CUSTOMER_ROLES")),
+		SalesEntityBaseURL:                            os.Getenv("SALES_ENTITY_BASE_URL"),
+		SalesEntityTokenURL:                           os.Getenv("SALES_ENTITY_TOKEN_URL"),
+		SalesEntityClientID:                           os.Getenv("SALES_ENTITY_CLIENT_ID"),
+		SalesEntityClientSecret:                       os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
+		SalesEntityScopes:                             os.Getenv("SALES_ENTITY_SCOPES"),
 	}
 	cfg.AuthInternalClientIDs = ParseInternalClientIDs(cfg.AuthInternalClientIDsRaw)
 	return cfg

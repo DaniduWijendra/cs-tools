@@ -50,6 +50,13 @@ const salesforceMembershipWriteFailureEvent = "salesforce.membership_write"
 // is the only thing that stops a retry (or a previously orphaned record)
 // turning into a duplicate Salesforce row.
 type SalesEntityMembershipWriteClient interface {
+	// GetContact reads a Contact by its Salesforce Id. A membership we
+	// already hold ids for is resolved through this rather than through
+	// SearchContactByEmail: the linked Contact's own address may differ
+	// from the address the membership was invited under (see
+	// domain.UserContactAccess.ContactRecordEmail), and searching by the
+	// invited address would then miss the real record.
+	GetContact(ctx context.Context, id string) (salesentity.Contact, error)
 	SearchContactByEmail(ctx context.Context, email string) (salesentity.Contact, bool, error)
 	CreateContact(ctx context.Context, in salesentity.CreateContactInput) (salesentity.Contact, error)
 	SearchProjectContact(ctx context.Context, projectSfID, contactSfID string) (salesentity.ProjectContact, bool, error)
@@ -309,13 +316,20 @@ func (s *projectMembershipWriteService) ResendInvitation(ctx context.Context, pr
 	if err != nil {
 		return err
 	}
-	// Only an outstanding invitation can be re-sent. REGISTERED means they
-	// already accepted it, DEACTIVATED means they should not receive one at
-	// all, and RE-INVITED is already the product of a resend through
-	// Salesforce -- re-sending any of those would either confuse the
-	// recipient or hand a deactivated person a working sign-up link.
-	if !strings.EqualFold(row.State, domain.MembershipStateInvited) {
-		return &apierror.ConflictError{Msg: "only a contact in state INVITED can have their invitation re-sent"}
+	// Only an OUTSTANDING invitation can be re-sent. REGISTERED means they
+	// already accepted it and DEACTIVATED means they should not receive one
+	// at all -- re-sending either would confuse the recipient or hand a
+	// deactivated person a working sign-up link.
+	//
+	// RE-INVITED counts as outstanding, not as "already re-sent": it is the
+	// state Invite writes when it brings a deactivated contact back, which
+	// is a fresh invitation rather than a second copy of one. If the
+	// notification service was down when that event was published, the
+	// person sits in RE-INVITED having received nothing, and a resend is
+	// exactly the retry they need. The cooldown below bounds it either way.
+	if !strings.EqualFold(row.State, domain.MembershipStateInvited) &&
+		!strings.EqualFold(row.State, domain.MembershipStateReInvited) {
+		return &apierror.ConflictError{Msg: "only a contact in state INVITED or RE-INVITED can have their invitation re-sent"}
 	}
 	if strings.TrimSpace(row.MembershipSfID) == "" {
 		return &apierror.ConflictError{Msg: "this contact has no Salesforce membership to re-send an invitation for"}
@@ -430,12 +444,41 @@ type salesforceWriteRecord struct {
 // always: the create endpoints are not idempotent, so adopting an existing
 // record is the only thing that keeps a retry, a hand edit in Salesforce, or
 // a previously orphaned record from becoming a duplicate.
+//
+// The contact is resolved BY ID whenever the membership already carries one.
+// The invited address and the linked Contact's own Email are not the same
+// field and do drift apart on real rows (domain.UserContactAccess compares
+// them for exactly that reason), so resolving a known membership by address
+// can miss its Contact -- and a miss here is not a harmless retry: it would
+// create a second Contact, then a second Project_Contact__c, leaving the
+// real membership untouched while the role change or deactivation appears to
+// have succeeded. A by-id read that fails for any reason falls back to the
+// address search, so every self-healing path this had before still works.
 func (s *projectMembershipWriteService) writeSalesforce(ctx context.Context, wc repository.MembershipWriteContext, intent salesforceWriteIntent) (domain.SalesforceMembershipUpsert, salesforceWriteRecord, error) {
 	var rec salesforceWriteRecord
 
-	contact, found, err := s.deps.SalesEntity.SearchContactByEmail(ctx, intent.Email)
-	if err != nil {
-		return domain.SalesforceMembershipUpsert{}, rec, err
+	var contact salesentity.Contact
+	var found bool
+	var err error
+	if wc.Existing != nil && strings.TrimSpace(wc.Existing.ContactSfID) != "" {
+		linkedID := strings.TrimSpace(wc.Existing.ContactSfID)
+		contact, err = s.deps.SalesEntity.GetContact(ctx, linkedID)
+		if err != nil {
+			// The id we hold no longer resolves (hand-deleted in Salesforce,
+			// or the read itself failed). Fall through to the address search
+			// and, if that misses too, to the create -- the behaviour before
+			// the by-id lookup existed.
+			slog.WarnContext(ctx, "membership write: linked Salesforce contact could not be read by id, falling back to the address search",
+				"contactSfId", linkedID, "err", err)
+		} else {
+			found = true
+		}
+	}
+	if !found {
+		contact, found, err = s.deps.SalesEntity.SearchContactByEmail(ctx, intent.Email)
+		if err != nil {
+			return domain.SalesforceMembershipUpsert{}, rec, err
+		}
 	}
 	if !found {
 		first, last := intent.FirstName, intent.LastName
@@ -533,8 +576,16 @@ func (s *projectMembershipWriteService) writeSalesforce(ctx context.Context, wc 
 	if groups == nil {
 		groups, _ = mapProjectGroups(intent.Roles)
 	}
-	globalRoles, managed, adminRole := mapGlobalRoles(membershipType,
-		contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser)
+	// The Salesforce value wins for a contact that already existed. For one
+	// this call just CREATED, POST /contacts is only contracted to return an
+	// id, so a response that omits isCsIntegrationUser must not be read as
+	// "false" -- that would hand a machine account an Asgardeo identity,
+	// global roles and an invitation e-mail. Fall back to what we asked for.
+	isIntegrationUser := contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser
+	if rec.CreatedContact && contact.IsCsIntegrationUser == nil {
+		isIntegrationUser = intent.IsCsIntegrationUser
+	}
+	globalRoles, managed, adminRole := mapGlobalRoles(membershipType, isIntegrationUser)
 
 	first, last := strings.TrimSpace(derefString(contact.FirstName)), strings.TrimSpace(derefString(contact.LastName))
 	if first == "" && last == "" {
@@ -548,7 +599,7 @@ func (s *projectMembershipWriteService) writeSalesforce(ctx context.Context, wc 
 	rec.GivenName, rec.FamilyName = first, last
 	rec.ProjectName, rec.ProjectKey = wc.Target.ProjectName, wc.Target.ProjectKey
 	rec.Type = membershipType
-	rec.IsIntegrationUser = contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser
+	rec.IsIntegrationUser = isIntegrationUser
 
 	return domain.SalesforceMembershipUpsert{
 		MembershipSfID:      rec.MembershipSfID,
@@ -564,7 +615,7 @@ func (s *projectMembershipWriteService) writeSalesforce(ctx context.Context, wc 
 		ContactLastName:     last,
 		ContactAccountSfID:  accountSfID,
 		IsCsAdmin:           contact.IsCsAdmin != nil && *contact.IsCsAdmin,
-		IsCsIntegrationUser: contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser,
+		IsCsIntegrationUser: isIntegrationUser,
 		ProjectSfID:         wc.Target.ProjectSfID,
 		ProjectKey:          wc.Target.ProjectKey,
 		GlobalRoles:         globalRoles,

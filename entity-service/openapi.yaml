@@ -2266,9 +2266,10 @@ paths:
       description: >
         Re-publishes project_contact.invited with a resend marker so
         csm-notification-service bypasses its own already-sent guard. Writes nothing —
-        neither the database nor Salesforce is touched. Valid only while the membership
-        is in state INVITED, and rate-limited to one send per membership every five
-        minutes, measured from the EMAIL step's updatedOn in the onboarding ledger.
+        neither the database nor Salesforce is touched. Valid only while an invitation
+        is outstanding — state INVITED or RE-INVITED — and rate-limited to one send per
+        membership every five minutes, measured from the EMAIL step's updatedOn in the
+        onboarding ledger.
 
 
         Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id — the
@@ -2314,7 +2315,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: The membership is not in state INVITED, so there is no outstanding invitation to re-send.
+          description: The membership is neither INVITED nor RE-INVITED, so there is no outstanding invitation to re-send.
           content:
             application/json:
               schema:

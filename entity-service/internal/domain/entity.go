@@ -615,6 +615,14 @@ type SalesforceMembershipUpsertResult struct {
 	CreatedUser           bool
 	CreatedAccountContact bool
 	CreatedProjectContact bool
+	// PreviousState is the project_contact.state the row carried BEFORE this
+	// upsert overwrote it, empty when the row was created here. It is the
+	// echo-suppression signal the Salesforce ingest gates on: a portal write
+	// has already stored the new state by the time its own echo arrives, so
+	// PreviousState then equals the incoming state and the ingest stays
+	// silent, while a state Salesforce itself moved (DEACTIVATED to
+	// RE-INVITED, say) differs and is published.
+	PreviousState string
 	// IsAccountAdmin is the derived account-level admin decision the upsert
 	// just applied: true when at least one of this user's live memberships
 	// carries the project ADMIN role (or the contact's Salesforce isCsAdmin

@@ -95,11 +95,11 @@ func (h *ProjectMembershipHandler) ResendProjectContactInvitation(w http.Respons
 
 // pathEmail reads the {email} path segment.
 //
-// It deliberately does NOT percent-decode: net/http's own pattern matching
-// already hands the segment over unescaped (`jane%40acme.com` arrives as
-// `jane@acme.com`, verified), so decoding a second time would corrupt any
-// address carrying a literal percent sign. The service normalizes and
-// validates whatever comes out of here.
+// It deliberately does NOT call url.PathUnescape: net/http's own ServeMux
+// already URL-decodes path variables before handing them to the handler
+// (`jane%40acme.com` arrives as `jane@acme.com`, verified), so a second
+// decode would corrupt any address carrying a literal percent sign. The
+// service normalizes and validates whatever comes out of here.
 func pathEmail(r *http.Request) string {
 	return r.PathValue("email")
 }

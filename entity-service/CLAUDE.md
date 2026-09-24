@@ -210,7 +210,7 @@ an alias of `Project_Contact__c`, and the raw value is logged):
 
 | Entity | Event | Action |
 |---|---|---|
-| `Project_Contact__c` | CREATED / UPDATED / RESTORED | `GetProjectContact` (REST `POST /project-contacts/search`) then `GetContact` (`POST /contacts/search`) → `ProjectMembershipRepository.Upsert` in one transaction → DATABASE step → publish `project_contact.invited` if the state is INVITED / RE-INVITED | It is published to **`PROJECT_EVENT_HUB_TOPIC`** (default `project-events`), not the shared `EVENT_HUB_TOPIC`: onboarding gets its own topic so a case-event backlog cannot delay an invitation, and its dead-letter queue can be watched on its own. Same broker and credentials, same failure recording — only the topic differs, and csm-notification-service consumes it with its own consumer group.
+| `Project_Contact__c` | CREATED / UPDATED / RESTORED | `GetProjectContact` (REST `POST /project-contacts/search`) then `GetContact` (`POST /contacts/search`) → `ProjectMembershipRepository.Upsert` in one transaction → DATABASE step → publish `project_contact.invited` if the state is INVITED / RE-INVITED. It is published to **`PROJECT_EVENT_HUB_TOPIC`** (default `project-events`), not the shared `EVENT_HUB_TOPIC`: onboarding gets its own topic so a case-event backlog cannot delay an invitation, and its dead-letter queue can be watched on its own. Same broker and credentials, same failure recording — only the topic differs, and csm-notification-service consumes it with its own consumer group. |
 | `Project_Contact__c` | DELETED | `project_contact.state = DEACTIVATED` for that `sf_id`; unknown id is a no-op (still 204). Never `DELETE FROM` |
 | `Contact` | UPDATED | `GetContact`, then the CREATED/UPDATED path above for each of its `memberships` (name / email / `isCsAdmin` / `isCsIntegrationUser` changes propagate); every membership is attempted, the first error is returned |
 | `Contact` | CREATED / DELETED | no-op |
@@ -260,13 +260,14 @@ back-filled instead of duplicated:
    used to be global-only and recorded nothing per project); unknown roles are
    logged as `ignoredRoles` and never fail the ingest. The row set is
    replaced. A missing `project_group` row is a 503.
-8. The derived account-level admin role (`syncDerivedAdminRole`), run **after**
-   step 7 so the membership just written counts: one `EXISTS` over every
-   membership this user holds, granting `customer_admin` (`partner_admin` for a
-   partner contact) when any live membership carries the project `ADMIN` role
-   or the contact's own `isCsAdmin` is set, and revoking the managed admin
-   roles it must not hold. See "Admin is a project role" below for the bug
-   this replaced.
+8. The derived account-level admin roles (`syncDerivedAdminRole`), run
+   **after** step 7 so the membership just written counts: one aggregate over
+   every membership this user holds, deciding `customer_admin` and
+   `partner_admin` **separately** — each from the live ADMIN memberships that
+   can support it — then granting each role it earned and revoking each one it
+   did not. The contact's own `isCsAdmin` is an additional grant of the role
+   *this* membership maps to. See "Admin is a project role" below for the two
+   bugs this replaced.
 
 The DATABASE `onboarding_step` is written **inside the same transaction**
 (`upsertOnboardingStep` takes a `querier`, satisfied by both the pool and a
@@ -277,24 +278,36 @@ contact Salesforce ids, email, given / family name, project name and key, the
 raw Salesforce roles, `isIntegrationUser`, `type`, `eventModifiedOn` = the
 membership's Salesforce LastModifiedDate, and an optional `resend` marker) is
 published only after the transaction committed, only for INVITED / RE-INVITED,
-**and only when the ingest actually created the `project_contact` row**
-(`SalesforceMembershipUpsertResult.CreatedProjectContact`); a nil publisher
+**and only when this event actually moved the membership into that state** —
+the ingest created the `project_contact` row
+(`SalesforceMembershipUpsertResult.CreatedProjectContact`), or the row's
+stored state before the upsert
+(`SalesforceMembershipUpsertResult.PreviousState`) was something else; a nil publisher
 skips it, a publish failure is logged (and recorded by
 `EventPublisherService`), never returned. csm-notification-service consumes it,
 provisions the Asgardeo user via the SCIM service and sends the invitation,
 then records IDENTITY and EMAIL through the endpoints below (SKIPPED for an
 integration user).
 
-**Echo suppression — the "created the row" condition is load-bearing.** Every
-portal membership write (below) also writes Salesforce, and every Salesforce
-write comes back here through the Service Bus subscriber as an ordinary
-CREATED/UPDATED envelope. By the time that echo lands the row already exists,
-because the portal write wrote it first, so the event is our own write
-returning. Publishing for it would have csm-notification-service send a
+**Echo suppression — the STATE TRANSITION is the signal, not the row insert.**
+Every portal membership write (below) also writes Salesforce, and every
+Salesforce write comes back here through the Service Bus subscriber as an
+ordinary CREATED/UPDATED envelope. By the time that echo lands the row already
+exists **and already carries the new state**, because the portal write wrote
+both first — so `PreviousState` equals the state the echo carries and nothing
+is published. Publishing for it would have csm-notification-service send a
 **second invitation e-mail for the one invitation the customer admin sent** —
 one click, two mails. An echo updates the row silently instead. A genuinely
 Salesforce-originated invitation (someone invited in Salesforce itself, or the
 historical backfill) still creates the row here and still publishes.
+
+This used to gate on `CreatedProjectContact` alone, which silently dropped
+**re-invitations made in Salesforce**: those move an existing DEACTIVATED row
+to RE-INVITED, so no row is created and the person was never told. Comparing
+the previous state catches that case (DEACTIVATED → RE-INVITED differs, so it
+publishes) while still suppressing the portal's own echo (RE-INVITED →
+RE-INVITED is unchanged, so it does not). Do not put the insert-only condition
+back.
 
 **Schema prerequisite**: the `sf_id` columns on `"user"`, `account_contact`
 and `project_contact` come from the csm-sync migration 0076, which is not in
@@ -605,8 +618,9 @@ Salesforce edit converge on the same rows.
 
 Every one of the four follows the same shape:
 
-1. Open the Postgres transaction. Read the project and its account, and the
-   membership that may already be there.
+1. Open the Postgres transaction. **Take a transaction-scoped advisory lock
+   on the (project, address) pair**, then read the project and its account,
+   and the membership that may already be there.
 2. Write **Salesforce inside that transaction**, searching before every create.
 3. Write the rows through the existing membership `Upsert`.
 4. Commit.
@@ -640,6 +654,32 @@ Two details worth knowing:
   what makes a retry, a hand edit made directly in Salesforce, and an
   orphaned record from a previous failure all get *adopted* rather than
   duplicated.
+- **A contact the membership already links to is read by ID, not by
+  address.** `project_contact.email` (the address the person was invited
+  under) and the Salesforce Contact's own `Email` are different fields and do
+  drift apart — `domain.UserContactAccess` compares them for exactly that
+  reason. Resolving a known membership by address could therefore miss its
+  Contact, and the search-first rule would then do the wrong thing very
+  confidently: create a second Contact, create a second `Project_Contact__c`,
+  and leave the real membership untouched while the role change or
+  deactivation reported success. `writeSalesforce` calls `GetContact` with
+  `MembershipWriteContext.Existing.ContactSfID` whenever it has one, and only
+  falls back to the address search when that id does not resolve (so every
+  self-healing path still works).
+- **Concurrent writes for the same (project, address) are serialized**, by
+  `pg_advisory_xact_lock(hashtextextended(projectId || '|' || email, 0))`
+  taken as the transaction's first statement. Under READ COMMITTED the reads
+  in step 1 see nothing of an uncommitted sibling, and those reads are what
+  decide between "invite" and "change" — so a double-submitted invitation, or
+  two admins inviting the same person at once, would both find no membership,
+  both search Salesforce (both searches finishing before either create), and
+  both create. Two Contacts, two `Project_Contact__c` records, two e-mails.
+  The lock holds for the whole write *including* the Salesforce calls, which
+  is the point: that is exactly the window. It is keyed per (project,
+  address), so unrelated writes never queue behind each other — and the same
+  address being invited to two different projects at once is still two
+  Salesforce contact searches, which the search-first rule handles only if
+  the first has committed. That narrow case is unchanged.
 
 **The one residue.** A commit that fails *after* Salesforce succeeded leaves a
 Salesforce record with no row behind it. The search-first rule makes that
@@ -711,9 +751,12 @@ by the ingest's duplicate guard.
   `project_contact.invited` with `resend: true`, which is the one thing that
   makes csm-notification-service bypass its own already-sent guard (that guard
   is what stops a duplicate Salesforce event turning into a duplicate email,
-  so a deliberate resend has to say so). Valid only while the membership is
-  `INVITED` — REGISTERED means they already accepted, DEACTIVATED means they
-  should not get one, RE-INVITED is already the product of a resend. A
+  so a deliberate resend has to say so). Valid only while an invitation is
+  outstanding — `INVITED` or `RE-INVITED`. REGISTERED means they already
+  accepted and DEACTIVATED means they should not get one; RE-INVITED is not
+  the product of a resend but the state **Invite** writes when it brings a
+  deactivated contact back, so a person left in it by a failed notification
+  has the same right to a retry as an `INVITED` one. A
   **five-minute cooldown per membership** is enforced from the EMAIL step's
   `updatedOn` in the onboarding ledger (the record of when an invitation was
   actually sent, written by csm-notification-service itself rather than
@@ -799,29 +842,43 @@ project under that account, and nothing outside it.
   the two admin roles this contact would hold
   (`SalesforceMembershipUpsert.AdminRoleName`) — never whether they hold it.
 - `syncDerivedAdminRole` (step 8 of the upsert, after the project groups are
-  written) decides that, as **one query over the user's memberships**:
+  written) decides that, as **one query over the user's memberships** that
+  answers for both managed roles at once:
 
   ```sql
-  SELECT EXISTS (
-    SELECT 1 FROM "user" u
-    JOIN account_contact ac ON LOWER(ac.user_name) = LOWER(u.user_name)
-    JOIN project_contact pc ON pc.account_contact_id = ac.id
-    JOIN project_contact_group pcg ON pcg.project_contact_id = pc.id
-    JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
-    JOIN project_role pr ON pr.id = pgr.project_role_id
-    WHERE u.id = $1
-      AND pr.role = 'ADMIN'::project_role_enum
-      AND (pc.state IS NULL OR pc.state <> 'DEACTIVATED'::project_contact_state_enum))
+  SELECT
+    COALESCE(bool_or(ac.account_id  = p.account_id), FALSE),  -- earns customer_admin
+    COALESCE(bool_or(ac.account_id <> p.account_id), FALSE)   -- earns partner_admin
+  FROM "user" u
+  JOIN account_contact ac ON LOWER(ac.user_name) = LOWER(u.user_name)
+  JOIN project_contact pc ON pc.account_contact_id = ac.id
+  JOIN project p ON p.id = pc.project_id
+  JOIN project_contact_group pcg ON pcg.project_contact_id = pc.id
+  JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
+  JOIN project_role pr ON pr.id = pgr.project_role_id
+  WHERE u.id = $1
+    AND pr.role = 'ADMIN'::project_role_enum
+    AND (pc.state IS NULL OR pc.state <> 'DEACTIVATED'::project_contact_state_enum)
   ```
 
   It binds only the user id — nothing about the membership in hand — which is
-  precisely what makes the old failure impossible. The role is granted when
-  that is true (or the contact's own Salesforce `isCsAdmin` is set, an
-  additional grant and never a revocation condition), and every managed admin
-  role the user must not hold is revoked. Running it *after* step 7 is what
-  makes the membership being written count. A failed derivation aborts the
-  write rather than quietly deciding "not an admin", which would revoke a real
-  admin's role on a transient error.
+  precisely what makes the old failure impossible. Running it *after* step 7
+  is what makes the membership being written count. A failed derivation aborts
+  the write rather than quietly deciding "not an admin", which would revoke a
+  real admin's role on a transient error.
+
+  **Each role is decided on its own evidence**, and that split is the second
+  bug fixed here. A membership is a partner one exactly when the contact's
+  account is not the project's (`ac.account_id <> p.account_id`, the same test
+  `membershipByEmail` applies), so only an ADMIN membership of that kind can
+  support `partner_admin`, and only one of the other kind can support
+  `customer_admin`. An earlier version asked a single "is this user an admin
+  anywhere" question and then kept whichever role the membership in hand
+  mapped to: processing a **non-admin partner membership** for someone who was
+  a customer admin on their own account would grant them `partner_admin`, which
+  no ADMIN membership supported, and revoke the `customer_admin` they had
+  earned. The contact's own Salesforce `isCsAdmin` remains an additional grant
+  of the role this membership maps to, never a revocation condition.
 
 A deactivated membership's `ADMIN` role does not count, which is how
 deactivating someone's last admin project drops their account-level role

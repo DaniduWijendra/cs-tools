@@ -77,8 +77,9 @@ var ErrMembershipCommitFailed = errors.New("membership write committed to Salesf
 // MembershipWriteContext is what the Salesforce half of a portal membership
 // write is given: the project and account it lands on, and the membership
 // that is already there, if any. Both are read inside the write's own
-// transaction, so the plan never decides against a state another writer has
-// since changed.
+// transaction, behind a transaction-scoped advisory lock on the (project,
+// address) pair, so the plan never decides against a state another writer
+// has since changed.
 type MembershipWriteContext struct {
 	Target domain.MembershipWriteTarget
 	// Existing is nil when this project has no membership for the address —
@@ -185,6 +186,10 @@ func (r *projectMembershipRepo) UpsertWithin(ctx context.Context, projectID, ema
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockMembershipWriteKey(ctx, tx, projectID, email); err != nil {
+		return domain.SalesforceMembershipUpsertResult{}, err
+	}
+
 	target, err := resolveWriteTarget(ctx, tx, projectID)
 	if err != nil {
 		return domain.SalesforceMembershipUpsertResult{}, err
@@ -217,6 +222,31 @@ func (r *projectMembershipRepo) UpsertWithin(ctx context.Context, projectID, ema
 		return res, fmt.Errorf("%w: %v", ErrMembershipCommitFailed, err)
 	}
 	return res, nil
+}
+
+// lockMembershipWriteKey takes a transaction-scoped advisory lock on the
+// (project, address) pair the write is about, before anything is read.
+//
+// READ COMMITTED gives the plain SELECTs below no protection against a writer
+// that has not committed yet, and the read is what decides between "invite"
+// and "change": a double-submitted invitation, or two admins inviting the
+// same person at once, would otherwise both see no membership, both search
+// Salesforce, and both create -- the search-first rule cannot help, because
+// both searches run before either create, and the Salesforce create endpoints
+// are not idempotent. The second request waits here instead, and then reads
+// the membership the first one made.
+//
+// The lock is released by COMMIT or ROLLBACK, so it lives exactly as long as
+// the write does, including the Salesforce calls inside it -- which is the
+// point: the window that has to be closed is precisely the one they open.
+// Requests for a different address, or for the same address on a different
+// project, never touch it.
+func lockMembershipWriteKey(ctx context.Context, tx pgx.Tx, projectID, email string) error {
+	key := projectID + "|" + strings.ToLower(strings.TrimSpace(email))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0::bigint))`, key); err != nil {
+		return fmt.Errorf("membership write: lock write key: %w", err)
+	}
+	return nil
 }
 
 // GetMembershipByEmail implements ProjectMembershipRepository.
@@ -393,7 +423,7 @@ func upsertMembershipTx(ctx context.Context, tx pgx.Tx, in domain.SalesforceMemb
 	}
 
 	// 6. project_contact — by sf_id, then (project, account_contact), else insert.
-	res.ProjectContactID, res.CreatedProjectContact, err = upsertProjectContact(ctx, tx, in, res.ProjectID, res.AccountContactID, actor)
+	res.ProjectContactID, res.CreatedProjectContact, res.PreviousState, err = upsertProjectContact(ctx, tx, in, res.ProjectID, res.AccountContactID, actor)
 	if err != nil {
 		return res, err
 	}
@@ -539,69 +569,88 @@ func syncGlobalRoles(ctx context.Context, tx pgx.Tx, userID string, wanted []str
 	return nil
 }
 
-// syncDerivedAdminRole decides the user's account-level admin role from ALL
-// of their memberships and grants or revokes it accordingly.
+// syncDerivedAdminRole decides the user's account-level admin roles from ALL
+// of their memberships and grants or revokes each one accordingly.
 //
 // Admin is stored per project (the ADMIN project_role, reached through the
 // Admin project_group — migration 000084). The account-level role is derived
 // from it: admin on ANY project under an account means admin on EVERY project
-// under that account, and nothing outside it — so the user holds
-// customer_admin (partner_admin for a partner contact) exactly when at least
-// one live membership of theirs carries the project ADMIN role. The contact's
-// own Salesforce isCsAdmin flag is an additional grant, never a revocation
-// condition, and is the reason this takes it as a parameter rather than
-// reading it back too.
+// under that account, and nothing outside it.
 //
-// It replaces a revoke rule that read `managed - wanted` from the single
-// membership being processed, which meant processing one non-admin membership
-// stripped the user's admin on every project they had. The rule here cannot
-// do that: it is a single EXISTS over the user's memberships, run after the
-// membership in hand has already been written, so the answer accounts for the
-// change being made and for every project not involved in it.
+// "Nothing outside it" is why the two managed roles are decided SEPARATELY,
+// each from the memberships that could support it. A membership is a partner
+// one exactly when the contact's account is not the project's (the same test
+// membershipByEmail applies), so an ADMIN membership of that kind supports
+// partner_admin and one of the other kind supports customer_admin. Deciding
+// both from a single "is this user an admin anywhere" answer, and then
+// keeping whichever role the membership in hand happens to map to, let one
+// account's admin rights be traded for another's: processing a non-admin
+// PARTNER CONTACT membership for a user who is a customer admin elsewhere
+// would grant partner_admin, which no ADMIN membership supports, and revoke
+// the customer_admin they had earned.
+//
+// This also replaces an older revoke rule that read `managed - wanted` from
+// the single membership being processed, which meant processing one
+// non-admin membership stripped the user's admin on every project they had.
+// Neither query here can do that: both are computed over the user's
+// memberships, run after the membership in hand has already been written, so
+// the answer accounts for the change being made and for every project not
+// involved in it. Do not narrow either of them to the membership in hand.
+//
+// The contact's own Salesforce isCsAdmin flag is an additional grant of the
+// role this membership maps to (adminRole), never a revocation condition,
+// and is the reason this takes it as a parameter rather than reading it back
+// too.
 //
 // adminRole empty (an integration user) means the whole admin question does
-// not apply: nothing is granted and nothing is revoked.
+// not apply: nothing is granted and nothing is revoked. The bool returned is
+// whether the user ends up holding adminRole — the decision for the
+// membership just written.
 func syncDerivedAdminRole(ctx context.Context, tx querier, userID, adminRole string, managed []string, isCsAdmin bool, actor string) (bool, error) {
 	if adminRole == "" {
 		return false, nil
 	}
 
-	var adminOnAnyProject bool
+	var customerAdmin, partnerAdmin bool
 	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM "user" u
-			JOIN account_contact ac ON LOWER(ac.user_name) = LOWER(u.user_name)
-			JOIN project_contact pc ON pc.account_contact_id = ac.id
-			JOIN project_contact_group pcg ON pcg.project_contact_id = pc.id
-			JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
-			JOIN project_role pr ON pr.id = pgr.project_role_id
-			WHERE u.id = $1
-			  AND pr.role = 'ADMIN'::project_role_enum
-			  AND (pc.state IS NULL OR pc.state <> 'DEACTIVATED'::project_contact_state_enum)
-		)`, userID).Scan(&adminOnAnyProject); err != nil {
+		SELECT
+			COALESCE(bool_or(ac.account_id = p.account_id), FALSE),
+			COALESCE(bool_or(ac.account_id <> p.account_id), FALSE)
+		FROM "user" u
+		JOIN account_contact ac ON LOWER(ac.user_name) = LOWER(u.user_name)
+		JOIN project_contact pc ON pc.account_contact_id = ac.id
+		JOIN project p ON p.id = pc.project_id
+		JOIN project_contact_group pcg ON pcg.project_contact_id = pc.id
+		JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
+		JOIN project_role pr ON pr.id = pgr.project_role_id
+		WHERE u.id = $1
+		  AND pr.role = 'ADMIN'::project_role_enum
+		  AND (pc.state IS NULL OR pc.state <> 'DEACTIVATED'::project_contact_state_enum)`,
+		userID).Scan(&customerAdmin, &partnerAdmin); err != nil {
 		return false, fmt.Errorf("upsert membership: derive account admin role: %w", err)
 	}
 
-	isAdmin := adminOnAnyProject || isCsAdmin
-	if isAdmin {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO user_role (id, created_on, updated_on, created_by, updated_by, user_id, role_id)
-			SELECT gen_random_uuid(), NOW(), NOW(), $1, $1, $2, r.id
-			FROM role r
-			WHERE r.name = $3
-			  AND NOT EXISTS (SELECT 1 FROM user_role ur WHERE ur.user_id = $2 AND ur.role_id = r.id)`,
-			actor, userID, adminRole); err != nil {
-			return false, fmt.Errorf("upsert membership: grant role %s: %w", adminRole, err)
-		}
+	earned := map[string]bool{
+		globalRoleCustomerAdmin: customerAdmin,
+		globalRolePartnerAdmin:  partnerAdmin,
+	}
+	// isCsAdmin grants the role THIS membership maps to, and only that one.
+	if isCsAdmin {
+		earned[adminRole] = true
 	}
 
-	// Revoke every managed admin role the user must not hold: all of them
-	// when they are not an admin, and the other one (partner_admin for a
-	// customer contact, customer_admin for a partner one) when they are.
-	revoke := make([]string, 0, len(managed))
+	var revoke []string
 	for _, m := range managed {
-		if isAdmin && m == adminRole {
+		if earned[m] {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO user_role (id, created_on, updated_on, created_by, updated_by, user_id, role_id)
+				SELECT gen_random_uuid(), NOW(), NOW(), $1, $1, $2, r.id
+				FROM role r
+				WHERE r.name = $3
+				  AND NOT EXISTS (SELECT 1 FROM user_role ur WHERE ur.user_id = $2 AND ur.role_id = r.id)`,
+				actor, userID, m); err != nil {
+				return false, fmt.Errorf("upsert membership: grant role %s: %w", m, err)
+			}
 			continue
 		}
 		revoke = append(revoke, m)
@@ -613,8 +662,17 @@ func syncDerivedAdminRole(ctx context.Context, tx querier, userID, adminRole str
 			return false, fmt.Errorf("upsert membership: revoke roles: %w", err)
 		}
 	}
-	return isAdmin, nil
+	return earned[adminRole], nil
 }
+
+// The two derived account-level admin role names. internal/service owns the
+// Salesforce-to-role mapping and the repository must not import it, so the
+// names are spelled here too — syncDerivedAdminRole has to know which of the
+// managed roles a partner membership supports and which a customer one does.
+const (
+	globalRoleCustomerAdmin = "customer_admin"
+	globalRolePartnerAdmin  = "partner_admin"
+)
 
 func upsertAccountContact(ctx context.Context, tx pgx.Tx, contactSfID, accountID, userName, actor string) (id string, created bool, err error) {
 	err = tx.QueryRow(ctx, `SELECT id FROM account_contact WHERE sf_id = $1 AND account_id = $2`, contactSfID, accountID).Scan(&id)
@@ -648,18 +706,26 @@ func upsertAccountContact(ctx context.Context, tx pgx.Tx, contactSfID, accountID
 	return id, false, nil
 }
 
-func upsertProjectContact(ctx context.Context, tx pgx.Tx, in domain.SalesforceMembershipUpsert, projectID, accountContactID, actor string) (id string, created bool, err error) {
-	err = tx.QueryRow(ctx, `SELECT id FROM project_contact WHERE sf_id = $1`, in.MembershipSfID).Scan(&id)
+// upsertProjectContact writes the membership row and reports the state it
+// held beforehand. previousState is empty when the row was created here; the
+// ingest's echo suppression reads it to tell "Salesforce moved this state"
+// apart from "this is our own portal write coming back".
+func upsertProjectContact(ctx context.Context, tx pgx.Tx, in domain.SalesforceMembershipUpsert, projectID, accountContactID, actor string) (id string, created bool, previousState string, err error) {
+	var prior *string
+	err = tx.QueryRow(ctx, `SELECT id, state::text FROM project_contact WHERE sf_id = $1`, in.MembershipSfID).Scan(&id, &prior)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return "", false, fmt.Errorf("upsert membership: resolve project_contact by sf_id: %w", err)
+		return "", false, "", fmt.Errorf("upsert membership: resolve project_contact by sf_id: %w", err)
 	}
 	if id == "" {
 		err = tx.QueryRow(ctx, `
-			SELECT id FROM project_contact WHERE project_id = $1 AND account_contact_id = $2
-			ORDER BY created_on LIMIT 1`, projectID, accountContactID).Scan(&id)
+			SELECT id, state::text FROM project_contact WHERE project_id = $1 AND account_contact_id = $2
+			ORDER BY created_on LIMIT 1`, projectID, accountContactID).Scan(&id, &prior)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return "", false, fmt.Errorf("upsert membership: resolve project_contact: %w", err)
+			return "", false, "", fmt.Errorf("upsert membership: resolve project_contact: %w", err)
 		}
+	}
+	if prior != nil {
+		previousState = *prior
 	}
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 	if id == "" {
@@ -669,9 +735,9 @@ func upsertProjectContact(ctx context.Context, tx pgx.Tx, in domain.SalesforceMe
 			VALUES (gen_random_uuid(), NOW(), NOW(), $1, $1, $2, $3::project_contact_state_enum, $4, $5, $6)
 			RETURNING id`, actor, email, in.State, accountContactID, projectID, in.MembershipSfID).Scan(&id)
 		if err != nil {
-			return "", false, fmt.Errorf("upsert membership: insert project_contact: %w", err)
+			return "", false, "", fmt.Errorf("upsert membership: insert project_contact: %w", err)
 		}
-		return id, true, nil
+		return id, true, "", nil
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE project_contact
@@ -679,9 +745,9 @@ func upsertProjectContact(ctx context.Context, tx pgx.Tx, in domain.SalesforceMe
 		    updated_on = NOW(), updated_by = $6
 		WHERE id = $1`,
 		id, email, in.State, accountContactID, in.MembershipSfID, actor); err != nil {
-		return "", false, fmt.Errorf("upsert membership: update project_contact: %w", err)
+		return "", false, "", fmt.Errorf("upsert membership: update project_contact: %w", err)
 	}
-	return id, false, nil
+	return id, false, previousState, nil
 }
 
 func syncProjectGroups(ctx context.Context, tx pgx.Tx, projectContactID string, groups []string, actor string) error {
