@@ -411,6 +411,18 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		projectOpportunityLinkHandler = handler.NewProjectOpportunityLinkHandler(service.NewServiceNowProjectOpportunityLinkService(serviceNowIntegrationServiceClient))
 	}
 
+	// snWritebackDispatcher is the single shared SNWritebackDispatcher for
+	// every DATA_SOURCE=postgres-servicenow-dual-write best-effort mirror
+	// write (see SNWritebackDispatcher's own doc comment) -- one dispatcher,
+	// one small worker pool, reused by every entity's mirror rather than each
+	// constructing its own. nil in every other mode. Originally constructed
+	// only inline for the case pilot further below; hoisted here once a
+	// second entity (project) needed the same instance.
+	var snWritebackDispatcher *service.SNWritebackDispatcher
+	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
+		snWritebackDispatcher = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
+	}
+
 	projectRepo := repository.NewProjectRepository(db)
 	pgProjectSvc := service.NewProjectService(projectRepo, accessSvc)
 	var activeProjectSvc service.ProjectService
@@ -430,10 +442,28 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	}
 	projectContactHandler := handler.NewProjectContactHandler(activeProjectContactSvc)
 
-	var projectUpdateHandler *handler.ProjectUpdateHandler
-	if cfg.DataSource == config.DataSourceServiceNow {
-		projectUpdateHandler = handler.NewProjectUpdateHandler(service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient))
+	// activeProjectUpdateSvc backs PATCH /projects/{id} on every data source
+	// -- see pgProjectUpdateService's own doc comment for exactly which
+	// fields the Postgres data sources accept (a subset of the ServiceNow
+	// contract; unsupported fields are rejected with a ValidationError, not
+	// silently dropped). DATA_SOURCE=postgres-servicenow-dual-write also
+	// mirrors a successful write to ServiceNow, asynchronously, via
+	// snWritebackDispatcher -- plain DATA_SOURCE=postgres never touches
+	// ServiceNow at all (snWritebackDispatcher is nil in that mode, so the
+	// nil-check inside NewProjectUpdateServiceWithSNWriteback's caller here
+	// never fires for it). projectRepo/pgProjectSvc were already constructed
+	// above for GetProject/SearchProjects.
+	var activeProjectUpdateSvc service.ProjectUpdateService
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
+		activeProjectUpdateSvc = service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient)
+	case config.DataSourcePostgresServiceNowDualWrite:
+		snProjectMirrorSvc := service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient)
+		activeProjectUpdateSvc = service.NewProjectUpdateServiceWithSNWriteback(projectRepo, userRepo, snWritebackDispatcher, snProjectMirrorSvc)
+	default:
+		activeProjectUpdateSvc = service.NewProjectUpdateService(projectRepo, userRepo)
 	}
+	projectUpdateHandler := handler.NewProjectUpdateHandler(activeProjectUpdateSvc)
 
 	// referenceDataRepo backs GET /projects/{id}/metadata and GET /metadata's
 	// Postgres-mode choice lists (project_type rows, enum labels) -- see
@@ -583,8 +613,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// and it is caseAttachmentOverrideSvc below, for case attachments
 		// specifically.
 		snCaseMirrorSvc := service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, nil, nil, snUserService, cfg.CustomerRoles)
-		caseWriteback := service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
-		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, caseWriteback, snCaseMirrorSvc)
+		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, snWritebackDispatcher, snCaseMirrorSvc)
 		// Case ATTACHMENTS are ServiceNow-only in this mode, permanently —
 		// unlike case metadata (CREATE/UPDATE above), not a pilot scope
 		// decision but a hard requirement: the sftpgo-backed Postgres
@@ -1032,9 +1061,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", projectMembershipHandler.DeactivateProjectContact)
 		mux.HandleFunc("POST /projects/{id}/contacts/{email}/resend-invitation", projectMembershipHandler.ResendProjectContactInvitation)
 	}
-	if projectUpdateHandler != nil {
-		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
-	}
+	mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	mux.HandleFunc("GET /projects/{id}/metadata", projectMetadataHandler.GetProjectMetadata)
 	mux.HandleFunc("GET /projects/{id}/cases/stats", projectCaseStatsHandler.GetProjectCaseStats)
 	mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectStats)
