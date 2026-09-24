@@ -74,6 +74,7 @@ import ChatSkeleton from "@features/support/components/novera-ai-assistant/nover
 import {
   displayTextFromConversationContent,
   getFinalMessageFromPayload,
+  isTokenLimitNoticeText,
   sanitizeStreamToken,
   splitTokenForTyping,
 } from "@features/support/utils/chat";
@@ -460,11 +461,15 @@ export default function NoveraChatPage(): JSX.Element {
         const next = [...prev];
         const answerId =
           typeof payload.messageId === "string" ? payload.messageId : undefined;
+        const finalText = finalMessage || msg.text;
         next[idx] = {
           ...msg,
           isLoading: false,
           isError: false,
-          text: finalMessage || msg.text,
+          text: finalText,
+          // Decided here, at arrival, rather than on every render of every
+          // bubble — see isTokenLimitNoticeText.
+          isTokenLimitNotice: isTokenLimitNoticeText(finalText),
           showCreateCaseAction: payload.actions != null,
           showFeedbackActions: !!answerId,
           feedbackMessageId: answerId,
@@ -517,7 +522,7 @@ export default function NoveraChatPage(): JSX.Element {
     return () => window.clearInterval(id);
   }, [dequeueOneTypedToken, flushPendingFinalIfReady, TYPING_INTERVAL_MS]);
 
-  const { connect, sendUserMessage, isConnected } = useChatWebSocket({
+  const { connect, sendUserMessage } = useChatWebSocket({
     onEvent: (event) => {
       switch (event.type) {
         case "conversation_created": {
@@ -649,19 +654,25 @@ export default function NoveraChatPage(): JSX.Element {
           }
           break;
         }
-        case "error":
+        case "error": {
           pendingFinalRef.current = null;
           tokenQueueRef.current = [];
+          const errorText = String(event.message ?? "Something went wrong");
           upsertActiveBotMessage((msg) => ({
             ...msg,
             isLoading: false,
             isError: true,
-            text: String(event.message ?? "Something went wrong"),
+            text: errorText,
+            // A limit can arrive as an error rather than a normal answer. The
+            // transport failures in onError/onClose deliberately do NOT set
+            // this — those are our own strings, not the agent's.
+            isTokenLimitNotice: isTokenLimitNoticeText(errorText),
             thinkingSteps: [],
             isStreaming: false,
           }));
           setIsSending(false);
           break;
+        }
         default:
           break;
       }
@@ -986,9 +997,13 @@ export default function NoveraChatPage(): JSX.Element {
               messages={messages}
               messagesEndRef={messagesEndRef}
               onCreateCase={handleCreateCase}
-              onThumbsUp={feedbackEnabled && isConnected ? handleThumbsUp : undefined}
-              onThumbsDown={feedbackEnabled && isConnected ? handleThumbsDown : undefined}
-            onFeedbackTag={isConnected ? handleFeedbackTag : undefined}
+              // Not gated on isConnected: submitFeedback connects on demand,
+              // exactly like the send and token-request paths. Gating here only
+              // hid working buttons on every resumed chat, where no socket is
+              // open until the user acts.
+              onThumbsUp={feedbackEnabled ? handleThumbsUp : undefined}
+              onThumbsDown={feedbackEnabled ? handleThumbsDown : undefined}
+              onFeedbackTag={handleFeedbackTag}
               onSolutionWorked={handleSolutionWorked}
               onRequestTokenIncrease={
                 tokenRequestEnabled
