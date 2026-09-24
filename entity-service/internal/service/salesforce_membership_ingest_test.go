@@ -373,6 +373,9 @@ func TestMembershipIngest_CreatedInvitedPublishesEvent(t *testing.T) {
 		!reflect.DeepEqual(payload.Roles, []string{"Portal user", "Security Contact", "Admin"}) || payload.IsIntegrationUser {
 		t.Errorf("payload = %+v", payload)
 	}
+	if ts, err := time.Parse(time.RFC3339Nano, payload.EventModifiedOn); err != nil || ts.IsZero() {
+		t.Errorf("payload.eventModifiedOn = %q, want the membership's Salesforce LastModifiedDate in RFC 3339", payload.EventModifiedOn)
+	}
 	if h.se.pcCalls[0] != testMembershipID || h.se.contactCalls[0] != testContactID {
 		t.Errorf("calls: pc=%v contact=%v", h.se.pcCalls, h.se.contactCalls)
 	}

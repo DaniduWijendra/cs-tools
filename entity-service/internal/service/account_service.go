@@ -99,20 +99,20 @@ func boolOrFalse(b *bool) bool {
 }
 
 // accountRowCommonFields maps the fields shared between the search view and
-// the account detail response. SupportTier, ArrToday, RenewalAccountManager,
-// CreTeam, and SreTeam are not available in the Postgres schema and are
-// always nil.
-func accountRowCommonFields(row repository.AccountRow) (classification string, technicalOwner, accountManager *domain.PersonRef) {
+// the account detail response. SupportTier, ArrToday, CreTeam, and SreTeam
+// are not available in the Postgres schema and are always nil.
+func accountRowCommonFields(row repository.AccountRow) (classification string, technicalOwner, accountManager, renewalAccountManager *domain.PersonRef) {
 	if row.Classification != nil {
 		classification = *row.Classification
 	}
 	technicalOwner = accountPersonRef(row.TechnicalOwnerID, row.TechnicalOwnerName, row.TechnicalOwnerEmail)
 	accountManager = accountPersonRef(row.AccountManagerID, row.AccountManagerName, row.AccountManagerEmail)
+	renewalAccountManager = accountPersonRef(row.RenewalAccountManagerID, row.RenewalAccountManagerName, row.RenewalAccountManagerEmail)
 	return
 }
 
 func accountRowToView(row repository.AccountRow) domain.AccountView {
-	classification, technicalOwner, accountManager := accountRowCommonFields(row)
+	classification, technicalOwner, accountManager, renewalAccountManager := accountRowCommonFields(row)
 	createdBy := row.CreatedBy
 
 	return domain.AccountView{
@@ -126,7 +126,7 @@ func accountRowToView(row repository.AccountRow) domain.AccountView {
 		ArrToday:              nil,
 		TechnicalOwner:        technicalOwner,
 		AccountManager:        accountManager,
-		RenewalAccountManager: nil,
+		RenewalAccountManager: renewalAccountManager,
 		CreTeam:               nil,
 		SreTeam:               nil,
 		ActivationDate:        dateOnlyOrNil(row.ActivationDate),
@@ -140,7 +140,7 @@ func accountRowToView(row repository.AccountRow) domain.AccountView {
 }
 
 func accountRowToDetail(row repository.AccountRow) domain.AccountDetail {
-	classification, technicalOwner, accountManager := accountRowCommonFields(row)
+	classification, technicalOwner, accountManager, renewalAccountManager := accountRowCommonFields(row)
 	createdBy := row.CreatedBy
 
 	return domain.AccountDetail{
@@ -154,7 +154,7 @@ func accountRowToDetail(row repository.AccountRow) domain.AccountDetail {
 		ArrToday:              nil,
 		TechnicalOwner:        technicalOwner,
 		AccountManager:        accountManager,
-		RenewalAccountManager: nil,
+		RenewalAccountManager: renewalAccountManager,
 		CreTeam:               nil,
 		SreTeam:               nil,
 		ActivationDate:        dateOnlyOrNil(row.ActivationDate),
