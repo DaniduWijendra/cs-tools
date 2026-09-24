@@ -76,7 +76,7 @@ func newIntegrationRepo(t *testing.T) (ProjectConsumptionRepository, *pgxpool.Po
 	// Rebuild the fixture rows from scratch so the tests are order-independent
 	// and rerunnable.
 	seed := []string{
-		`UPDATE project SET choreo_application_status = NULL, choreo_application_id = NULL, client_id = NULL, client_secret = NULL, primary_secret_key = NULL, secondary_secret_key = NULL, consumption_tracking_file_generated_on = NULL WHERE id = $1`,
+		`UPDATE project SET choreo_application_status = NULL, choreo_application_id = NULL, product_consumption_client_id = NULL, product_consumption_client_secret = NULL, product_consumption_primary_secret_key = NULL, product_consumption_secondary_secret_key = NULL, consumption_tracking_file_generated_on = NULL WHERE id = $1`,
 	}
 	for _, stmt := range seed {
 		if _, err := pool.Exec(ctx, stmt, testIntegrationProjectID); err != nil {
@@ -163,14 +163,14 @@ func TestIntegration_SecretsAreStoredAsSupplied(t *testing.T) {
 
 	var storedSecret, storedPrimary, storedSecondary string
 	if err := pool.QueryRow(ctx,
-		`SELECT client_secret, primary_secret_key, secondary_secret_key FROM project WHERE id = $1`,
+		`SELECT product_consumption_client_secret, product_consumption_primary_secret_key, product_consumption_secondary_secret_key FROM project WHERE id = $1`,
 		testIntegrationProjectID).Scan(&storedSecret, &storedPrimary, &storedSecondary); err != nil {
 		t.Fatalf("read column: %v", err)
 	}
 	for _, f := range []struct{ column, stored, supplied string }{
-		{"client_secret", storedSecret, secret},
-		{"primary_secret_key", storedPrimary, primaryKey},
-		{"secondary_secret_key", storedSecondary, secondaryKey},
+		{"product_consumption_client_secret", storedSecret, secret},
+		{"product_consumption_primary_secret_key", storedPrimary, primaryKey},
+		{"product_consumption_secondary_secret_key", storedSecondary, secondaryKey},
 	} {
 		if f.stored != f.supplied {
 			t.Fatalf("%s was not stored as supplied: got %q, want %q", f.column, f.stored, f.supplied)
@@ -212,7 +212,7 @@ func TestIntegration_SyncWrittenSecretsReadBack(t *testing.T) {
 		syncedSecret = "abc-DEF_ghi.jkl~mno"
 	)
 	if _, err := pool.Exec(ctx,
-		`UPDATE project SET client_secret = $2, primary_secret_key = $3, secondary_secret_key = $3 WHERE id = $1`,
+		`UPDATE project SET product_consumption_client_secret = $2, product_consumption_primary_secret_key = $3, product_consumption_secondary_secret_key = $3 WHERE id = $1`,
 		testIntegrationProjectID, syncedSecret, syncedKey); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestIntegration_EmptySecretColumnReadsAsAbsent(t *testing.T) {
 
 	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
 	if _, err := pool.Exec(ctx,
-		`UPDATE project SET client_secret = '' WHERE id = $1`, testIntegrationProjectID); err != nil {
+		`UPDATE project SET product_consumption_client_secret = '' WHERE id = $1`, testIntegrationProjectID); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -453,11 +453,11 @@ func TestIntegration_GetSigningContext(t *testing.T) {
 	// Set credentials on the test project
 	_, err := pool.Exec(context.Background(), `
 		UPDATE project
-		SET client_id = 'test-client-id',
-		    client_secret = 'test-client-secret',
-		    primary_secret_key = 'test-primary-key',
-		    secondary_secret_key = 'test-secondary-key',
-		    license_secrets = 'test-license-secrets'
+		SET product_consumption_client_id = 'test-client-id',
+		    product_consumption_client_secret = 'test-client-secret',
+		    product_consumption_primary_secret_key = 'test-primary-key',
+		    product_consumption_secondary_secret_key = 'test-secondary-key',
+		    product_consumption_license_secrets = 'test-license-secrets'
 		WHERE id = $1
 	`, testIntegrationProjectID)
 	if err != nil {

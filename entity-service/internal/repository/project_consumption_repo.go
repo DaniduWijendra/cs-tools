@@ -125,10 +125,10 @@ func (r *projectConsumptionRepo) Get(ctx context.Context, projectID string) (dom
 		       p.id,
 		       p.choreo_application_status,
 		       p.choreo_application_id,
-		       p.client_id,
-		       p.client_secret,
-		       p.primary_secret_key,
-		       p.secondary_secret_key,
+		       p.product_consumption_client_id,
+		       p.product_consumption_client_secret,
+		       p.product_consumption_primary_secret_key,
+		       p.product_consumption_secondary_secret_key,
 		       p.created_on,
 		       p.updated_on
 		FROM project p
@@ -207,10 +207,10 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 		UPDATE project
 		SET choreo_application_status = $2::choreo_application_status_enum,
 		    choreo_application_id = COALESCE($3, choreo_application_id),
-		    client_id = COALESCE($4, client_id),
-		    client_secret = COALESCE($5, client_secret),
-		    primary_secret_key = COALESCE($6, primary_secret_key),
-		    secondary_secret_key = COALESCE($7, secondary_secret_key),
+		    product_consumption_client_id = COALESCE($4, product_consumption_client_id),
+		    product_consumption_client_secret = COALESCE($5, product_consumption_client_secret),
+		    product_consumption_primary_secret_key = COALESCE($6, product_consumption_primary_secret_key),
+		    product_consumption_secondary_secret_key = COALESCE($7, product_consumption_secondary_secret_key),
 		    consumption_tracking_file_generated_on = CASE WHEN $2 = 'COMPLETED' THEN NOW() ELSE consumption_tracking_file_generated_on END,
 		    updated_on = NOW()
 		WHERE id = $1
@@ -221,7 +221,7 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 		      OR ($2 IN ('GENERATED_CREDENTIALS', 'COMPLETED') AND choreo_application_status = 'SUBSCRIBED_APPLICATION')
 		      OR ($2 = 'COMPLETED' AND choreo_application_status = 'GENERATED_CREDENTIALS')
 		  )
-		RETURNING id, choreo_application_status, choreo_application_id, client_id, created_on, updated_on`
+		RETURNING id, choreo_application_status, choreo_application_id, product_consumption_client_id, created_on, updated_on`
 
 	var (
 		outID     string
@@ -264,11 +264,11 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectID, deploymentID string) (*domain.SigningContext, error) {
 	const query = `
 		SELECT
-			COALESCE(p.client_id, ''),
-			COALESCE(p.client_secret, ''),
-			COALESCE(p.primary_secret_key, ''),
-			COALESCE(p.secondary_secret_key, ''),
-			COALESCE(p.license_secrets::text, ''),
+			COALESCE(p.product_consumption_client_id, ''),
+			COALESCE(p.product_consumption_client_secret, ''),
+			COALESCE(p.product_consumption_primary_secret_key, ''),
+			COALESCE(p.product_consumption_secondary_secret_key, ''),
+			COALESCE(p.product_consumption_license_secrets::text, ''),
 			p.key,
 			COALESCE(d.name, dp.name, '') AS deployment_name,
 			COALESCE(d.number, dp.number, '') AS deployment_number,

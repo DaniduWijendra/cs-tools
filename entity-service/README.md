@@ -201,7 +201,7 @@ Where a project has got to in the product-consumption provisioning flow — the 
 created for it, that application's OAuth2 credentials, and the two subscription secret keys a
 deployment's license is built from — is stored on the **`project` table**, mirroring the ServiceNow
 `customer_project` record field for field (`choreo_application_status`, `choreo_application_id`,
-`client_id`, `client_secret`, and `primary_secret_key`/`secondary_secret_key` from migration
+`product_consumption_client_id`, `product_consumption_client_secret`, and `product_consumption_primary_secret_key`/`product_consumption_secondary_secret_key` from migration
 `000075`). Exposed at `GET /projects/{id}/consumption` and `PATCH /projects/{id}/consumption`.
 
 These two routes are gated on a database being configured, **not** on the data source: the flow
