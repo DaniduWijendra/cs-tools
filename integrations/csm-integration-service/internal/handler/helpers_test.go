@@ -270,6 +270,19 @@ func (m *mockEntityIncidentClient) SearchIncidents(ctx context.Context, body []b
 	return []byte(`{}`), nil
 }
 
+// ----- mock entity IT-service client -----
+
+type mockEntityITServiceClient struct {
+	searchITServicesFn func(ctx context.Context, body []byte) ([]byte, error)
+}
+
+func (m *mockEntityITServiceClient) SearchITServices(ctx context.Context, body []byte) ([]byte, error) {
+	if m.searchITServicesFn != nil {
+		return m.searchITServicesFn(ctx, body)
+	}
+	return []byte(`{}`), nil
+}
+
 // ----- mock entity alert-incident-mapping client -----
 
 type mockEntityAlertIncidentMappingClient struct {

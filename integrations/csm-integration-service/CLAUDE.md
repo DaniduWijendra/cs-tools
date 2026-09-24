@@ -67,6 +67,18 @@ either endpoint as a possible, retryable outcome (see
 `internal/csmclient/incidents.go`'s doc comment in `sre-alert-ingestion-service`
 for the caller-side reasoning), not as proof the endpoint is permanently broken.
 
+**`POST /services/search` (`SearchITServices`) uses this exact same
+M2M-fallback mechanism** — it proxies a ServiceNow-backed entity-service CMDB
+IT-service search operation, confirmed to go through the identical code path
+as `CreateIncident`/`SearchIncidents` above. It works over M2M the same way
+those two now do: a 401 is possible if the target environment's M2M
+ServiceNow credential isn't configured, but that is not unconditional. This
+endpoint backs `sre-alert-ingestion-service`'s live service-UUID resolution
+fallback (see that service's own CLAUDE.md) — a static label-to-UUID map is
+consulted first, synchronously, before an alert is ever buffered; this
+endpoint is only called, at delivery-attempt time, for a label the static map
+doesn't cover.
+
 The "deferred pending a captured end-user token" history below (from the owning
 team's internal issue, written by the engineer who built the ACP path) describes
 `UpdateProject`'s situation specifically — that endpoint's ServiceNow operation

@@ -920,6 +920,70 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /services/search:
+    post:
+      summary: Search CMDB IT services.
+      description: >
+        ServiceNow-backed, same M2M-fallback mechanism as POST /incidents and
+        POST /incidents/search above (confirmed to use the identical code
+        path). This service is strictly M2M with no mechanism to forward an
+        end-user identity token, but the entity-service operation falls back
+        to a separately-configured M2M ServiceNow credential when no
+        end-user token is present, and only returns 401 if that fallback
+        credential is itself unconfigured in the target environment. A 401
+        is therefore a possible response, not a guaranteed one.
+      operationId: searchITServices
+      requestBody:
+        description: Service search payload.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchITServicesRequest'
+      responses:
+        "200":
+          description: Services matching the search query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchITServicesResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /alert-incident-mappings:
     post:
       summary: Create an alert-incident mapping.
@@ -1806,6 +1870,56 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SearchIncidentView'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    SearchITServicesRequest:
+      type: object
+      properties:
+        filters:
+          type: object
+          properties:
+            searchQuery:
+              type: string
+              description: Free-text search query, matched against the CMDB service's name.
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    ITService:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        class:
+          type: string
+        businessCriticality:
+          type: string
+          enum:
+            - most_critical
+            - somewhat_critical
+            - less_critical
+            - not_critical
+        serviceClassification:
+          type: string
+          enum:
+            - business_service
+            - technology_management_service
+            - application_service
+
+    SearchITServicesResponse:
+      type: object
+      properties:
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ITService'
         total:
           type: integer
         limit:

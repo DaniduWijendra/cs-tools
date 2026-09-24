@@ -201,3 +201,18 @@ func (c *Client) CreateAlertIncidentMapping(ctx context.Context, body []byte) ([
 func (c *Client) LookupAlertIncidentMappings(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/alert-incident-mappings/lookup", body)
 }
+
+// SearchITServices calls POST /services/search on the entity service. This
+// targets a ServiceNow-backed operation with the same M2M-fallback
+// mechanism as CreateIncident/SearchIncidents above: when no end-user
+// identity token is forwarded, it uses a separately-configured M2M
+// ServiceNow credential instead of erroring, and only 401s if that fallback
+// credential is itself unconfigured in the target environment. This service
+// carries no forwarded end-user identity by design (see this file's own
+// CreateIncident doc comment), so whether this 401s depends on the target
+// environment's M2M credential configuration, not on this service's M2M-only
+// design per se. Response is returned as raw JSON; typed response structs
+// are deferred.
+func (c *Client) SearchITServices(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/services/search", body)
+}
