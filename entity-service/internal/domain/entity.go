@@ -1187,6 +1187,8 @@ type Invoice struct {
 	Opportunity *EntityRef `json:"opportunity"`
 	// Classification is a short code (e.g. "CL"), nil when not set.
 	Classification *string `json:"classification"`
+	// SfID is the Salesforce record id for this invoice, nil when not linked.
+	SfID *string `json:"sfId"`
 }
 
 // SearchInvoicesRequest is the input for searching invoices (ServiceNow data source only).
@@ -4334,6 +4336,7 @@ type ITService struct {
 	Class                 *string                `json:"class"`
 	BusinessCriticality   *BusinessCriticality   `json:"businessCriticality"`
 	ServiceClassification *ServiceClassification `json:"serviceClassification"`
+	SupportGroup          *EntityRef             `json:"supportGroup"`
 }
 
 // ConfigurationItem is a single CMDB configuration item returned in a search response.
