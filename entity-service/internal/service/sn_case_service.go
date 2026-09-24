@@ -1194,17 +1194,44 @@ func (s *snCaseService) resolveCommentAuthor(ctx context.Context, caseID, commen
 // resolveCommentAuthorName's own doc comment for when that happens.
 //
 // Runs synchronously, bounded by publishCommentAddedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishCommentAddedEvent — see that function's own doc
+// comment for why. Author resolution stays here (not in the shared
+// function) since it's genuinely data-source-specific: ServiceNow's create
+// -comment response carries only a raw, unresolved CreatedBy string, so
+// resolveCommentAuthor re-fetches via SearchCaseComments; the Postgres data
+// source already has the resolved actor in hand at the CreateCaseComment
+// call site (see caseService.CreateCaseComment) and needs no re-fetch at
+// all.
 func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.CreateCaseCommentRequest, commentID string) {
 	if s.publisher == nil {
+		return
+	}
+	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
+	if author == nil || author.Name == "" {
+		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, could not resolve comment author's display name", "caseId", req.CaseID)
+		return
+	}
+	publishCommentAddedEvent(ctx, s.publisher, s.GetCaseByID, req, commentID, author.Name)
+}
+
+// publishCommentAddedEvent is publishCommentAdded's actual body, factored
+// out to a package-level function so caseService.CreateCaseComment can call
+// it too — same "follow the write, not DATA_SOURCE" reasoning as
+// publishCaseCreatedEvent's own doc comment. authorName is the comment
+// author's already-resolved display name — see publishCommentAdded's own
+// doc comment for why resolving it stays with each caller rather than
+// living here.
+func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, getCaseByID func(context.Context, string) (domain.CaseView, error), req domain.CreateCaseCommentRequest, commentID, authorName string) {
+	if publisher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishCommentAddedTimeout)
 	defer cancel()
 
-	cv, err := s.GetCaseByID(ctx, req.CaseID)
+	cv, err := getCaseByID(ctx, req.CaseID)
 	if err != nil {
-		slog.ErrorContext(ctx, "sn create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
+		slog.ErrorContext(ctx, "create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
 		return
 	}
 
@@ -1213,18 +1240,12 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		recipients = filterWso2Emails(recipients)
 	}
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, case has no watchers to email", "caseId", req.CaseID)
-		return
-	}
-
-	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
-	if author == nil || author.Name == "" {
-		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, could not resolve comment author's display name", "caseId", req.CaseID)
+		slog.InfoContext(ctx, "create comment: case.comment_added not published, case has no watchers to email", "caseId", req.CaseID)
 		return
 	}
 
 	payload, err := json.Marshal(events.CommentAddedPayload{
-		Name:           author.Name,
+		Name:           authorName,
 		ProjectID:      cv.ProjectDetails.ID,
 		CaseID:         req.CaseID,
 		CaseNumber:     cv.Number,
@@ -1236,13 +1257,13 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		Recipients:     recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn create comment: encode case.comment_added payload failed", "caseId", req.CaseID, "error", err)
+		slog.ErrorContext(ctx, "create comment: encode case.comment_added payload failed", "caseId", req.CaseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeCommentAdded, req.CaseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn create comment: publish case.comment_added failed", "caseId", req.CaseID)
+	if err := publisher.Publish(ctx, events.TypeCommentAdded, req.CaseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "create comment: publish case.comment_added failed", "caseId", req.CaseID)
 	}
 }
 
@@ -1361,9 +1382,52 @@ func (s *snCaseService) applyCustomerReplyStateTransition(ctx context.Context, r
 // publishing.
 //
 // Runs synchronously, bounded by publishStatusChangedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishStatusChangedEvent — see that function's own doc
+// comment for why.
 func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newStatus string, before domain.CaseView) {
-	if s.publisher == nil || newStatus == "" {
+	publishStatusChangedEvent(ctx, s.publisher, caseID, newStatus, before)
+}
+
+// caseStateDisplayLabel maps domain.CaseState to ServiceNow's own display
+// label for that state — the exact inverse of snCaseLikeStateLabels' own
+// lowercase-label-to-enum direction (case_state_enum's REOPENED quirk
+// aside, which has no bearing here: this only needs the forward, always
+// -unambiguous direction). Used by publishStatusChangedEvent so
+// caseService.UpdateCase's own case.status_changed notifications read
+// identically to snCaseService's — a consumer must not be able to tell
+// which data source produced a given notification from its wording alone
+// (see publishCaseCreatedEvent's own doc comment for the same "shouldn't
+// depend on DATA_SOURCE" principle).
+var caseStateDisplayLabel = map[domain.CaseState]string{
+	domain.CaseStateOpen:             "Open",
+	domain.CaseStateWorkInProgress:   "Work In Progress",
+	domain.CaseStateWaitingOnWSO2:    "Waiting on WSO2",
+	domain.CaseStateAwaitingInfo:     "Awaiting Info",
+	domain.CaseStateReopened:         "Reopened",
+	domain.CaseStateSolutionProposed: "Solution Proposed",
+	domain.CaseStateClosed:           "Closed",
+}
+
+// publishStatusChangedEvent is publishStatusChanged's actual body, factored
+// out to a package-level function so caseService.UpdateCase
+// (DATA_SOURCE=postgres-servicenow-dual-write, and any future data source
+// that writes state through the same repository) can call it too, the same
+// reasoning publishCaseCreatedEvent's own doc comment gives: event
+// publishing should follow "did Postgres actually record this change",
+// never a DATA_SOURCE check, so a future data-source change doesn't
+// silently stop notifications from firing. newStatus is a display label —
+// ServiceNow's own raw state label for snCaseService's callers (e.g. "Work
+// In Progress"), or caseStateDisplayLabel's lookup for caseService's own
+// domain.CaseState value — never a bare enum/domain string, so
+// csm-notification-service's rendered "Status changed to <newStatus>"
+// reads the same regardless of which data source produced it. before is
+// the case as fetched immediately before the update was applied — the
+// caller has already used it (or the equivalent pre-update value) to
+// confirm the state is actually transitioning, not a caller re-PATCHing
+// the current value.
+func publishStatusChangedEvent(ctx context.Context, publisher EventPublisherService, caseID, newStatus string, before domain.CaseView) {
+	if publisher == nil || newStatus == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishStatusChangedTimeout)
@@ -1371,7 +1435,7 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 
 	recipients := watchListUserEmails(before.WatchList)
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn update case: case.status_changed not published, case has no watchers to email", "caseId", caseID)
+		slog.InfoContext(ctx, "update case: case.status_changed not published, case has no watchers to email", "caseId", caseID)
 		return
 	}
 
@@ -1385,13 +1449,13 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 		Recipients: recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn update case: encode case.status_changed payload failed", "caseId", caseID, "error", err)
+		slog.ErrorContext(ctx, "update case: encode case.status_changed payload failed", "caseId", caseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeStatusChanged, caseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn update case: publish case.status_changed failed", "caseId", caseID)
+	if err := publisher.Publish(ctx, events.TypeStatusChanged, caseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "update case: publish case.status_changed failed", "caseId", caseID)
 	}
 }
 
@@ -1420,9 +1484,22 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 // notify by design).
 //
 // Runs synchronously, bounded by publishSeverityChangedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishSeverityChangedEvent — see that function's own doc
+// comment for why.
 func (s *snCaseService) publishSeverityChanged(ctx context.Context, caseID, oldSeverity, newSeverity string, before domain.CaseView) {
-	if s.publisher == nil || newSeverity == "" {
+	publishSeverityChangedEvent(ctx, s.publisher, caseID, oldSeverity, newSeverity, before)
+}
+
+// publishSeverityChangedEvent is publishSeverityChanged's actual body,
+// factored out to a package-level function so caseService.UpdateCase can
+// call it too — same "follow the write, not DATA_SOURCE" reasoning as
+// publishStatusChangedEvent's own doc comment. oldSeverity/newSeverity are
+// plain severity strings (either case; upper-cased here) — the caller has
+// already confirmed they actually differ, not a caller re-PATCHing the
+// case's current severity.
+func publishSeverityChangedEvent(ctx context.Context, publisher EventPublisherService, caseID, oldSeverity, newSeverity string, before domain.CaseView) {
+	if publisher == nil || newSeverity == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishSeverityChangedTimeout)
@@ -1430,7 +1507,7 @@ func (s *snCaseService) publishSeverityChanged(ctx context.Context, caseID, oldS
 
 	recipients := watchListUserEmails(before.WatchList)
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn update case: case.severity_changed not published, case has no watchers to email", "caseId", caseID)
+		slog.InfoContext(ctx, "update case: case.severity_changed not published, case has no watchers to email", "caseId", caseID)
 		return
 	}
 
@@ -1447,13 +1524,13 @@ func (s *snCaseService) publishSeverityChanged(ctx context.Context, caseID, oldS
 		Recipients:  recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn update case: encode case.severity_changed payload failed", "caseId", caseID, "error", err)
+		slog.ErrorContext(ctx, "update case: encode case.severity_changed payload failed", "caseId", caseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeSeverityChanged, caseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn update case: publish case.severity_changed failed", "caseId", caseID)
+	if err := publisher.Publish(ctx, events.TypeSeverityChanged, caseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "update case: publish case.severity_changed failed", "caseId", caseID)
 	}
 }
 
