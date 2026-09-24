@@ -517,16 +517,16 @@ export default function CsmCaseDetailPage(): JSX.Element {
   // adds a comment or the case's status changes, so this tab doesn't rely
   // solely on their own staleTime/a manual refresh to catch up.
   useCaseActivityStream(caseId);
-  // Case Feedback (CSAT survey) submissions for this case, if any — almost
-  // always empty for an open case (the survey goes out after closure), which
-  // is expected and renders no feedback lane rather than an error.
+  // Case Feedback (CSAT survey) submissions for this case, if any — the
+  // survey only exists once a case is closed, so the query itself is
+  // disabled until then rather than firing early for an open case.
   const {
     data: caseFeedback,
     isLoading: isFeedbackLoading,
     isError: isFeedbackError,
     refetch: refetchFeedback,
     isFetching: isFetchingFeedback,
-  } = useGetCsmCaseFeedback(caseId);
+  } = useGetCsmCaseFeedback(caseId, data?.state === "closed");
   // The chat transcript the case was spawned from, when linked. Loaded lazily
   // off the case's conversation id and merged into the comment stream below so
   // it renders as the earliest activity entries — mirrors the customer portal.
