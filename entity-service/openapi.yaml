@@ -27,7 +27,7 @@ paths:
         POST /customer-search (isRealTime true), not GraphQL
         sales/entity-graphql-service, and upserts the csm-platform account table.
         Entity Project_Contact__c (also accepted as Project_Contact), only when
-        SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
+        CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true: CREATED/UPDATED/RESTORED fetch
         the membership and its Contact (POST /project-contacts/search,
         POST /contacts/search) and upsert user, user_role, account_contact,
         project_contact and project_contact_group in one transaction, record the
@@ -1473,6 +1473,56 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /users/me/memberships/register:
+    post:
+      summary: Mark the caller's still-invited memberships as registered.
+      description: >
+        Postgres-only, and registered only when CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED
+        is "true" (404 otherwise). Called by the Customer Portal on every profile
+        load for the user identified by the x-user-id-token header. For each of
+        that user's project memberships still in state INVITED or RE-INVITED, it
+        clears the Salesforce Contact's lockout flag and then sets the membership
+        state to REGISTERED, re-ingesting each membership so Postgres matches, and
+        records a REGISTRATION onboarding step per membership. A caller with no
+        such membership - almost every call - does nothing at all. One membership
+        failing does not stop the others; an error is reported only when every
+        membership failed. No request body, and no response body.
+      operationId: recordUserMembershipRegistration
+      responses:
+        "204":
+          description: Invited memberships registered, or the caller had none. No content.
+        "400":
+          description: Bad request - x-user-id-token could not be decoded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized - x-user-id-token header is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: >
+            Not found - a membership or contact no longer exists in Salesforce.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Service unavailable - sales-entity-service is unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /users/me/saved-filter-views:
     get:
       summary: List the caller's saved filter views for one CSM list.
@@ -2244,174 +2294,29 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /projects/{id}/consumption:
-    get:
-      summary: Get a project's product-consumption provisioning state.
-      description: >
-        Reads the Postgres mirror of the provisioning state, so this route is
-        registered wherever a database pool is configured. This is independent
-        of DATA_SOURCE: a configured pool enables it on the ServiceNow data
-        source too, which is what staging and production run.
-
-        ServiceNow remains the source of truth for the status itself. There it
-        lives on the customer_project record and is reached through the
-        product-consumption scripted REST API, which the Choreo subscription
-        operation calls directly.
-
-        Scoped to the caller: a project the caller may not see is reported as
-        not found.
-
-        A project that has never entered the provisioning flow reports status 1
-        (pending) rather than 404 — "not provisioned yet" is the first step of
-        the state machine, not an absent resource.
-
-        No secret value is ever returned. The consumer secret and the two
-        subscription secret keys are reported only as the booleans
-        hasConsumerSecret and hasSecretKeys.
-      operationId: getProjectConsumption
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: The project's provisioning state.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProjectConsumptionView'
-        "400":
-          description: Bad request.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "403":
-          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Project not found, or it exists but is outside the caller's access scope.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-    patch:
-      summary: Record the completion of one product-consumption provisioning step.
-      description: >
-        Writes the Postgres mirror, so it carries the same registration
-        requirements and caller scoping as the GET on this path.
-
-        The status may only move forward. The flow is resumable: a caller reads
-        the current status and runs only the steps above it, so an out-of-order
-        write is either a stale retry or a bug, and applying it would re-run a
-        side-effecting step — creating a second Choreo application for a
-        customer who already has one. A status that is not ahead of what is
-        stored is therefore a no-op that returns the stored state with an
-        explanatory message, not an error, so a retrying caller converges.
-
-        Each step's own artefacts are required when recording it: applicationId
-        at status 2, consumerKey and consumerSecret at status 4, and
-        primarySecretKey and secondarySecretKey at status 5. Status 3 produces
-        nothing to store. Fields that are not supplied are left as stored, so
-        recording a later step never clears an earlier one's output.
-      operationId: updateProjectConsumption
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateProjectConsumptionRequest'
-      responses:
-        "200":
-          description: The provisioning state after the update.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UpdateProjectConsumptionResponse'
-        "400":
-          description: Bad request.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "403":
-          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Project not found, or it exists but is outside the caller's access scope.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /projects/{id}/deployments/{deploymentId}/license:
+  /projects/{id}/contacts:
     post:
-      summary: Provision product consumption tracking and download a deployment license.
+      summary: Invite a contact to a project.
       description: >
-        Executes the 5-step resumable provisioning sequence (application creation,
-        subscription, credential generation, secret key generation) and issues a
-        signed deployment license.
+        Adds a contact to the project: state INVITED (RE-INVITED when a previously
+        deactivated membership is being brought back) in both the CSM database and
+        Salesforce, and publishes project_contact.invited so the invitation e-mail is
+        sent. The database transaction and the Salesforce write succeed together or
+        neither is applied and this call returns an error; the database commits last,
+        because it is the only participant that can be rolled back.
 
-        Registered whenever the Choreo subscription operation is configured. It
-        needs no database and no DATA_SOURCE setting: status is read from
-        ServiceNow through that operation, and Postgres is touched only to
-        mirror what the sequence did, which is best-effort and skipped entirely
-        where no mirror is configured.
 
-        Scoped to the caller: a project the caller may not see is reported as
-        not found.
-      operationId: getDeploymentLicense
+        Postgres data source only, and registered only when
+        CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true" — the path 404s otherwise.
+        Internal callers only (AUTH_INTERNAL_CLIENT_IDS); a portal end user is 403. The
+        calling portal backend decides who may invite whom.
+      operationId: inviteProjectContact
+      tags: [Projects]
       parameters:
         - name: id
           in: path
           required: true
-          schema:
-            type: string
-            format: uuid
-        - name: deploymentId
-          in: path
-          required: true
+          description: The CSM project id.
           schema:
             type: string
             format: uuid
@@ -2420,40 +2325,125 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/DeploymentLicenseRequest'
+              $ref: '#/components/schemas/CreateProjectMembershipRequest'
       responses:
-        "200":
-          description: The signed deployment license.
+        '201':
+          description: The membership that was created.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeploymentLicense'
-        "400":
-          description: Bad request.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+                $ref: '#/components/schemas/ProjectMembership'
+        '400':
+          description: Bad request — a missing or malformed e-mail address, or a role Salesforce does not accept.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        "403":
-          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+        '403':
+          description: The caller is not an allow-listed internal service.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: The deployment was not found, or the project does not exist or is outside the caller's access scope.
+        '404':
+          description: Project not found, or the project has no Salesforce account to add a contact to.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        "500":
+        '409':
+          description: The address is already an active contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
           description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /projects/{id}/contacts/{contactId}/resend-invitation:
+    post:
+      summary: Re-send a contact's invitation e-mail.
+      description: >
+        Re-publishes project_contact.invited with a resend marker so
+        csm-notification-service bypasses its own already-sent guard. Writes nothing —
+        neither the database nor Salesforce is touched. Valid only while an invitation
+        is outstanding — state INVITED or RE-INVITED — and rate-limited to one send per
+        membership every five minutes, measured from the EMAIL step's updatedOn in the
+        onboarding ledger.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id — the
+        same key the invite and role-change operations use. Postgres data source only,
+        registered only when CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true".
+        Internal callers only.
+      operationId: resendProjectContactInvitation
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      responses:
+        '204':
+          description: The invitation was queued for re-sending.
+        '400':
+          description: Bad request — a malformed project id or e-mail address.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Contact not found on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The membership is neither INVITED nor RE-INVITED, so there is no outstanding invitation to re-send.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: An invitation was sent for this membership within the last five minutes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Invitation e-mails are not configured, or the event could not be queued.
           content:
             application/json:
               schema:
@@ -2508,6 +2498,146 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+    patch:
+      summary: Replace a contact's roles on a project.
+      description: >
+        Replaces the membership's Salesforce roles, and with them its project groups.
+        The membership's state is untouched. An empty roles list is accepted and means
+        "no roles" — it removes every project group rather than leaving the current set
+        alone. The database transaction and the Salesforce write succeed together or
+        neither is applied; the database commits last.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id —
+        the key a membership is addressed by, unlike the GET on this same path, which
+        takes the contact's platform user id. Postgres data source only, registered
+        only when CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true". Internal
+        callers only.
+      operationId: updateProjectContactRoles
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectMembershipRolesRequest'
+      responses:
+        '200':
+          description: The membership, with its new roles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectMembership'
+        '400':
+          description: Bad request — a malformed e-mail address, or a role Salesforce does not accept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Project not found, or the contact is not a contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Deactivate a contact on a project.
+      description: >
+        Moves the membership to state DEACTIVATED in both the CSM database and
+        Salesforce. It never deletes: DEACTIVATED is a real value of both the Salesforce
+        State__c picklist and project_contact_state_enum, and deactivating is what the
+        portal does today. The contact's roles are left as they are — the derived
+        account-level admin role ignores deactivated memberships, so an admin losing
+        their last active project loses the account-level role without anything being
+        erased.
+
+
+        Here contactId is the contact's E-MAIL ADDRESS (URL-encoded), not a user id.
+        Postgres data source only, registered only when
+        CSM_MIGRATION_PORTAL_WRITES_ENABLED is exactly "true". Internal callers only.
+      operationId: deactivateProjectContact
+      tags: [Projects]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The CSM project id.
+          schema:
+            type: string
+            format: uuid
+        - name: contactId
+          in: path
+          required: true
+          description: The contact's e-mail address, URL-encoded.
+          schema:
+            type: string
+            format: email
+      responses:
+        '204':
+          description: The membership is deactivated in both systems.
+        '400':
+          description: Bad request — a malformed project id or e-mail address.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The caller is not an allow-listed internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Project not found, or the contact is not a contact on this project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Salesforce is unavailable, or the change could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /projects/{id}/contacts/search:
     post:
       summary: Search contacts for a project.
@@ -7735,6 +7865,219 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /projects/{id}/consumption:
+    get:
+      summary: Get a project's product-consumption provisioning state.
+      description: >
+        Reads the Postgres mirror of the provisioning state, so this route is
+        registered wherever a database pool is configured. This is independent
+        of DATA_SOURCE: a configured pool enables it on the ServiceNow data
+        source too, which is what staging and production run.
+
+        ServiceNow remains the source of truth for the status itself. There it
+        lives on the customer_project record and is reached through the
+        product-consumption scripted REST API, which the Choreo subscription
+        operation calls directly.
+
+        Scoped to the caller: a project the caller may not see is reported as
+        not found.
+
+        A project that has never entered the provisioning flow reports status 1
+        (pending) rather than 404 — "not provisioned yet" is the first step of
+        the state machine, not an absent resource.
+
+        No secret value is ever returned. The consumer secret and the two
+        subscription secret keys are reported only as the booleans
+        hasConsumerSecret and hasSecretKeys.
+      operationId: getProjectConsumption
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The project's provisioning state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectConsumptionView'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Project not found, or it exists but is outside the caller's access scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      summary: Record the completion of one product-consumption provisioning step.
+      description: >
+        Writes the Postgres mirror, so it carries the same registration
+        requirements and caller scoping as the GET on this path.
+
+        The status may only move forward. The flow is resumable: a caller reads
+        the current status and runs only the steps above it, so an out-of-order
+        write is either a stale retry or a bug, and applying it would re-run a
+        side-effecting step — creating a second Choreo application for a
+        customer who already has one. A status that is not ahead of what is
+        stored is therefore a no-op that returns the stored state with an
+        explanatory message, not an error, so a retrying caller converges.
+
+        Each step's own artefacts are required when recording it: applicationId
+        at status 2, consumerKey and consumerSecret at status 4, and
+        primarySecretKey and secondarySecretKey at status 5. Status 3 produces
+        nothing to store. Fields that are not supplied are left as stored, so
+        recording a later step never clears an earlier one's output.
+      operationId: updateProjectConsumption
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectConsumptionRequest'
+      responses:
+        "200":
+          description: The provisioning state after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateProjectConsumptionResponse'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Project not found, or it exists but is outside the caller's access scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /projects/{id}/deployments/{deploymentId}/license:
+    post:
+      summary: Provision product consumption tracking and download a deployment license.
+      description: >
+        Executes the 5-step resumable provisioning sequence (application creation,
+        subscription, credential generation, secret key generation) and issues a
+        signed deployment license.
+
+        Registered whenever the Choreo subscription operation is configured. It
+        needs no database and no DATA_SOURCE setting: status is read from
+        ServiceNow through that operation, and Postgres is touched only to
+        mirror what the sequence did, which is best-effort and skipped entirely
+        where no mirror is configured.
+
+        Scoped to the caller: a project the caller may not see is reported as
+        not found.
+      operationId: getDeploymentLicense
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: deploymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentLicenseRequest'
+      responses:
+        "200":
+          description: The signed deployment license.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentLicense'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: A token is invalid or expired, or neither a user token nor an authorized internal client credential was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller's x-user-id-token resolves to a real but insufficient user (inactive, unknown to this data source, or not a customer/internal person).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: The deployment was not found, or the project does not exist or is outside the caller's access scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
   securitySchemes:
@@ -8891,170 +9234,6 @@ components:
         hasMore:
           type: boolean
 
-    ProjectConsumptionView:
-      type: object
-      description: >
-        A project's product-consumption provisioning state. Carries no secret
-        material — see hasConsumerSecret and hasSecretKeys.
-      properties:
-        projectId:
-          type: string
-          format: uuid
-        status:
-          type: integer
-          format: int32
-          minimum: 1
-          maximum: 5
-          description: >
-            The provisioning step reached: 1 pending, 2 application created,
-            3 subscribed, 4 credentials generated, 5 secret keys generated.
-            A license can only be issued at 5.
-        applicationId:
-          type: string
-          nullable: true
-          description: The Choreo application created for this project.
-        consumerKey:
-          type: string
-          nullable: true
-          description: >
-            The application's OAuth2 client ID. Not a secret — its matching
-            secret is never returned.
-        name:
-          type: string
-          description: The name to give the project's Choreo application.
-        description:
-          type: string
-          description: The description to give the project's Choreo application.
-        hasConsumerSecret:
-          type: boolean
-          description: Whether a consumer secret is stored, not its value.
-        hasSecretKeys:
-          type: boolean
-          description: Whether both subscription secret keys are stored, not their values.
-        updatedOn:
-          type: string
-          format: date-time
-      required:
-        - projectId
-        - status
-        - name
-        - description
-        - hasConsumerSecret
-        - hasSecretKeys
-        - updatedOn
-
-    UpdateProjectConsumptionRequest:
-      type: object
-      additionalProperties: false
-      description: >
-        Records the completion of one provisioning step. Which of the optional
-        fields are required depends on status — see the endpoint description.
-      properties:
-        status:
-          type: integer
-          format: int32
-          minimum: 1
-          maximum: 5
-        applicationId:
-          type: string
-          description: Required when status is 2.
-        consumerKey:
-          type: string
-          description: Required when status is 4.
-        consumerSecret:
-          type: string
-          description: Required when status is 4. Stored as supplied; never returned.
-        primarySecretKey:
-          type: string
-          description: Required when status is 5. Stored as supplied; never returned.
-        secondarySecretKey:
-          type: string
-          description: Required when status is 5. Stored as supplied; never returned.
-      required:
-        - status
-
-    UpdateProjectConsumptionResponse:
-      type: object
-      properties:
-        message:
-          type: string
-          description: >
-            Describes what happened — in particular, distinguishes an applied
-            update from a no-op where the stored status was already at or beyond
-            the requested one.
-        result:
-          $ref: '#/components/schemas/ProjectConsumptionView'
-      required:
-        - message
-        - result
-
-    DeploymentLicenseRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        email:
-          type: string
-          format: email
-          description: >
-            The address the licence is issued to. Enforced at runtime, not only
-            documented: a value that is not a well-formed address is a 400
-            before the licensing service is called.
-      required:
-        - email
-
-    DeploymentLicense:
-      type: object
-      properties:
-        subscriptionData:
-          $ref: '#/components/schemas/DeploymentLicenseSubscriptionData'
-        signature:
-          type: string
-      required:
-        - subscriptionData
-        - signature
-
-    DeploymentLicenseSubscriptionData:
-      type: object
-      description: >
-        The signed subscription data, passed through from ServiceNow byte for
-        byte. ServiceNow computes an HMAC over the canonicalised form of this
-        object — every key sorted, key and value concatenated — and the
-        customer's product recomputes that string to verify the signature, so
-        this service never reshapes, reorders or drops any part of it.
-
-        The properties below are the ones callers can rely on; the object is
-        deliberately open, because ServiceNow signs whatever it sends and a
-        field this spec has not caught up with must still reach the customer.
-      additionalProperties: true
-      properties:
-        deploymentId:
-          type: string
-        deploymentName:
-          type: string
-        subscriptionKey:
-          type: string
-        clientId:
-          type: string
-        clientSecret:
-          type: string
-        secrets:
-          type: string
-          description: >
-            The shuffled subscription secrets. A flat hex string, not an
-            object — 12 positions of 4 four-character sub-chunks.
-        usageDataPublishingUrl:
-          type: string
-          description: >
-            Where the customer's product publishes its usage data. Signed, and
-            required for the product to function.
-      required:
-        - deploymentId
-        - deploymentName
-        - subscriptionKey
-        - clientId
-        - clientSecret
-        - secrets
-
     ProjectUpdateRequest:
       type: object
       minProperties: 1
@@ -9167,6 +9346,22 @@ components:
           type: array
           items:
             type: string
+          description: The contact's roles on THIS project.
+        accountRoles:
+          type: array
+          items:
+            type: string
+          description: >
+            The contact's account-level roles, a SEPARATE list from `roles` and never merged
+            into it: `roles` is what they may do on this project, `accountRoles` what they are
+            across the account. Only the five roles the membership write owns appear here —
+            external, customer/partner, and the derived customer_admin/partner_admin — so an
+            internal role a staff account happens to hold never leaks into a customer-facing
+            contact list. The admin entry is the point: admin is stored per project, and a
+            person is an account admin when any of their memberships carries the project ADMIN
+            role, so both portals can render an Admin badge without a second call per row.
+            Empty for a row with no linked user, and always empty on the ServiceNow data
+            source, which has no notion of this role set.
         customerContactPresent:
           type: boolean
           description: >
@@ -9181,6 +9376,94 @@ components:
             restatement of `customerContactPresent` — a row invited under one address but
             linked to a contact whose own address differs is invisible to both people, and
             that does happen on genuine customer rows.
+
+    CreateProjectMembershipRequest:
+      type: object
+      required: [email, roles]
+      properties:
+        email:
+          type: string
+          format: email
+          description: The address to invite. Lower-cased and trimmed before anything else sees it.
+        firstName:
+          type: string
+          description: >
+            Used only when the Salesforce contact has to be created; an existing contact keeps
+            its own name. Falls back to the local part of the address when neither name is given.
+        lastName:
+          type: string
+          description: See firstName.
+        roles:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [Portal user, Security Contact, Lead, Admin]
+          description: >
+            The raw Salesforce Role__c labels, matched case-insensitively. At least one is
+            required: an invitation granting nothing would provision an identity that sees an
+            empty portal. A label Salesforce would not accept is a 400 rather than a Salesforce
+            error mid-transaction.
+        isCsIntegrationUser:
+          type: boolean
+          default: false
+          description: >-
+            Mark a machine account. It gets its database row and Salesforce
+            records like anyone else, but no Asgardeo identity and no
+            invitation email. Only honoured when this request creates the
+            Salesforce contact; an existing contact keeps its own flag.
+
+    UpdateProjectMembershipRolesRequest:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [Portal user, Security Contact, Lead, Admin]
+          description: >
+            The membership's new complete set of Salesforce roles — a replacement, not a merge.
+            An empty list is allowed and removes every project group.
+
+    ProjectMembership:
+      type: object
+      description: >
+        One customer's membership of one project, as returned by the write endpoints.
+        Deliberately a different shape from ProjectContact, the read model the contacts search
+        returns: this one is about the write that just happened and carries the Salesforce ids
+        needed to correlate the onboarding ledger.
+      required: [projectId, projectContactId, membershipSfId, contactSfId, userId, email, state, roles]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        projectContactId:
+          type: string
+          format: uuid
+        membershipSfId:
+          type: string
+          description: The Salesforce Project_Contact__c Id, the key of the onboarding ledger.
+        contactSfId:
+          type: string
+          description: The Salesforce Contact Id.
+        userId:
+          type: string
+          format: uuid
+          description: The "user" row the membership resolved to; the write creates one when no match exists.
+        email:
+          type: string
+          format: email
+        state:
+          type: string
+          enum: [INVITED, REGISTERED, RE-INVITED, DEACTIVATED]
+        roles:
+          type: array
+          items:
+            type: string
+          description: >
+            The raw Salesforce Role__c labels the membership now carries, exactly as written to
+            Salesforce — not the derived project_role/project_group values.
 
     SearchProjectContactsResponse:
       type: object
@@ -13980,7 +14263,7 @@ components:
           description: >-
             Salesforce sObject name. Account is always processed.
             Project_Contact__c (also accepted as Project_Contact) and Contact
-            are processed only when SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
+            are processed only when CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED is
             true; otherwise, like every other value, they are acknowledged
             with 204 and ignored.
         referenceId:
@@ -18806,3 +19089,161 @@ components:
           type: integer
         hasMore:
           type: boolean
+    ProjectConsumptionView:
+      type: object
+      description: >
+        A project's product-consumption provisioning state. Carries no secret
+        material — see hasConsumerSecret and hasSecretKeys.
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        status:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5
+          description: >
+            The provisioning step reached: 1 pending, 2 application created,
+            3 subscribed, 4 credentials generated, 5 secret keys generated.
+            A license can only be issued at 5.
+        applicationId:
+          type: string
+          nullable: true
+          description: The Choreo application created for this project.
+        consumerKey:
+          type: string
+          nullable: true
+          description: >
+            The application's OAuth2 client ID. Not a secret — its matching
+            secret is never returned.
+        name:
+          type: string
+          description: The name to give the project's Choreo application.
+        description:
+          type: string
+          description: The description to give the project's Choreo application.
+        hasConsumerSecret:
+          type: boolean
+          description: Whether a consumer secret is stored, not its value.
+        hasSecretKeys:
+          type: boolean
+          description: Whether both subscription secret keys are stored, not their values.
+        updatedOn:
+          type: string
+          format: date-time
+      required:
+        - projectId
+        - status
+        - name
+        - description
+        - hasConsumerSecret
+        - hasSecretKeys
+        - updatedOn
+    UpdateProjectConsumptionRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Records the completion of one provisioning step. Which of the optional
+        fields are required depends on status — see the endpoint description.
+      properties:
+        status:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5
+        applicationId:
+          type: string
+          description: Required when status is 2.
+        consumerKey:
+          type: string
+          description: Required when status is 4.
+        consumerSecret:
+          type: string
+          description: Required when status is 4. Stored as supplied; never returned.
+        primarySecretKey:
+          type: string
+          description: Required when status is 5. Stored as supplied; never returned.
+        secondarySecretKey:
+          type: string
+          description: Required when status is 5. Stored as supplied; never returned.
+      required:
+        - status
+    UpdateProjectConsumptionResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: >
+            Describes what happened — in particular, distinguishes an applied
+            update from a no-op where the stored status was already at or beyond
+            the requested one.
+        result:
+          $ref: '#/components/schemas/ProjectConsumptionView'
+      required:
+        - message
+        - result
+    DeploymentLicenseRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          description: >
+            The address the licence is issued to. Enforced at runtime, not only
+            documented: a value that is not a well-formed address is a 400
+            before the licensing service is called.
+      required:
+        - email
+    DeploymentLicense:
+      type: object
+      properties:
+        subscriptionData:
+          $ref: '#/components/schemas/DeploymentLicenseSubscriptionData'
+        signature:
+          type: string
+      required:
+        - subscriptionData
+        - signature
+    DeploymentLicenseSubscriptionData:
+      type: object
+      description: >
+        The signed subscription data, passed through from ServiceNow byte for
+        byte. ServiceNow computes an HMAC over the canonicalised form of this
+        object — every key sorted, key and value concatenated — and the
+        customer's product recomputes that string to verify the signature, so
+        this service never reshapes, reorders or drops any part of it.
+
+        The properties below are the ones callers can rely on; the object is
+        deliberately open, because ServiceNow signs whatever it sends and a
+        field this spec has not caught up with must still reach the customer.
+      additionalProperties: true
+      properties:
+        deploymentId:
+          type: string
+        deploymentName:
+          type: string
+        subscriptionKey:
+          type: string
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        secrets:
+          type: string
+          description: >
+            The shuffled subscription secrets. A flat hex string, not an
+            object — 12 positions of 4 four-character sub-chunks.
+        usageDataPublishingUrl:
+          type: string
+          description: >
+            Where the customer's product publishes its usage data. Signed, and
+            required for the product to function.
+      required:
+        - deploymentId
+        - deploymentName
+        - subscriptionKey
+        - clientId
+        - clientSecret
+        - secrets

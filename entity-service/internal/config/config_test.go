@@ -440,6 +440,75 @@ func TestParseInternalClientIDs(t *testing.T) {
 	}
 }
 
+// TestLoad_CSMMigrationPortalWritesEnabled pins the kill switch's parsing:
+// only the exact string "true" turns the portal membership writes on, so a
+// typo, a "1", or a "TRUE" leaves them off rather than half-enabling a write
+// path that touches Salesforce.
+func TestLoad_CSMMigrationPortalWritesEnabled(t *testing.T) {
+	for value, want := range map[string]bool{
+		"true": true, "TRUE": false, "True": false, "1": false, "yes": false, "": false, " true ": false,
+	} {
+		t.Setenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED", value)
+		if got := Load().CSMMigrationPortalWritesEnabled; got != want {
+			t.Errorf("CSM_MIGRATION_PORTAL_WRITES_ENABLED=%q -> %v, want %v", value, got, want)
+		}
+	}
+}
+
+// TestLoad_CSMMigrationMembershipRegistrationEnabled pins the same parse for
+// the registration kill switch. It gates POST /users/me/memberships/register,
+// which clears a contact's Salesforce lockout and flips the membership to
+// REGISTERED, so a "TRUE" or a "1" must leave the route unregistered rather
+// than half-enabling a path that writes to Salesforce.
+func TestLoad_CSMMigrationMembershipRegistrationEnabled(t *testing.T) {
+	for value, want := range map[string]bool{
+		"true": true, "TRUE": false, "True": false, "1": false, "yes": false, "": false, " true ": false,
+	} {
+		t.Setenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED", value)
+		if got := Load().CSMMigrationMembershipRegistrationEnabled; got != want {
+			t.Errorf("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED=%q -> %v, want %v", value, got, want)
+		}
+	}
+}
+
+// TestConfig_HasPortalMembershipWrites covers the whole gate, not just the
+// flag: the writes are a Postgres transaction whose other half is a
+// Salesforce call, so both the data source and a complete
+// sales-entity-service connection are part of it.
+func TestConfig_HasPortalMembershipWrites(t *testing.T) {
+	complete := func() Config {
+		c := baseValidConfig()
+		c.DataSource = DataSourcePostgres
+		c.SalesEntityBaseURL = "https://example.invalid"
+		c.SalesEntityTokenURL = "https://example.invalid/oauth2/token"
+		c.SalesEntityClientID = "id"
+		c.SalesEntityClientSecret = "secret"
+		c.CSMMigrationPortalWritesEnabled = true
+		return c
+	}
+	if c := complete(); !c.HasPortalMembershipWrites() {
+		t.Error("a complete configuration with the flag on must enable the writes")
+	}
+	for name, mod := range map[string]func(*Config){
+		"flag off":               func(c *Config) { c.CSMMigrationPortalWritesEnabled = false },
+		"servicenow data source": func(c *Config) { c.DataSource = DataSourceServiceNow },
+		"dual-write data source": func(c *Config) { c.DataSource = DataSourcePostgresServiceNowDualWrite },
+		"no sales entity base":   func(c *Config) { c.SalesEntityBaseURL = "" },
+		"no sales entity secret": func(c *Config) { c.SalesEntityClientSecret = "" },
+		"no sales entity at all": func(c *Config) {
+			c.SalesEntityBaseURL, c.SalesEntityTokenURL, c.SalesEntityClientID, c.SalesEntityClientSecret = "", "", "", ""
+		},
+		"no sales entity client": func(c *Config) { c.SalesEntityClientID = "" },
+		"no sales entity token":  func(c *Config) { c.SalesEntityTokenURL = "" },
+	} {
+		c := complete()
+		mod(&c)
+		if c.HasPortalMembershipWrites() {
+			t.Errorf("%s: the writes must stay off", name)
+		}
+	}
+}
+
 // TestConfig_Validate_Auth locks in that token validation has no off switch:
 // AuthIssuer/AuthJWKSURL/AuthUserTokenAudiences are as mandatory to a valid
 // Config as the DB settings baseValidConfig() already supplies.

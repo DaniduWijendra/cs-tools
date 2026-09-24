@@ -16,7 +16,9 @@
 
 // Package salesentity is an HTTP client for the REST app sales/sales-entity-service
 // (not GraphQL sales/entity-graphql-service). POST /salesforce/events uses
-// POST /customer-search to fetch a Customer by Salesforce Account Id.
+// POST /customer-search to fetch a Customer by Salesforce Account Id. The write
+// side (PATCH /contacts/{id}, PATCH /project-contacts/{id}) backs the
+// registration flip -- see internal/service/membership_registration_service.go.
 package salesentity
 
 import (
@@ -39,8 +41,13 @@ const (
 	customerSearchPath       = "/customer-search"
 	contactSearchPath        = "/contacts/search"
 	projectContactSearchPath = "/project-contacts/search"
-	defaultTimeout           = 15 * time.Second
-	tokenExpirySlack         = 30 * time.Second
+	// contactPath / projectContactPath are the single-record write resources;
+	// the record's Salesforce Id is appended: PATCH /contacts/{id} and
+	// PATCH /project-contacts/{id}.
+	contactPath        = "/contacts/"
+	projectContactPath = "/project-contacts/"
+	defaultTimeout     = 15 * time.Second
+	tokenExpirySlack   = 30 * time.Second
 )
 
 // ClientCredentialsConfig holds the OAuth2 client credentials used to obtain

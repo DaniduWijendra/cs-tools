@@ -39,11 +39,16 @@ import (
 
 // NewRouter builds the dependency graph (repository → service → handler),
 // registers all routes, and wraps the mux with the middleware chain:
-// CorrelationID → Recovery → Logger → UserIDToken → Timeout. Also returns
-// the constructed EventPublisherService (nil if EVENT_HUB_BROKER is unset or
-// EVENT_PUBLISHING_ENABLED isn't "true") so the caller (server.New, then
-// cmd/api/main.go) can close it gracefully on shutdown.
-func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.EventPublisherService) {
+// CorrelationID → Recovery → Logger → UserIDToken → Timeout.
+//
+// It also returns a shutdown function that closes EVERY Kafka producer it
+// constructed — the shared-topic publisher and the onboarding-topic one —
+// so the caller (server.New, then cmd/api/main.go) releases both. Returning
+// one of the publishers instead, as this used to, left the second producer's
+// connections open and a buffered project_contact.invited unflushed at exit.
+// The function is never nil; with publishing unconfigured it simply has
+// nothing to close.
+func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	userRepo := repository.NewUserRepository(db)
 	userSvc := service.NewUserService(userRepo)
 	userHandler := handler.NewUserHandler(userSvc)
@@ -180,6 +185,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		)
 	}
 
+	// Onboarding events go to their own topic, not the shared one, so a
+	// case-event backlog cannot delay an invitation and the onboarding
+	// dead-letter queue can be watched separately. Same broker, same
+	// credentials, same failure recording -- only the topic differs. nil
+	// under exactly the same conditions as eventPublisher above, and the
+	// membership ingest already treats a nil publisher as "write the rows,
+	// send nothing".
+	var projectEventPublisher service.EventPublisherService
+	if cfg.EventHubBroker != "" && cfg.EventPublishingEnabled {
+		projectEventPublisher = service.NewEventPublisherService(
+			eventbus.NewProducer(eventbus.Config{
+				Broker:           cfg.EventHubBroker,
+				ConnectionString: cfg.EventHubConnectionString,
+				Topic:            cfg.ProjectEventHubTopic,
+			}),
+			eventPublishFailureSvc,
+		)
+	}
+
 	// sla-status reads the "sla" table directly (ServiceNow's own SLA data,
 	// synced in) — no ServiceNow equivalent of its own, gated on the pool for
 	// the same reason as event_publish_failures above. Replaces the old
@@ -269,28 +293,53 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
 	var salesforceEventHandler *handler.SalesforceEventHandler
+	// membershipRegistrationHandler and projectContactSyncHandler both need
+	// the very same membership-ingest-enabled SalesforceEventService this
+	// block builds, so all three are wired together rather than side by side.
+	var membershipIngestSvc service.SalesforceEventService
+	var salesEntityClient *salesentity.Client
 	if db != nil && cfg.DataSource == config.DataSourcePostgres && cfg.SalesEntityConfigured() {
-		salesEntityClient := salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
+		salesEntityClient = salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
 			TokenURL:     cfg.SalesEntityTokenURL,
 			ClientID:     cfg.SalesEntityClientID,
 			ClientSecret: cfg.SalesEntityClientSecret,
 			Scopes:       cfg.SalesEntityScopes,
 		})
-		if cfg.SalesforceMembershipIngestEnabled {
+		if cfg.CSMMigrationSalesforceMembershipIngestEnabled {
 			// The membership branch (Project_Contact__c / Contact envelopes)
 			// writes user/account_contact/project_contact rows and the
 			// DATABASE onboarding step, and publishes project_contact.invited
 			// when eventPublisher is configured (nil is a no-op there).
-			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventServiceWithMembershipIngest(
+			membershipIngestSvc = service.NewSalesforceEventServiceWithMembershipIngest(
 				accountRepo, salesEntityClient, service.MembershipIngest{
 					Memberships: repository.NewProjectMembershipRepository(db),
 					Steps:       repository.NewOnboardingStepRepository(db),
 					SalesEntity: salesEntityClient,
-					Publisher:   eventPublisher,
-				}))
+					Publisher:   projectEventPublisher,
+				})
+			salesforceEventHandler = handler.NewSalesforceEventHandler(membershipIngestSvc)
 		} else {
 			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventService(accountRepo, salesEntityClient))
 		}
+	}
+
+	// POST /users/me/memberships/register (H-0 of the customer onboarding flow).
+	// Postgres-only, and off unless CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED is
+	// exactly "true": with the flag off the route is not registered at all, so
+	// it 404s and nothing on this path can write to Salesforce. It also needs
+	// what it depends on to exist — the SALES_ENTITY_* client for the two
+	// PATCHes, and the membership-ingest service to re-ingest each flipped
+	// membership — so CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
+	// this 404 too, rather than flipping Salesforce with no matching database
+	// write.
+	var membershipRegistrationHandler *handler.MembershipRegistrationHandler
+	if db != nil && cfg.CSMMigrationMembershipRegistrationEnabled && salesEntityClient != nil && membershipIngestSvc != nil {
+		membershipRegistrationHandler = handler.NewMembershipRegistrationHandler(service.NewMembershipRegistrationService(
+			repository.NewMembershipRegistrationRepository(db),
+			salesEntityClient,
+			membershipIngestSvc,
+			repository.NewOnboardingStepRepository(db),
+		))
 	}
 
 	// onboarding_step has no ServiceNow equivalent; Postgres-only, like
@@ -298,6 +347,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	var onboardingStepHandler *handler.OnboardingStepHandler
 	if db != nil {
 		onboardingStepHandler = handler.NewOnboardingStepHandler(service.NewOnboardingStepService(repository.NewOnboardingStepRepository(db), accessSvc))
+	}
+
+	// The portal-driven membership writes. Gated on a pool AND
+	// cfg.HasPortalMembershipWrites() -- the flag, the Postgres data source
+	// and a complete sales-entity-service connection -- because every one of
+	// these writes is half a Postgres transaction and half a Salesforce
+	// call. Off by default: nil handler means the four routes below are
+	// never registered, so a portal built against them fails loudly with a
+	// 404 rather than writing one system and not the other.
+	var projectMembershipHandler *handler.ProjectMembershipHandler
+	if db != nil && cfg.HasPortalMembershipWrites() && salesEntityClient != nil {
+		projectMembershipHandler = handler.NewProjectMembershipHandler(service.NewProjectMembershipWriteService(service.MembershipWriteDeps{
+			Memberships: repository.NewProjectMembershipRepository(db),
+			Steps:       repository.NewOnboardingStepRepository(db),
+			SalesEntity: salesEntityClient,
+			Publisher:   projectEventPublisher,
+			Failures:    eventPublishFailureSvc,
+			Access:      accessSvc,
+		}))
 	}
 
 	// Also constructed for DataSourcePostgresServiceNowDualWrite: that mode's
@@ -908,6 +976,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
 	}
 
+	if membershipRegistrationHandler != nil {
+		mux.HandleFunc("POST /users/me/memberships/register", membershipRegistrationHandler.RegisterInvitedMemberships)
+	}
+
 	if snUserHandler != nil {
 		mux.HandleFunc("GET /users/{id}", snUserHandler.GetUser)
 		mux.HandleFunc("GET /users/me", snUserHandler.GetMe)
@@ -951,6 +1023,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
+	if projectMembershipHandler != nil {
+		// Beside the search and get above, in the same namespace. {email}
+		// keys a membership; {contactId} on the GET above is a user id, and
+		// the two never collide because the methods differ.
+		mux.HandleFunc("POST /projects/{id}/contacts", projectMembershipHandler.InviteProjectContact)
+		mux.HandleFunc("PATCH /projects/{id}/contacts/{email}", projectMembershipHandler.UpdateProjectContactRoles)
+		mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", projectMembershipHandler.DeactivateProjectContact)
+		mux.HandleFunc("POST /projects/{id}/contacts/{email}/resend-invitation", projectMembershipHandler.ResendProjectContactInvitation)
+	}
 	if projectUpdateHandler != nil {
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	}
@@ -1133,6 +1214,18 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		panic("auth: could not initialise token validation: " + err.Error())
 	}
 
+	// Both producers are closed together: they are constructed under the
+	// same conditions and neither caller has any reason to outlive the
+	// other.
+	closePublishers := func() {
+		if eventPublisher != nil {
+			eventPublisher.Close()
+		}
+		if projectEventPublisher != nil {
+			projectEventPublisher.Close()
+		}
+	}
+
 	return middleware.CorrelationID(
 		middleware.Recovery(
 			middleware.Logger(
@@ -1143,5 +1236,5 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				),
 			),
 		),
-	), eventPublisher
+	), closePublishers
 }

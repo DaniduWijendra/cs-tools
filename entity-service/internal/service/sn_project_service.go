@@ -910,12 +910,17 @@ func (s *snProjectContactService) SearchProjectContacts(ctx context.Context, pro
 			name = strPtr(c.Name)
 		}
 		contacts = append(contacts, domain.ProjectContact{
-			ID:                     contactID,
-			Name:                   name,
-			Email:                  c.Email,
-			RegistrationState:      c.RegistrationState,
-			NotificationsEnabled:   c.NotificationsEnabled,
-			Roles:                  c.Roles,
+			ID:                   contactID,
+			Name:                 name,
+			Email:                c.Email,
+			RegistrationState:    c.RegistrationState,
+			NotificationsEnabled: c.NotificationsEnabled,
+			Roles:                c.Roles,
+			// ServiceNow has no notion of the account-level role set at all
+			// (it is derived from the Postgres membership tables), so this
+			// data source answers with an empty list rather than a null --
+			// absent, not unknown.
+			AccountRoles:           []string{},
 			CustomerContactPresent: c.CustomerContactPresent,
 			GrantsCaseAccess:       c.GrantsCaseAccess,
 		})
