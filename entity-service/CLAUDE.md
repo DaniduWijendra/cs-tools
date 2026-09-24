@@ -50,6 +50,7 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `SALES_ENTITY_CLIENT_SECRET` | no* | — | Choreo connection client secret |
 | `SALES_ENTITY_SCOPES` | no | — | Optional space-separated OAuth2 scopes for REST `sales/sales-entity-service` |
 | `SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes (see "Salesforce membership ingest" below). The Account branch is unaffected |
+| `CSM_MIGRATION_PORTAL_WRITES_ENABLED` | no | `false` | Must be `"true"` to register the four portal-driven membership write routes under `/projects/{id}/contacts` (see "Portal-driven membership writes" below). Also needs `DATA_SOURCE=postgres`, a pool, and the full `SALES_ENTITY_*` set (`Config.HasPortalMembershipWrites`). Off means the routes are **not registered at all**, not 403 |
 
 \* `DB_USER`/`DB_PASSWORD`/`DB_NAME` are required when `DATA_SOURCE=postgres`
 and **optional** when `DATA_SOURCE=servicenow`, where entity reads and writes
@@ -242,12 +243,10 @@ back-filled instead of duplicated:
    isCsIntegrationUser`. An existing row gets name / email / `is_system_user`
    refreshed, **never `user_name`** (it is the join key to `account_contact`).
 4. Global roles (`user_role`, `mapGlobalRoles`): always `external`; `partner`
-   for a PARTNER CONTACT else `customer`; `customer_admin` / `partner_admin`
-   when the contact's `isCsAdmin` is true **or** the membership roles contain
-   `Admin`, revoked otherwise. Only those two admin roles are ever revoked
-   (`managedAdminRoles`); any other role the user holds is left alone. An
+   for a PARTNER CONTACT else `customer`. Nothing is revoked here. An
    integration user gets no global roles at all. A role name missing from the
    `role` table is a 503 naming it — the ServiceNow sync seeds those rows.
+   The admin role is **not** decided at this step any more — see step 8.
 5. `account_contact` by (`sf_id`, account), else (account, `LOWER(user_name)`),
    else inserted (`is_active = true`, `is_primary_contact = false`).
 6. `project_contact` by `sf_id`, else (project, account_contact), else
@@ -256,9 +255,18 @@ back-filled instead of duplicated:
 7. Project groups (`project_contact_group`, `mapProjectGroups`, §6.4 of the
    onboarding design): `Portal user` + `Security Contact` → `Full Access`;
    `Portal user` → `General Access`; `Security Contact` → `Security Only`;
-   `Lead` additionally → `Lead User Group`; `Admin` is global-only; unknown
-   roles are logged as `ignoredRoles` and never fail the ingest. The row set
-   is replaced. A missing `project_group` row is a 503.
+   `Lead` additionally → `Lead User Group`; `Admin` additionally → `Admin`
+   (the group carrying the `ADMIN` project role, migration 000084 — `Admin`
+   used to be global-only and recorded nothing per project); unknown roles are
+   logged as `ignoredRoles` and never fail the ingest. The row set is
+   replaced. A missing `project_group` row is a 503.
+8. The derived account-level admin role (`syncDerivedAdminRole`), run **after**
+   step 7 so the membership just written counts: one `EXISTS` over every
+   membership this user holds, granting `customer_admin` (`partner_admin` for a
+   partner contact) when any live membership carries the project `ADMIN` role
+   or the contact's own `isCsAdmin` is set, and revoking the managed admin
+   roles it must not hold. See "Admin is a project role" below for the bug
+   this replaced.
 
 The DATABASE `onboarding_step` is written **inside the same transaction**
 (`upsertOnboardingStep` takes a `querier`, satisfied by both the pool and a
@@ -266,12 +274,26 @@ The DATABASE `onboarding_step` is written **inside the same transaction**
 `DATABASE = FAILED` with `lastError` best-effort and returns the original error.
 `project_contact.invited` (`events.ProjectContactInvitedPayload`: membership /
 contact Salesforce ids, email, given / family name, project name and key, the
-raw Salesforce roles, `isIntegrationUser`, `type`) is published only after the
-transaction committed and only for INVITED / RE-INVITED; a nil publisher skips
-it, a publish failure is logged (and recorded by `EventPublisherService`), never
-returned. csm-notification-service consumes it, provisions the Asgardeo user via
-the SCIM service and sends the invitation, then records IDENTITY and EMAIL
-through the endpoints below (SKIPPED for an integration user).
+raw Salesforce roles, `isIntegrationUser`, `type`, and an optional `resend`
+marker) is published only after the transaction committed, only for INVITED /
+RE-INVITED, **and only when the ingest actually created the `project_contact`
+row** (`SalesforceMembershipUpsertResult.CreatedProjectContact`); a nil
+publisher skips it, a publish failure is logged (and recorded by
+`EventPublisherService`), never returned. csm-notification-service consumes it,
+provisions the Asgardeo user via the SCIM service and sends the invitation,
+then records IDENTITY and EMAIL through the endpoints below (SKIPPED for an
+integration user).
+
+**Echo suppression — the "created the row" condition is load-bearing.** Every
+portal membership write (below) also writes Salesforce, and every Salesforce
+write comes back here through the Service Bus subscriber as an ordinary
+CREATED/UPDATED envelope. By the time that echo lands the row already exists,
+because the portal write wrote it first, so the event is our own write
+returning. Publishing for it would have csm-notification-service send a
+**second invitation e-mail for the one invitation the customer admin sent** —
+one click, two mails. An echo updates the row silently instead. A genuinely
+Salesforce-originated invitation (someone invited in Salesforce itself, or the
+historical backfill) still creates the row here and still publishes.
 
 **Schema prerequisite**: the `sf_id` columns on `"user"`, `account_contact`
 and `project_contact` come from the csm-sync migration 0076, which is not in
@@ -562,6 +584,262 @@ response: the case/comment/incident already exists in ServiceNow by that
 point, so a notification-side hiccup must not be reported to the caller as a
 failed
 create.
+
+## Portal-driven membership writes
+
+`CSM_MIGRATION_PORTAL_WRITES_ENABLED=true` (exactly `"true"`, off by default)
+registers four write endpoints under the existing `/projects/{id}/contacts`
+namespace. They are how **both** portals change who is a contact on a project:
+the Customer Portal when a customer admin manages their own users, and the CSM
+Portal when an account manager does it for them. Same endpoints, same
+semantics, one implementation — `service.ProjectMembershipWriteService`
+(`project_membership_write_service.go`), `handler.ProjectMembershipHandler`.
+
+The CSM database is the source of truth. Salesforce is kept in step, not read
+from as an authority. The Service Bus subscriber still feeds
+Salesforce-originated changes into the ingest above, so a portal write and a
+Salesforce edit converge on the same rows.
+
+### The write ordering, and why the database commits last
+
+Every one of the four follows the same shape:
+
+1. Open the Postgres transaction. Read the project and its account, and the
+   membership that may already be there.
+2. Write **Salesforce inside that transaction**, searching before every create.
+3. Write the rows through the existing membership `Upsert`.
+4. Commit.
+
+The property this buys, agreed explicitly: **the database and Salesforce are
+updated together or neither is, and the caller gets an error.** The reasoning
+is one asymmetry — Salesforce has no transaction, so once its write returns it
+is final; PostgreSQL does, and rolling it back costs nothing. So the only
+participant that can be undone goes **last**. Anything that fails before the
+commit leaves both systems exactly as they were.
+
+`repository.ProjectMembershipRepository.UpsertWithin` is what holds the
+transaction open across the Salesforce half: it takes a
+`MembershipWritePlan`, a callback given the resolved
+`MembershipWriteContext{Target, Existing}` and returning the
+`SalesforceMembershipUpsert` to write. This deliberately **reuses
+`upsertMembershipTx`**, the same seven-step resolve-and-write the Salesforce
+ingest uses — there is exactly one writer of customer memberships into
+Postgres, and it did not get a second copy.
+
+Two details worth knowing:
+
+- **The Salesforce half runs before the row write, not after**, even though
+  the design reads "write the rows, then Salesforce". The rows need the
+  Salesforce ids: `project_contact.sf_id`, `account_contact.sf_id` and
+  `"user".sf_id` are stamped from the records this step creates or finds.
+  What matters for correctness is unchanged — the commit is still last, and
+  it is still the only thing that can be rolled back.
+- **Every Salesforce create is preceded by a search.** The Sales Entity
+  create endpoints are deliberately not idempotent, so searching first is
+  what makes a retry, a hand edit made directly in Salesforce, and an
+  orphaned record from a previous failure all get *adopted* rather than
+  duplicated.
+
+**The one residue.** A commit that fails *after* Salesforce succeeded leaves a
+Salesforce record with no row behind it. The search-first rule makes that
+self-healing — the next write for the same person adopts it — but it is also
+recorded, so it can be retried rather than lost:
+`repository.ErrMembershipCommitFailed` marks that specific case, and
+`recordSalesforceOrphan` writes it to **`event_publish_failures`** with
+`eventType = "salesforce.membership_write"`, the membership Salesforce id as
+`entityId`, and a JSON payload of what should have happened (operation,
+project, email, the ids, state, roles, whether the contact/membership was
+created). That table was reused rather than a new one added: its shape already
+fits exactly (a type, the id it is about, the JSON, the error, a `resolved_on`),
+and it already has a repository, a service, a search endpoint and a resolve
+endpoint — so the backlog is visible the day this ships instead of needing its
+own API first. A dedicated `salesforce_write_failures` table would have been
+the same five columns with a second copy of all of that around them. **Nothing
+drains it automatically**; recording it is the whole of the commitment here.
+The caller gets a 503 ("the change could not be saved; please try again"),
+which is accurate: retrying is both safe and the right thing to do.
+
+### The four endpoints
+
+All four are **internal-caller-only** via `AccessService.ResolveScope`
+(`AccessScope.Unrestricted`, i.e. `AUTH_INTERNAL_CLIENT_IDS`), exactly as the
+onboarding-step endpoints are — anyone else gets 403 before anything
+downstream is touched. A portal END USER must never call them directly:
+whether this particular customer admin may invite this particular person into
+this particular project is the portal backend's decision, made against the
+account it has already scoped the session to. This service deliberately does
+not re-derive that from a forwarded user token.
+
+`{id}` is the CSM project UUID, so these sit beside the search and get already
+in that namespace. `{email}` keys the membership — the way the Customer Portal
+addresses a contact today, and the only identifier a caller has before the
+person exists in either system. `created_by`/`updated_by` is
+`portal-membership-write` (`domain.PortalMembershipWriteActor`), distinct from
+the ingest's `salesforce-sync`, and the DATABASE onboarding step records
+`eventType = PORTAL_WRITE` stamped with the Salesforce record's own
+`LastModifiedDate` so the echo of that very write is recognised as not newer
+by the ingest's duplicate guard.
+
+| Endpoint | Body | Success | Errors |
+|---|---|---|---|
+| `POST /projects/{id}/contacts` | `{email, firstName?, lastName?, roles: []}` | **201** + `ProjectMembership` | 400 bad address / unknown role / no roles, 403, 404 unknown project or no Salesforce account, 409 already an active contact, 503 |
+| `PATCH /projects/{id}/contacts/{email}` | `{roles: []}` | **200** + `ProjectMembership` | 400, 403, 404, 503 |
+| `DELETE /projects/{id}/contacts/{email}` | — | **204** | 400, 403, 404, 503 |
+| `POST /projects/{id}/contacts/{email}/resend-invitation` | — | **204** | 400, 403, 404, 409 not INVITED, **429** inside the cooldown, 503 |
+
+- **Invite** resolves the project and its account, finds the Salesforce
+  contact by address and creates it only if absent, finds the membership for
+  (project, contact) and creates it only if absent (otherwise PATCHes its
+  state and roles), writes the rows, commits, then publishes
+  `project_contact.invited`. State is `INVITED`, or `RE-INVITED` when a
+  previously DEACTIVATED membership is being brought back. An address that is
+  already an **active** contact on the project is a 409 ("change their roles
+  instead") — the adopt-don't-duplicate rule is about the *Salesforce* record,
+  not about re-inviting somebody who is already there. At least one role is
+  required: an invitation granting nothing would provision an identity that
+  sees an empty portal.
+- **Change roles** replaces the Salesforce `Role__c` picklist and, with it,
+  the membership's project groups. The state is untouched (the PATCH sends
+  only `role`). An empty list is accepted and removes every group.
+- **Deactivate** sets `DEACTIVATED` in both systems. Never a delete:
+  DEACTIVATED is a real value of both the Salesforce picklist and
+  `project_contact_state_enum`, and it is what the portal does today. The
+  roles are left exactly as they are — the derived admin role ignores
+  deactivated memberships, so nothing has to be erased to drop it.
+- **Resend invitation** writes nothing at all. It re-publishes
+  `project_contact.invited` with `resend: true`, which is the one thing that
+  makes csm-notification-service bypass its own already-sent guard (that guard
+  is what stops a duplicate Salesforce event turning into a duplicate email,
+  so a deliberate resend has to say so). Valid only while the membership is
+  `INVITED` — REGISTERED means they already accepted, DEACTIVATED means they
+  should not get one, RE-INVITED is already the product of a resend. A
+  **five-minute cooldown per membership** is enforced from the EMAIL step's
+  `updatedOn` in the onboarding ledger (the record of when an invitation was
+  actually sent, written by csm-notification-service itself rather than
+  guessed at here); inside it the call is a 429. No EMAIL step yet means none
+  has been sent, so there is nothing to wait for. With no publisher
+  configured this is a 503 rather than a silent success: unlike an
+  invitation, whose database and Salesforce writes are the substance of the
+  call, a resend **is** the event.
+
+`apierror.TooManyRequestsError` was added for the cooldown (429 in
+`writeServiceError`) — the first rate-limit this service applies, and a
+deliberate caller-pacing decision rather than a downstream limit passed
+through, so its message is returned to the caller.
+
+`roles` on the wire are the raw Salesforce `Role__c` labels
+(`Portal user` / `Security Contact` / `Lead` / `Admin`), matched
+case-insensitively and normalised to Salesforce's own spelling before being
+sent. A label Salesforce would reject is a **400 naming it**, not an
+`ignoredRoles` log line: the ingest is right to tolerate an unknown role on a
+record Salesforce already holds (refusing would strip a real membership over a
+vocabulary gap), and wrong to tolerate one a caller is asking us to write.
+
+### The Sales Entity write client (`internal/salesentity/membership_writes.go`)
+
+`SearchContactByEmail` (`POST /contacts/search {email}`), `CreateContact`
+(`POST /contacts`, 201), `SearchProjectContact`
+(`POST /project-contacts/search {projectId, contactId}`),
+`CreateProjectContact` (`POST /project-contacts`, 201),
+`UpdateProjectContact`/`UpdateProjectContactState`/`UpdateProjectContactRoles`
+(`PATCH /project-contacts/{id}` with `state` and/or `role`), and
+`UpdateContactLockout` (`PATCH /contacts/{id}` `{lockoutStatus}`).
+
+Two contract details that are easy to get wrong:
+
+- **Absence is an answer, not an error.** The by-Id `GetContact`/
+  `GetProjectContact` above map an empty result to a 503 (the Salesforce event
+  can arrive before the record is visible). The two *search* methods here do
+  the opposite and return `found = false` with no error — "no such contact" is
+  exactly what tells the caller to create one. A row that comes back not
+  actually carrying the address asked for is also `found = false`: a duplicate
+  contact is recoverable, a membership written for the wrong person is not.
+- **`PATCH /project-contacts/{id}` answers 200 with an EMPTY body** when its
+  own re-read fails, even though the write itself succeeded. That is decoded
+  as a zero `ProjectContact` and **no error** — treating it as a parse failure
+  would roll back a transaction over a write that actually landed. The caller
+  keeps the id it already held.
+
+**Dependency**: the two create endpoints are being added to
+`digiops-sales/sales-entity-service` in a parallel change (branch
+`sales-entity-contact-create`) to exactly this contract. Until they are
+deployed, `CSM_MIGRATION_PORTAL_WRITES_ENABLED` must stay off — which is why
+the flag not registering the routes at all is the right default: a portal
+built against them fails loudly with a 404 instead of writing one system and
+not the other.
+
+### Admin is a project role now, and the account-level role is derived
+
+**The bug this fixes.** Salesforce's `Admin` role used to map straight to the
+**global** `customer_admin`/`partner_admin` role on the user, with nothing
+recorded per project — and `syncGlobalRoles` computed its revoke list as
+`managedAdminRoles - wanted` from *the single membership being processed*. So
+processing any one non-admin membership **revoked that user's admin
+everywhere**. A customer admin on project A who was also an ordinary portal
+user on project B lost their admin the moment B's membership was re-ingested.
+
+**The agreed model.** Admin is stored per project, and the account-level role
+is derived from it: admin on any project under an account means admin on every
+project under that account, and nothing outside it.
+
+- `project_role_enum` **already carried `ADMIN`** (migration 000023 declared
+  all five values up front), so there was no enum to widen — the task brief
+  expected one, and the schema had already done it. What was missing is the
+  vocabulary a membership can attach to: a membership reaches its roles
+  through `project_contact_group → project_group → project_group_role →
+  project_role`, never `project_role` directly. **Migration 000084** seeds the
+  `ADMIN` `project_role` row, an `Admin` `project_group`, and the link between
+  them, idempotently (those rows are normally seeded by the ServiceNow sync,
+  so this has to be safe against a database that already has them).
+  `mapProjectGroups` maps Salesforce `Admin` → that group, alongside the
+  existing PORTAL_USER / LEAD_USER / SECURITY_CONTACT mappings.
+- `mapGlobalRoles` no longer decides admin at all. It returns `external` plus
+  `customer`/`partner` exactly as before, and separately reports **which** of
+  the two admin roles this contact would hold
+  (`SalesforceMembershipUpsert.AdminRoleName`) — never whether they hold it.
+- `syncDerivedAdminRole` (step 8 of the upsert, after the project groups are
+  written) decides that, as **one query over the user's memberships**:
+
+  ```sql
+  SELECT EXISTS (
+    SELECT 1 FROM "user" u
+    JOIN account_contact ac ON LOWER(ac.user_name) = LOWER(u.user_name)
+    JOIN project_contact pc ON pc.account_contact_id = ac.id
+    JOIN project_contact_group pcg ON pcg.project_contact_id = pc.id
+    JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
+    JOIN project_role pr ON pr.id = pgr.project_role_id
+    WHERE u.id = $1
+      AND pr.role = 'ADMIN'::project_role_enum
+      AND (pc.state IS NULL OR pc.state <> 'DEACTIVATED'::project_contact_state_enum))
+  ```
+
+  It binds only the user id — nothing about the membership in hand — which is
+  precisely what makes the old failure impossible. The role is granted when
+  that is true (or the contact's own Salesforce `isCsAdmin` is set, an
+  additional grant and never a revocation condition), and every managed admin
+  role the user must not hold is revoked. Running it *after* step 7 is what
+  makes the membership being written count. A failed derivation aborts the
+  write rather than quietly deciding "not an admin", which would revoke a real
+  admin's role on a transient error.
+
+A deactivated membership's `ADMIN` role does not count, which is how
+deactivating someone's last admin project drops their account-level role
+without erasing anything.
+
+### Account roles on the contacts search
+
+`POST /projects/{id}/contacts/search` now returns each contact's
+**`accountRoles`** alongside their project `roles` — a separate list, never
+merged: `roles` is what they may do on *this* project, `accountRoles` what they
+are across the account. It is read from `user_role`/`role` (where
+`syncDerivedAdminRole` materialises the derived admin role) restricted to the
+five names this write path owns — `external`, `customer`/`partner`,
+`customer_admin`/`partner_admin` — so an internal role a staff account happens
+to hold can never leak into a customer-facing contact list. Empty for a row
+with no linked `"user"`, and always empty on the ServiceNow data source, which
+has no notion of this role set. The point of it is the admin entry: both
+portals can render an Admin badge on a contact list without a second call per
+row.
 
 ## SLA status
 
@@ -920,7 +1198,10 @@ changed.
   or the invited `email` (project contacts, matching
   `domain.ProjectContact.Email`'s own documented fallback). A project
   contact's `Roles` is the union of `project_role.role` across every
-  `project_group` it belongs to via `project_contact_group`.
+  `project_group` it belongs to via `project_contact_group` — which now
+  includes `ADMIN`, since admin is a project role (see "Portal-driven
+  membership writes" above); `AccountRoles` is the separate account-level list
+  described in that same section.
   `NotificationsEnabled` has no backing column anywhere in this schema and
   is hardcoded `true` (see `projectContactRowToDomain`'s own comment) —
   flagged as a known gap, not fabricated data pretending to be real.

@@ -188,8 +188,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
 	var salesforceEventHandler *handler.SalesforceEventHandler
+	var salesEntityClient *salesentity.Client
 	if db != nil && cfg.DataSource == config.DataSourcePostgres && cfg.SalesEntityConfigured() {
-		salesEntityClient := salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
+		salesEntityClient = salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
 			TokenURL:     cfg.SalesEntityTokenURL,
 			ClientID:     cfg.SalesEntityClientID,
 			ClientSecret: cfg.SalesEntityClientSecret,
@@ -217,6 +218,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	var onboardingStepHandler *handler.OnboardingStepHandler
 	if db != nil {
 		onboardingStepHandler = handler.NewOnboardingStepHandler(service.NewOnboardingStepService(repository.NewOnboardingStepRepository(db), accessSvc))
+	}
+
+	// The portal-driven membership writes. Gated on a pool AND
+	// cfg.HasPortalMembershipWrites() -- the flag, the Postgres data source
+	// and a complete sales-entity-service connection -- because every one of
+	// these writes is half a Postgres transaction and half a Salesforce
+	// call. Off by default: nil handler means the four routes below are
+	// never registered, so a portal built against them fails loudly with a
+	// 404 rather than writing one system and not the other.
+	var projectMembershipHandler *handler.ProjectMembershipHandler
+	if db != nil && cfg.HasPortalMembershipWrites() && salesEntityClient != nil {
+		projectMembershipHandler = handler.NewProjectMembershipHandler(service.NewProjectMembershipWriteService(service.MembershipWriteDeps{
+			Memberships: repository.NewProjectMembershipRepository(db),
+			Steps:       repository.NewOnboardingStepRepository(db),
+			SalesEntity: salesEntityClient,
+			Publisher:   eventPublisher,
+			Failures:    eventPublishFailureSvc,
+			Access:      accessSvc,
+		}))
 	}
 
 	// Also constructed for DataSourcePostgresServiceNowDualWrite: that mode's
@@ -860,6 +880,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
+	if projectMembershipHandler != nil {
+		// Beside the search and get above, in the same namespace. {email}
+		// keys a membership; {contactId} on the GET above is a user id, and
+		// the two never collide because the methods differ.
+		mux.HandleFunc("POST /projects/{id}/contacts", projectMembershipHandler.InviteProjectContact)
+		mux.HandleFunc("PATCH /projects/{id}/contacts/{email}", projectMembershipHandler.UpdateProjectContactRoles)
+		mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", projectMembershipHandler.DeactivateProjectContact)
+		mux.HandleFunc("POST /projects/{id}/contacts/{email}/resend-invitation", projectMembershipHandler.ResendProjectContactInvitation)
+	}
 	if projectUpdateHandler != nil {
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	}

@@ -33,6 +33,29 @@ const (
 	sfRoleAdmin           = "admin"
 )
 
+// The same four roles in Salesforce's own spelling. The portal writes send
+// these back to Salesforce verbatim (Role__c is a picklist — a label it does
+// not know is rejected), so they are exact, not lower-cased like the match
+// constants above.
+const (
+	sfRoleLabelPortalUser      = "Portal user"
+	sfRoleLabelSecurityContact = "Security Contact"
+	sfRoleLabelLead            = "Lead"
+	sfRoleLabelAdmin           = "Admin"
+)
+
+// validSalesforceRoles is the set a portal write may ask for, keyed by the
+// lower-cased label. A role Salesforce would reject is a 400 here rather than
+// a Salesforce error mid-transaction — the ingest's own posture of ignoring
+// unknown roles is right for a record Salesforce originated, and wrong for
+// one a caller is asking us to create.
+var validSalesforceRoles = map[string]string{
+	sfRolePortalUser:      sfRoleLabelPortalUser,
+	sfRoleSecurityContact: sfRoleLabelSecurityContact,
+	sfRoleLead:            sfRoleLabelLead,
+	sfRoleAdmin:           sfRoleLabelAdmin,
+}
+
 // Global role.name values (seeded by the ServiceNow sync) the ingest grants.
 const (
 	globalRoleExternal      = "external"
@@ -48,11 +71,17 @@ const (
 	projectGroupGeneralAccess = "General Access"
 	projectGroupSecurityOnly  = "Security Only"
 	projectGroupLeadUserGroup = "Lead User Group"
+	// projectGroupAdmin carries the ADMIN project role (migration 000084).
+	// Admin is a per-project fact now; the account-level customer_admin /
+	// partner_admin role is derived from every membership a user holds, not
+	// stored independently.
+	projectGroupAdmin = "Admin"
 )
 
-// managedAdminRoles are the global roles the ingest owns exclusively: it
-// grants them when the Salesforce record says admin and revokes them when it
-// no longer does. Every other role a user holds is left alone.
+// managedAdminRoles are the global roles the membership write owns
+// exclusively: exactly one of them is granted when the user turns out to be
+// an admin on any of their projects, and the rest are revoked. Every other
+// role a user holds is left alone.
 var managedAdminRoles = []string{globalRoleCustomerAdmin, globalRolePartnerAdmin}
 
 // salesforceLastModifiedLayout is how sales-entity-service renders Salesforce
@@ -117,39 +146,43 @@ func hasSalesforceRole(roles []string, want string) bool {
 }
 
 // mapGlobalRoles derives the role.name values a membership grants (§6.4):
-// every contact is `external`; a PARTNER CONTACT is `partner`, anything else
-// `customer`; `customer_admin`/`partner_admin` follow the contact's isCsAdmin
-// flag or an Admin role on the membership. An integration user gets no
-// global roles at all (it never signs in), and none are revoked either.
-func mapGlobalRoles(membershipType string, isCsAdmin bool, roles []string, isIntegrationUser bool) (grant, managed []string) {
+// every contact is `external`, and a PARTNER CONTACT is `partner` while
+// anything else is `customer`. An integration user gets no global roles at
+// all (it never signs in), and none are revoked either.
+//
+// adminRole is only WHICH admin role this contact would hold — never whether
+// they hold it. That is decided by the repository, after the membership has
+// been written, from every membership the user has (see
+// domain.SalesforceMembershipUpsert.AdminRoleName). Deciding it here, from
+// the one membership being processed, is exactly the bug this replaces: a
+// single non-admin membership used to revoke a user's admin on every project
+// they had, because `managed - wanted` was computed against that one record.
+func mapGlobalRoles(membershipType string, isIntegrationUser bool) (grant, managed []string, adminRole string) {
 	if isIntegrationUser {
-		return nil, nil
+		return nil, nil, ""
 	}
 	partner := strings.EqualFold(strings.TrimSpace(membershipType), domain.MembershipTypePartnerContact)
 	grant = []string{globalRoleExternal}
 	if partner {
 		grant = append(grant, globalRolePartner)
+		adminRole = globalRolePartnerAdmin
 	} else {
 		grant = append(grant, globalRoleCustomer)
+		adminRole = globalRoleCustomerAdmin
 	}
-	if isCsAdmin || hasSalesforceRole(roles, sfRoleAdmin) {
-		if partner {
-			grant = append(grant, globalRolePartnerAdmin)
-		} else {
-			grant = append(grant, globalRoleCustomerAdmin)
-		}
-	}
-	return grant, managedAdminRoles
+	return grant, managedAdminRoles, adminRole
 }
 
 // mapProjectGroups derives the project_group."group" set for a membership's
 // Salesforce roles (§6.4). Portal user + Security Contact is Full Access,
 // Portal user alone General Access, Security Contact alone Security Only; a
-// Lead additionally joins Lead User Group. Admin only affects global roles.
+// Lead additionally joins Lead User Group; an Admin additionally joins Admin,
+// the group carrying the ADMIN project role (migration 000084) — Admin used
+// to be a global-only role, with nothing recorded per project at all.
 // Roles the mapping does not know are returned in ignored so the caller can
 // log them; they never fail the ingest.
 func mapProjectGroups(roles []string) (groups, ignored []string) {
-	var portal, security, lead bool
+	var portal, security, lead, admin bool
 	for _, raw := range roles {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case sfRolePortalUser:
@@ -158,8 +191,10 @@ func mapProjectGroups(roles []string) (groups, ignored []string) {
 			security = true
 		case sfRoleLead:
 			lead = true
-		case sfRoleAdmin, "":
-			// global role only / blank
+		case sfRoleAdmin:
+			admin = true
+		case "":
+			// blank picklist entry
 		default:
 			ignored = append(ignored, strings.TrimSpace(raw))
 		}
@@ -175,7 +210,47 @@ func mapProjectGroups(roles []string) (groups, ignored []string) {
 	if lead {
 		groups = append(groups, projectGroupLeadUserGroup)
 	}
+	if admin {
+		groups = append(groups, projectGroupAdmin)
+	}
 	return groups, ignored
+}
+
+// salesforceRolesForGroups is mapProjectGroups' inverse: the raw Salesforce
+// Role__c labels a membership's stored project groups represent. The portal
+// write path needs it to answer with the roles a membership now carries, and
+// the ingest's own echo path never uses it — Salesforce remains the spelling
+// authority for a record it originated.
+func salesforceRolesForGroups(groups []string) []string {
+	var portal, security, lead, admin bool
+	for _, g := range groups {
+		switch strings.TrimSpace(g) {
+		case projectGroupFullAccess:
+			portal, security = true, true
+		case projectGroupGeneralAccess:
+			portal = true
+		case projectGroupSecurityOnly:
+			security = true
+		case projectGroupLeadUserGroup:
+			lead = true
+		case projectGroupAdmin:
+			admin = true
+		}
+	}
+	roles := []string{}
+	if portal {
+		roles = append(roles, sfRoleLabelPortalUser)
+	}
+	if security {
+		roles = append(roles, sfRoleLabelSecurityContact)
+	}
+	if lead {
+		roles = append(roles, sfRoleLabelLead)
+	}
+	if admin {
+		roles = append(roles, sfRoleLabelAdmin)
+	}
+	return roles
 }
 
 // parseSalesforceLastModified parses sales-entity-service's rendering of
