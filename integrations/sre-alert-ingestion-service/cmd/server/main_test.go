@@ -148,3 +148,53 @@ func TestBuildDatabaseDSN_HostPortDefaults(t *testing.T) {
 		t.Errorf("default port = %q, want %q", got, want)
 	}
 }
+
+// TestParseServiceMap_EmptyIsValidNoEntries pins the "unset means no static
+// entries, not an error" contract: an empty SRE_ALERT_SERVICE_MAP is not a
+// misconfiguration — every alert simply falls through to the worker's live
+// resolution.
+func TestParseServiceMap_EmptyIsValidNoEntries(t *testing.T) {
+	m, err := parseServiceMap("")
+	if err != nil {
+		t.Fatalf("parseServiceMap(\"\") returned error: %v", err)
+	}
+	if m != nil {
+		t.Errorf("parseServiceMap(\"\") = %v, want nil", m)
+	}
+}
+
+func TestParseServiceMap_ParsesFlatObject(t *testing.T) {
+	raw := `{"Azure Monitoring":"33333333-3333-3333-3333-333333333333","Site24x7 Monitoring":"44444444-4444-4444-4444-444444444444"}`
+	m, err := parseServiceMap(raw)
+	if err != nil {
+		t.Fatalf("parseServiceMap returned error: %v", err)
+	}
+	if len(m) != 2 {
+		t.Fatalf("len(m) = %d, want 2", len(m))
+	}
+	if m["Azure Monitoring"] != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf(`m["Azure Monitoring"] = %q, want the Azure UUID`, m["Azure Monitoring"])
+	}
+	if m["Site24x7 Monitoring"] != "44444444-4444-4444-4444-444444444444" {
+		t.Errorf(`m["Site24x7 Monitoring"] = %q, want the Site24x7 UUID`, m["Site24x7 Monitoring"])
+	}
+}
+
+// TestParseServiceMap_MalformedJSONFailsFast pins this service's existing
+// fail-fast-on-bad-config convention (see SRE_ALERT_AUTH_USERS's handling
+// in main): a typo'd SRE_ALERT_SERVICE_MAP must fail startup, not be
+// silently treated as "no static entries."
+func TestParseServiceMap_MalformedJSONFailsFast(t *testing.T) {
+	if _, err := parseServiceMap(`{not valid json`); err == nil {
+		t.Fatal("parseServiceMap accepted malformed JSON, want an error")
+	}
+}
+
+// TestParseServiceMap_RejectsNonStringValues confirms a value that isn't a
+// plain JSON string (e.g. a nested object) is rejected rather than silently
+// producing a map with an unusable zero-value entry.
+func TestParseServiceMap_RejectsNonStringValues(t *testing.T) {
+	if _, err := parseServiceMap(`{"Azure Monitoring":{"nested":"object"}}`); err == nil {
+		t.Fatal("parseServiceMap accepted a non-string value, want an error")
+	}
+}

@@ -262,3 +262,97 @@ func (c *Client) searchFirstIncident(ctx context.Context, req SearchIncidentsReq
 	}
 	return result, true, nil
 }
+
+// SearchITServicesFilters is the filter subset of entity-service's own
+// SearchITServicesFilters this service sends: just free-text SearchQuery —
+// the alert's raw, human-readable Service label (see
+// internal/handler.AlertRequest.Service and internal/worker.resolveServiceID).
+type SearchITServicesFilters struct {
+	SearchQuery string `json:"searchQuery,omitempty"`
+}
+
+// SearchITServicesRequest is the request body for csm-integration-service's
+// POST /services/search — a thin proxy of entity-service's own
+// SearchITServicesRequest, proxied as-is (field names/JSON tags copied
+// verbatim), matching SearchIncidentsRequest's convention above.
+type SearchITServicesRequest struct {
+	Filters    *SearchITServicesFilters `json:"filters,omitempty"`
+	Pagination Pagination               `json:"pagination"`
+}
+
+// ITService is the subset of entity-service's own ITService this service
+// actually reads out of a search hit — enough to resolve a raw Service label
+// to a CMDB service UUID. Name is kept for logging/debugging only.
+type ITService struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// searchITServicesResponse is the response body for POST /services/search,
+// decoded tolerantly (unknown fields ignored), matching
+// searchIncidentsResponse's convention above.
+type searchITServicesResponse struct {
+	Services []ITService `json:"services"`
+	Total    int         `json:"total"`
+	Offset   int         `json:"offset"`
+	Limit    int         `json:"limit"`
+}
+
+// SearchServices calls POST /services/search on csm-integration-service with
+// searchQuery=label and Pagination{Limit: 1, Offset: 0}.
+//
+// This is the live half of internal/handler.MapToIncident's hybrid
+// service-UUID resolution: the static SRE_ALERT_SERVICE_MAP lookup runs
+// synchronously in the request path; when that has no entry for a label,
+// internal/worker calls this method instead, at delivery-attempt time —
+// never inline before the 202 response (see MapToIncident's doc comment for
+// why that split exists, and internal/worker.resolveServiceID for the
+// caching/fallback logic built on top of this method).
+//
+// Limit is 1 deliberately: this service treats "the first match" and "the
+// only match worth acting on" as the same thing, mirroring the setLimit(1)
+// precedent an existing ServiceNow exact-match-on-cmdb_ci_service.name flow
+// uses for the same kind of lookup (see GroupTag's doc comment for the
+// "mirrors in spirit, not a port" caveat that applies here too). This method
+// builds no fuzzy/partial matching of its own on top of that — searchQuery
+// is passed through verbatim, so whatever matching behavior
+// entity-service's own ServiceNow-backed operation implements is exactly
+// what's honored here.
+//
+// Returns the (possibly empty) slice of matches and a nil error on a normal
+// 2xx response — an empty slice is a confirmed zero-result search, not an
+// error; the caller (internal/worker.resolveServiceID) decides what a
+// zero-result means (its unknown-service fallback). A non-nil error here is
+// always a transient/transport-level failure (a non-2xx response, or the
+// request never completing) — the caller folds that into the exact same
+// retryable-delivery-failure path a CreateIncident error takes, never
+// translating it into a "no match" outcome itself.
+//
+// Like CreateIncident and the searches above, this endpoint's underlying
+// ServiceNow operation has a documented M2M-credential fallback on the
+// csm-integration-service side (see that service's CLAUDE.md), so a 401 is
+// possible but not unconditional — treated as retryable regardless, same as
+// every other error from this call.
+func (c *Client) SearchServices(ctx context.Context, label string) ([]ITService, error) {
+	req := SearchITServicesRequest{
+		Filters:    &SearchITServicesFilters{SearchQuery: label},
+		Pagination: Pagination{Limit: 1, Offset: 0},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("csmclient: marshal SearchITServicesRequest: %w", err)
+	}
+
+	respBody, err := c.do(ctx, http.MethodPost, "/services/search", body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp searchITServicesResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("csmclient: decode SearchITServices response: %w", err)
+	}
+
+	return resp.Services, nil
+}

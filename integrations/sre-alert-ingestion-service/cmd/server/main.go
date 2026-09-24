@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -127,13 +128,34 @@ func main() {
 		MaxRetries:   envInt("SRE_ALERT_MAX_RETRIES", 3),
 		PollInterval: time.Duration(pollIntervalSeconds) * time.Second,
 		GroupWindow:  time.Duration(envInt("SRE_ALERT_GROUP_WINDOW_MINUTES", 15)) * time.Minute,
+		// UnknownServiceID: a real, operator-provisioned CMDB "Unclassified"
+		// service UUID. Required config, mustEnv'd the same way
+		// SRE_ALERT_CALLER_ID is below — see worker.Config.UnknownServiceID's
+		// doc comment for why this is unconditional rather than
+		// optional-with-a-fallback: a deployment whose SRE_ALERT_SERVICE_MAP
+		// already covers every label it sends can just set this once and
+		// never see it used.
+		UnknownServiceID: mustEnv("SRE_ALERT_UNKNOWN_SERVICE_ID"),
 	})
 
 	// callerID: a real, operator-provisioned CSM user id. CSM has no
 	// "system"/machine-caller concept today, so this is required config,
 	// never guessed here — see handler.AlertHandler's doc comment and this
 	// service's README/CLAUDE.md.
-	alertHandler := handler.NewAlertHandler(dbStore, mustEnv("SRE_ALERT_CALLER_ID"))
+	//
+	// serviceMap: the static, exact-match Service-label -> CMDB service UUID
+	// table (SRE_ALERT_SERVICE_MAP), parsed once here at startup — never
+	// re-parsed per request. Optional: unset/empty is valid and means "no
+	// static entries" (every alert falls through to the worker's live
+	// resolution), not a startup error — only malformed JSON fails startup,
+	// matching this service's existing fail-fast-on-bad-config convention
+	// (see mustEnv and the SRE_ALERT_AUTH_USERS handling below).
+	serviceMap, err := parseServiceMap(os.Getenv("SRE_ALERT_SERVICE_MAP"))
+	if err != nil {
+		slog.Error("invalid SRE_ALERT_SERVICE_MAP", "err", err)
+		os.Exit(1)
+	}
+	alertHandler := handler.NewAlertHandler(dbStore, mustEnv("SRE_ALERT_CALLER_ID"), serviceMap)
 	healthHandler := handler.NewHealthHandler(dbStore)
 
 	// SRE_ALERT_AUTH_USERS is required: this service's only inbound
@@ -301,6 +323,26 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseServiceMap parses SRE_ALERT_SERVICE_MAP — a JSON object string
+// mapping an alert's raw Service label to a CMDB service UUID, e.g.
+// {"Azure Monitoring":"33333333-3333-3333-3333-333333333333"}. An empty raw
+// string is valid and returns (nil, nil): "unset" means "no static entries,"
+// not a configuration error — see handler.AlertHandler.serviceMap's doc
+// comment. Any non-empty value that isn't valid JSON, or isn't a flat
+// string->string object, is a startup error (the caller fails fast on it),
+// matching this service's existing "fail fast on bad config" convention
+// rather than silently ignoring a typo'd map.
+func parseServiceMap(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // envInt parses key as an int, falling back to def on anything unset or

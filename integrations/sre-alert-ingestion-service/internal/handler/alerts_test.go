@@ -43,7 +43,7 @@ func validAlertJSON() []byte {
 
 func TestCreateAlert_Success(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	r = withAuthenticatedUsername(r, "azure")
@@ -87,8 +87,25 @@ func TestCreateAlert_Success(t *testing.T) {
 	if incidentReq.CallerID != "caller-1" {
 		t.Errorf("CallerID = %q, want %q", incidentReq.CallerID, "caller-1")
 	}
-	if incidentReq.ServiceID != "svc-checkout" {
-		t.Errorf("ServiceID = %q, want %q", incidentReq.ServiceID, "svc-checkout")
+	// No SRE_ALERT_SERVICE_MAP entry was configured for this handler (nil map
+	// — see NewAlertHandler(store, "caller-1", nil) above), so the buffered
+	// ServiceID must be the unresolved sentinel, never the raw "svc-checkout"
+	// label — that passthrough was the bug this hybrid-resolution feature
+	// exists to fix (a human-readable label is never a valid CMDB service
+	// UUID). internal/worker.resolveServiceID resolves the real UUID later,
+	// at delivery-attempt time, using the raw label still preserved
+	// separately in the payload (see the alertpayload assertion below).
+	if incidentReq.ServiceID != csmclient.UnresolvedServiceIDSentinel {
+		t.Errorf("ServiceID = %q, want the unresolved sentinel %q", incidentReq.ServiceID, csmclient.UnresolvedServiceIDSentinel)
+	}
+	var payload struct {
+		Service string `json:"service"`
+	}
+	if err := json.Unmarshal(store.enqueuedPayloads[0], &payload); err != nil {
+		t.Fatalf("buffered payload is not valid JSON: %v", err)
+	}
+	if payload.Service != "svc-checkout" {
+		t.Errorf("payload.Service = %q, want the raw label %q preserved for worker-side resolution", payload.Service, "svc-checkout")
 	}
 	if incidentReq.Impact != "HIGH" || incidentReq.Urgency != "HIGH" {
 		t.Errorf("Impact/Urgency = %s/%s, want HIGH/HIGH for critical severity", incidentReq.Impact, incidentReq.Urgency)
@@ -117,7 +134,7 @@ func TestCreateAlert_Success(t *testing.T) {
 // succeeding.
 func TestCreateAlert_NeverAttemptsDeliveryInline(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	r = withAuthenticatedUsername(r, "azure")
@@ -129,7 +146,7 @@ func TestCreateAlert_NeverAttemptsDeliveryInline(t *testing.T) {
 
 func TestCreateAlert_RejectsInvalidJSON(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader([]byte(`not json`)))
 	w := httptest.NewRecorder()
@@ -177,7 +194,7 @@ func TestCreateAlert_RejectsMissingRequiredFields(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &mockStore{}
-			h := NewAlertHandler(store, "caller-1")
+			h := NewAlertHandler(store, "caller-1", nil)
 
 			r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader([]byte(tc.body)))
 			r = withAuthenticatedUsername(r, tc.authSource)
@@ -194,7 +211,7 @@ func TestCreateAlert_RejectsMissingRequiredFields(t *testing.T) {
 
 func TestCreateAlert_RejectsOversizedBody(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	huge := bytes.Repeat([]byte("a"), maxRequestBodyBytes+1)
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(huge))
@@ -209,7 +226,7 @@ func TestCreateAlert_StoreFailureReturns500(t *testing.T) {
 	store := &mockStore{enqueueFn: func(ctx context.Context, id string, buildPayload func(string) ([]byte, error)) (string, error) {
 		return "", errors.New("connection refused")
 	}}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	r = withAuthenticatedUsername(r, "azure")
@@ -226,7 +243,7 @@ func TestCreateAlert_StoreFailureReturns500(t *testing.T) {
 // body itself is otherwise perfectly well-formed.
 func TestCreateAlert_MismatchedSourceReturns403(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	// validAlertJSON claims source "azure"; authenticate as a different,
 	// legitimately-configured credential instead.
@@ -248,7 +265,7 @@ func TestCreateAlert_MismatchedSourceReturns403(t *testing.T) {
 // own Source string.
 func TestCreateAlert_SourceMatchIsCaseInsensitiveAndTrimmed(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	r = withAuthenticatedUsername(r, "  AZURE  ")
@@ -268,7 +285,7 @@ func TestCreateAlert_SourceMatchIsCaseInsensitiveAndTrimmed(t *testing.T) {
 // let the request through unauthorized.
 func TestCreateAlert_NoAuthenticatedUsernameReturns500(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	w := httptest.NewRecorder()
@@ -283,7 +300,7 @@ func TestCreateAlert_NoAuthenticatedUsernameReturns500(t *testing.T) {
 
 func TestMapToIncident_UnmappedSourceOmitsContactType(t *testing.T) {
 	req := AlertRequest{Source: "datadog", Severity: "minor", Service: "svc", MetricName: "m", Description: "d"}
-	out := MapToIncident(req, "alert-id-1", "caller-1")
+	out := MapToIncident(req, "alert-id-1", "caller-1", nil)
 	if out.ContactType != nil {
 		t.Errorf("ContactType = %v, want nil for an unmapped source", out.ContactType)
 	}
@@ -291,9 +308,47 @@ func TestMapToIncident_UnmappedSourceOmitsContactType(t *testing.T) {
 
 func TestMapToIncident_CategoryPassthroughWhenValid(t *testing.T) {
 	req := AlertRequest{Source: "azure", Severity: "minor", Service: "svc", MetricName: "m", Description: "d", Category: "security"}
-	out := MapToIncident(req, "alert-id-1", "caller-1")
+	out := MapToIncident(req, "alert-id-1", "caller-1", nil)
 	if out.Category != "SECURITY" {
 		t.Errorf("Category = %q, want SECURITY", out.Category)
+	}
+}
+
+// TestMapToIncident_ServiceMapHitResolvesServiceID pins the static-map fast
+// path of the hybrid service-UUID resolution design: an exact match in
+// serviceMap is used immediately, synchronously — no sentinel, no deferred
+// resolution needed.
+func TestMapToIncident_ServiceMapHitResolvesServiceID(t *testing.T) {
+	req := AlertRequest{Source: "azure", Severity: "minor", Service: "Azure Monitoring", MetricName: "m", Description: "d"}
+	serviceMap := map[string]string{"Azure Monitoring": "33333333-3333-3333-3333-333333333333"}
+	out := MapToIncident(req, "alert-id-1", "caller-1", serviceMap)
+	if out.ServiceID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("ServiceID = %q, want the static-map match", out.ServiceID)
+	}
+}
+
+// TestMapToIncident_ServiceMapMissUsesSentinel pins the other half: a label
+// with no static-map entry (including a nil map entirely) gets
+// csmclient.UnresolvedServiceIDSentinel, never the raw label itself — the
+// bug this whole feature exists to fix was exactly "the raw label was sent
+// as ServiceID verbatim." internal/worker's live resolution is what turns
+// this into a real UUID later, not this function.
+func TestMapToIncident_ServiceMapMissUsesSentinel(t *testing.T) {
+	req := AlertRequest{Source: "azure", Severity: "minor", Service: "Some Unmapped Service", MetricName: "m", Description: "d"}
+
+	for name, serviceMap := range map[string]map[string]string{
+		"nil map":            nil,
+		"non-matching entry": {"A Different Service": "33333333-3333-3333-3333-333333333333"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := MapToIncident(req, "alert-id-1", "caller-1", serviceMap)
+			if out.ServiceID != csmclient.UnresolvedServiceIDSentinel {
+				t.Errorf("ServiceID = %q, want the unresolved sentinel %q", out.ServiceID, csmclient.UnresolvedServiceIDSentinel)
+			}
+			if out.ServiceID == req.Service {
+				t.Errorf("ServiceID must never be the raw, non-UUID Service label — got %q", out.ServiceID)
+			}
+		})
 	}
 }
 
@@ -303,7 +358,7 @@ func TestMapToIncident_CategoryPassthroughWhenValid(t *testing.T) {
 // so a future Subject-formatting tweak can't silently break it.
 func TestMapToIncident_SubjectStartsWithDedupTag(t *testing.T) {
 	req := AlertRequest{Source: "azure", Severity: "critical", Service: "svc-checkout", MetricName: "error_rate", Description: "d"}
-	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1")
+	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1", nil)
 	want := "[alert:1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed]"
 	if !strings.HasPrefix(out.Subject, want) {
 		t.Errorf("Subject = %q, want it to start with %q", out.Subject, want)
@@ -319,7 +374,7 @@ func TestMapToIncident_SubjectStartsWithDedupTag(t *testing.T) {
 // both tags in its Subject, dedup tag first, group tag second.
 func TestMapToIncident_SubjectIncludesGroupTagWhenUniqueIdentifierSet(t *testing.T) {
 	req := AlertRequest{Source: "azure", Severity: "critical", Service: "svc-checkout", MetricName: "error_rate", Description: "d", UniqueIdentifier: "uid-123"}
-	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1")
+	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1", nil)
 	want := csmclient.DedupTag("1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed") + " " + csmclient.GroupTag("azure", "uid-123") + " [azure] error_rate alert: svc-checkout"
 	if out.Subject != want {
 		t.Errorf("Subject = %q, want %q", out.Subject, want)
@@ -333,7 +388,7 @@ func TestMapToIncident_SubjectIncludesGroupTagWhenUniqueIdentifierSet(t *testing
 // meaningless tag either.
 func TestMapToIncident_SubjectOmitsGroupTagWhenNoUniqueIdentifier(t *testing.T) {
 	req := AlertRequest{Source: "azure", Severity: "critical", Service: "svc-checkout", MetricName: "error_rate", Description: "d"}
-	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1")
+	out := MapToIncident(req, "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "caller-1", nil)
 	if strings.Contains(out.Subject, "[group:") {
 		t.Errorf("Subject = %q, want no group tag when UniqueIdentifier is empty", out.Subject)
 	}
@@ -377,7 +432,7 @@ func TestDeriveAlertStatus(t *testing.T) {
 // depends on these being present in what actually gets persisted.
 func TestCreateAlert_PersistsGroupingFieldsAlongsideMappedIncident(t *testing.T) {
 	store := &mockStore{}
-	h := NewAlertHandler(store, "caller-1")
+	h := NewAlertHandler(store, "caller-1", nil)
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
 	r = withAuthenticatedUsername(r, "azure")

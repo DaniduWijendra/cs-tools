@@ -72,6 +72,23 @@ type CreateIncidentResult struct {
 	IncidentNumber string
 }
 
+// UnresolvedServiceIDSentinel is the CreateIncidentRequest.ServiceID value
+// internal/handler.MapToIncident writes when its static SRE_ALERT_SERVICE_MAP
+// lookup has no entry for the alert's raw Service label at buffering time
+// (see that function's doc comment for the full hybrid-resolution design).
+//
+// Deliberately the empty string — Go's own zero value for this field — for
+// two reasons: it is unambiguous against a real CMDB service UUID (always a
+// non-empty, hyphenated 36-character string, per entity-service's own
+// `format: uuid` contract), and it reuses rather than shadows the zero value
+// ServiceID would already carry if this field were simply left unset. This
+// sentinel is never sent to csm-integration-service as-is — internal/worker
+// checks for exactly this value immediately before calling CreateIncident,
+// and resolves a real UUID (from its own in-memory cache, a live
+// /services/search call, or the configured unknown-service fallback) before
+// the request goes out. See internal/worker.resolveServiceID.
+const UnresolvedServiceIDSentinel = ""
+
 // CreateIncident calls POST /incidents on csm-integration-service.
 //
 // A 401 is possible here, but it is not an unconditional architectural

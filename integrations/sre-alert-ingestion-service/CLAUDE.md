@@ -145,6 +145,47 @@ an inline delivery attempt to `CreateAlert` "for lower latency to first
 attempt" — that's what `SRE_ALERT_POLL_INTERVAL_SECONDS` is for; a crash
 between an inline attempt and persisting would silently lose the alert.
 
+## Service-UUID resolution: static map on the fast path, live search only in the worker
+
+`CreateIncidentRequest.ServiceID` must be a CMDB service UUID
+(`format: uuid` on `csm-integration-service`'s own contract); the alert's own
+`Service` field is a human-readable label a vendor sends (Azure's
+`monitoringService`, or a fixed adapter literal like `"Site24x7
+Monitoring"`), never a UUID. Passing that label straight through as
+`ServiceID` was a confirmed bug (every alert from every source failed
+delivery) — the fix is a hybrid resolution split across two places, for the
+exact same reason `MapToIncident` runs synchronously (see "Persist-first is
+not an optimization" above): a network call must never sit on the request
+path before the `202` response.
+
+- **`internal/handler.MapToIncident`** consults `SRE_ALERT_SERVICE_MAP` (a
+  static, exact-match label→UUID table, parsed once at startup in
+  `cmd/server/main.go`) synchronously — pure in-process map lookup, no I/O.
+  A miss writes `csmclient.UnresolvedServiceIDSentinel` (the empty string,
+  deliberately Go's own zero value — see that constant's doc comment for
+  why) instead of ever calling `/services/search` inline. The raw label is
+  never lost: `alertpayload.Payload.Service` already preserves it
+  separately from `CreateIncidentRequest`.
+- **`internal/worker.resolveServiceID`** does the live half, once per
+  delivery attempt, immediately before `CreateIncident` — never earlier.
+  Order: an in-memory, TTL-bounded cache (`internal/worker.serviceCache`,
+  default 15 minutes, only successful resolutions ever cached — a
+  zero-result or transient error must not pin an alert to a stale answer)
+  → a live `POST /services/search` call (`csmclient.Client.SearchServices`,
+  limit 1, exact-match `searchQuery`) → `SRE_ALERT_UNKNOWN_SERVICE_ID` on a
+  **confirmed** zero-result. A transient search error is NOT translated
+  into the unknown-service fallback — it's folded into
+  `internal/worker.handleDeliveryFailure`, the exact same retryable-failure
+  path a `CreateIncident` error takes (`isRetryable`), so a search hiccup
+  gets retried like any other CSM-unavailability signal, not silently
+  bucketed as "this label doesn't exist."
+
+Do not resolve a label inline in `MapToIncident` "to avoid the worker doing
+it later" — that reintroduces the exact network-call-before-persist problem
+"Persist-first is not an optimization" above exists to prevent. Do not cache
+a zero-result or a search error in `serviceCache` either — both need to be
+retried, not pinned for `serviceCache`'s TTL.
+
 ## Backoff-due filtering happens in Go, not SQL
 
 `internal/store.PostgresStore.PendingBatch` returns *every* `pending` row

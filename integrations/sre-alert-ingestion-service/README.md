@@ -108,6 +108,8 @@ Copy `.env.example` to `.env` and fill in the values:
 | `CSM_INTEGRATION_CLIENT_SECRET` | OAuth2 client secret |
 | `CSM_INTEGRATION_SCOPES` | Comma-separated OAuth2 scopes |
 | `SRE_ALERT_CALLER_ID` | A real, provisioned platform user id — see "Known limitations" |
+| `SRE_ALERT_SERVICE_MAP` | Optional JSON object, `{"<label>":"<CMDB service UUID>", ...}` — the static half of service-UUID resolution, see "Service-UUID resolution" below |
+| `SRE_ALERT_UNKNOWN_SERVICE_ID` | Required. CMDB "Unclassified" service UUID, used when a label has no static-map entry and a live search finds no match — see "Service-UUID resolution" below |
 | `SRE_ALERT_AUTH_USERS` | Required. Comma-separated `username:bcryptHash` pairs for inbound HTTP Basic Auth on `POST /alerts` — generate a hash with `go run ./cmd/server gen-basic-auth-hash` |
 | `SRE_ALERT_MAX_RETRIES` | Retryable-failure count before escalation (default `3`) |
 | `SRE_ALERT_POLL_INTERVAL_SECONDS` | How often the worker scans the buffer (default `15`) |
@@ -378,6 +380,34 @@ the SN flow (permanently disabled) or a Postgres-side mapping table (a
 dependency this service exists specifically to avoid), this mechanism has
 no dependency beyond the same `POST /incidents/search` call the dedup
 mechanism above already makes.
+
+## Service-UUID resolution
+
+`CreateIncidentRequest.ServiceID` must be a CMDB service UUID, but
+`AlertRequest.Service` is a human-readable label (a vendor's own field, e.g.
+Azure's `monitoringService`, or a fixed literal like `"Site24x7
+Monitoring"`) — never a UUID itself. Resolving one to the other is a
+two-step, hybrid design, split across the request path and the worker for
+the same "persist before any delivery attempt" reason described above:
+
+1. **Static map, synchronous, in the request path.** `SRE_ALERT_SERVICE_MAP`
+   (an exact-match label → UUID JSON object) is checked by
+   `internal/handler.MapToIncident` before an alert is ever buffered — pure
+   in-process map lookup, no I/O, safe on the fast path. A match resolves
+   `ServiceID` immediately; a miss buffers `ServiceID` as
+   `csmclient.UnresolvedServiceIDSentinel` (the empty string) instead, with
+   the raw label preserved separately in the row's payload.
+2. **Live search, at delivery-attempt time, in the worker.**
+   `internal/worker.resolveServiceID` runs immediately before
+   `CreateIncident`, only for a row still carrying the sentinel: an
+   in-memory, TTL-bounded cache (`internal/worker.serviceCache`, 15 minutes)
+   is checked first, then a live `POST /services/search` call
+   (`csmclient.Client.SearchServices`, exact-match, limit 1) against
+   `csm-integration-service`. A match is cached and used; a confirmed
+   zero-result search falls back to `SRE_ALERT_UNKNOWN_SERVICE_ID`; a
+   transient error from the search itself is treated exactly like any other
+   retryable `CreateIncident` failure, never silently bucketed as
+   "unknown."
 
 ## Known limitations
 

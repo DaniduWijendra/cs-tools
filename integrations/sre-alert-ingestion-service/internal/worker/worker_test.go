@@ -119,6 +119,14 @@ type mockIncidentCreator struct {
 	createMappingFn    func(ctx context.Context, req csmclient.CreateAlertIncidentMappingRequest) (*csmclient.AlertIncidentMappingView, error)
 	createMappingCalls int
 	createMappingReqs  []csmclient.CreateAlertIncidentMappingRequest
+
+	// searchServicesFn is optional; when nil, SearchServices reports "no
+	// match, no error" (an empty slice) — the common case for tests whose
+	// buffered row already carries a resolved ServiceID and never reaches
+	// resolveServiceID at all.
+	searchServicesFn     func(ctx context.Context, label string) ([]csmclient.ITService, error)
+	searchServicesCalls  int
+	searchServicesLabels []string
 }
 
 func (m *mockIncidentCreator) CreateIncident(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
@@ -154,6 +162,15 @@ func (m *mockIncidentCreator) CreateAlertIncidentMapping(ctx context.Context, re
 	return &csmclient.AlertIncidentMappingView{}, nil
 }
 
+func (m *mockIncidentCreator) SearchServices(ctx context.Context, label string) ([]csmclient.ITService, error) {
+	m.searchServicesCalls++
+	m.searchServicesLabels = append(m.searchServicesLabels, label)
+	if m.searchServicesFn != nil {
+		return m.searchServicesFn(ctx, label)
+	}
+	return nil, nil
+}
+
 // mockEscalator is a hand-rolled Escalator double.
 type mockEscalator struct {
 	err      error
@@ -179,6 +196,28 @@ func rowWithPayload(t *testing.T, id string, retryCount int, lastAttemptAt *time
 		RetryCount:    retryCount,
 		LastAttemptAt: lastAttemptAt,
 		Payload:       []byte(`{"callerId":"caller-1","category":"SERVICE_INTERRUPTION","serviceId":"svc-1","impact":"HIGH","urgency":"HIGH","subject":"test"}`),
+	}
+}
+
+// rowWithUnresolvedService is rowWithPayload's variant for service-UUID
+// resolution tests: serviceId is the empty string
+// (csmclient.UnresolvedServiceIDSentinel — what internal/handler.MapToIncident
+// persists when SRE_ALERT_SERVICE_MAP has no entry for the alert's raw
+// Service label), and the raw label itself is carried in the payload's own
+// "service" field, matching what a real buffered row looks like in that
+// case.
+func rowWithUnresolvedService(t *testing.T, id, service string, retryCount int) store.AlertRecord {
+	t.Helper()
+	payload := fmt.Sprintf(
+		`{"callerId":"caller-1","category":"SERVICE_INTERRUPTION","serviceId":"","impact":"HIGH","urgency":"HIGH","subject":"test","service":%q}`,
+		service,
+	)
+	return store.AlertRecord{
+		ID:          id,
+		AlertNumber: id,
+		Status:      store.StatusPending,
+		RetryCount:  retryCount,
+		Payload:     []byte(payload),
 	}
 }
 
@@ -616,6 +655,9 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 	if cfg.GroupWindow != 15*time.Minute {
 		t.Errorf("default GroupWindow = %v, want 15m", cfg.GroupWindow)
+	}
+	if cfg.ServiceCacheTTL != 15*time.Minute {
+		t.Errorf("default ServiceCacheTTL = %v, want 15m", cfg.ServiceCacheTTL)
 	}
 }
 
@@ -1055,5 +1097,159 @@ func TestRunOnce_ShortCircuitRetryBudgetExhausted_Escalates(t *testing.T) {
 	}
 	if len(s.delivered) != 0 {
 		t.Errorf("delivered = %+v, want none — MarkDelivered failed again", s.delivered)
+	}
+}
+
+// ----- hybrid service-UUID resolution (resolveServiceID) -----
+
+// TestRunOnce_ServiceAlreadyResolved_NeverCallsSearchServices pins the
+// static-map fast path's contract from the worker's side: a row whose
+// buffered ServiceID is already a real value (internal/handler.MapToIncident's
+// SRE_ALERT_SERVICE_MAP hit) must never trigger a live /services/search call
+// at all — resolveServiceID is gated entirely on the sentinel check in
+// attempt.
+func TestRunOnce_ServiceAlreadyResolved_NeverCallsSearchServices(t *testing.T) {
+	row := rowWithPayload(t, "alert-1", 0, nil) // serviceId is already "svc-1", not the sentinel
+	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row}, nil
+	}}
+	csm := &mockIncidentCreator{createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+		if req.ServiceID != "svc-1" {
+			t.Errorf("ServiceID = %q, want the row's already-resolved svc-1 left untouched", req.ServiceID)
+		}
+		return &csmclient.CreateIncidentResult{IncidentID: "inc-1"}, nil
+	}}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3, UnknownServiceID: "unknown-svc-uuid"})
+	w.RunOnce(context.Background())
+
+	if csm.searchServicesCalls != 0 {
+		t.Errorf("SearchServices called %d times, want 0 — the row's ServiceID was already resolved", csm.searchServicesCalls)
+	}
+	if len(s.delivered) != 1 {
+		t.Errorf("delivered = %+v, want one row", s.delivered)
+	}
+}
+
+// TestRunOnce_UnresolvedService_LiveSearchHit_ResolvesAndCaches covers both
+// "static-map miss + live-search hit + cache populated" and "cache hit on a
+// second alert with the same label": the second RunOnce pass, for a
+// different alert reporting the same Service label, must not call
+// SearchServices again.
+func TestRunOnce_UnresolvedService_LiveSearchHit_ResolvesAndCaches(t *testing.T) {
+	row := rowWithUnresolvedService(t, "alert-1", "Azure Monitoring", 0)
+	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row}, nil
+	}}
+	var gotServiceID string
+	csm := &mockIncidentCreator{
+		createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+			gotServiceID = req.ServiceID
+			return &csmclient.CreateIncidentResult{IncidentID: "inc-1"}, nil
+		},
+		searchServicesFn: func(ctx context.Context, label string) ([]csmclient.ITService, error) {
+			if label != "Azure Monitoring" {
+				t.Errorf("SearchServices label = %q, want %q", label, "Azure Monitoring")
+			}
+			return []csmclient.ITService{{ID: "33333333-3333-3333-3333-333333333333", Name: "Azure Monitoring"}}, nil
+		},
+	}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3, UnknownServiceID: "unknown-svc-uuid"})
+	w.RunOnce(context.Background())
+
+	if csm.searchServicesCalls != 1 {
+		t.Fatalf("SearchServices called %d times, want 1", csm.searchServicesCalls)
+	}
+	if gotServiceID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("CreateIncident ServiceID = %q, want the live-resolved UUID", gotServiceID)
+	}
+	if len(s.delivered) != 1 || s.delivered[0].id != "alert-1" {
+		t.Errorf("delivered = %+v, want one row for alert-1", s.delivered)
+	}
+
+	// A second, different alert reporting the exact same label: the cache
+	// populated above must be reused, not a second SearchServices call.
+	row2 := rowWithUnresolvedService(t, "alert-2", "Azure Monitoring", 0)
+	s.pendingBatchFn = func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row2}, nil
+	}
+	w.RunOnce(context.Background())
+
+	if csm.searchServicesCalls != 1 {
+		t.Errorf("SearchServices called %d times across two RunOnce passes for the same label, want 1 (cache hit on the second)", csm.searchServicesCalls)
+	}
+	if len(s.delivered) != 2 {
+		t.Errorf("delivered = %+v, want two rows (alert-1 and alert-2)", s.delivered)
+	}
+}
+
+// TestRunOnce_UnresolvedService_ZeroResult_FallsBackToUnknownServiceID pins
+// the confirmed-zero-result fallback: SearchServices returning an empty,
+// error-free slice must resolve to Config.UnknownServiceID, not be treated
+// as a failure of any kind.
+func TestRunOnce_UnresolvedService_ZeroResult_FallsBackToUnknownServiceID(t *testing.T) {
+	row := rowWithUnresolvedService(t, "alert-1", "Totally Unknown Service", 0)
+	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row}, nil
+	}}
+	var gotServiceID string
+	csm := &mockIncidentCreator{
+		createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+			gotServiceID = req.ServiceID
+			return &csmclient.CreateIncidentResult{IncidentID: "inc-1"}, nil
+		},
+		searchServicesFn: func(ctx context.Context, label string) ([]csmclient.ITService, error) {
+			return nil, nil // confirmed zero-result: no match, no error
+		},
+	}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3, UnknownServiceID: "unknown-svc-uuid"})
+	w.RunOnce(context.Background())
+
+	if gotServiceID != "unknown-svc-uuid" {
+		t.Errorf("CreateIncident ServiceID = %q, want the configured unknown-service fallback %q", gotServiceID, "unknown-svc-uuid")
+	}
+	if len(s.delivered) != 1 {
+		t.Errorf("delivered = %+v, want one row — a zero-result search is not a failure", s.delivered)
+	}
+}
+
+// TestRunOnce_UnresolvedService_TransientSearchError_StaysRetryable pins the
+// last required case: a transient error from SearchServices itself (as
+// opposed to a confirmed zero-result) must be folded into the exact same
+// retryable-delivery-failure path a CreateIncident error takes — retried,
+// never marked permanently failed, and never silently bucketed into the
+// unknown-service fallback.
+func TestRunOnce_UnresolvedService_TransientSearchError_StaysRetryable(t *testing.T) {
+	row := rowWithUnresolvedService(t, "alert-1", "Azure Monitoring", 0)
+	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row}, nil
+	}}
+	csm := &mockIncidentCreator{
+		createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+			t.Fatal("CreateIncident must not be called when service resolution itself failed")
+			return nil, nil
+		},
+		searchServicesFn: func(ctx context.Context, label string) ([]csmclient.ITService, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3, UnknownServiceID: "unknown-svc-uuid"})
+	w.RunOnce(context.Background())
+
+	if len(s.attemptFailed) != 1 || s.attemptFailed[0].id != "alert-1" {
+		t.Errorf("attemptFailed = %+v, want one retryable failure for alert-1", s.attemptFailed)
+	}
+	if len(s.failed) != 0 {
+		t.Errorf("failed = %+v, want none — a transient search error is retryable, not terminal", s.failed)
+	}
+	if len(s.delivered) != 0 {
+		t.Errorf("delivered = %+v, want none", s.delivered)
 	}
 }
