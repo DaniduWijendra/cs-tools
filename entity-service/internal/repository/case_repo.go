@@ -691,6 +691,8 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		depID, depName                           *string
 		dpID, dpDisplayName                      *string
 		prodID, prodName                         *string
+		creTeamID, creTeamName                   *string
+		sreTeamID, sreTeamName                   *string
 		creatorEmail                             string
 		creatorID, creatorName                   *string
 	)
@@ -716,6 +718,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		        dp.id, prod.name || COALESCE(' ' || pv.version, ''),
 		        prod.id, prod.name,
 		        a.id, a.name,
+		        cre.id, cre.name, sre.id, sre.name,
 		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
 		        pw.id, pw.number, pw.type::TEXT,
 		        rc_wi.id, rc_wi.number
@@ -725,6 +728,8 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		 LEFT JOIN "user" creator ON LOWER(creator.email) = LOWER(wi.created_by)
 		 LEFT JOIN project p ON p.id = wi.project_id
 		 LEFT JOIN account a ON a.id = wi.account_id
+		 LEFT JOIN "group" cre ON cre.id = a.cre_team_id
+		 LEFT JOIN "group" sre ON sre.id = a.sre_team_id
 		 LEFT JOIN deployment d ON d.id = wi.deployment_id
 		 LEFT JOIN deployed_product dp ON dp.id = wi.deployed_product_id
 		 LEFT JOIN product prod ON prod.id = dp.product_id
@@ -747,6 +752,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		&dpID, &dpDisplayName,
 		&prodID, &prodName,
 		&accountID, &accountName,
+		&creTeamID, &creTeamName, &sreTeamID, &sreTeamName,
 		&aeID, &aeName, &aeEmail,
 		&pcID, &pcNum, &pcType,
 		&rcID, &rcNum,
@@ -837,7 +843,18 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		}
 		// Type (support tier) has no real column anywhere in the migrations
 		// -- account has no tier-like column at all -- so it is left "".
-		cv.AccountDetails = &domain.AccountRef{ID: *accountID, Name: name}
+		// CreTeam/SreTeam are account.cre_team_id/sre_team_id (migration
+		// 000074, ex-integration_cs_team_id), real FKs into "group" now --
+		// see accountSelectColumns' own comment in account_repo.go for the
+		// same join, added for the dedicated /accounts endpoint.
+		accountRef := &domain.AccountRef{ID: *accountID, Name: name}
+		if creTeamID != nil {
+			accountRef.CreTeam = &domain.EntityRef{ID: *creTeamID, Name: stringOrEmpty(creTeamName)}
+		}
+		if sreTeamID != nil {
+			accountRef.SreTeam = &domain.EntityRef{ID: *sreTeamID, Name: stringOrEmpty(sreTeamName)}
+		}
+		cv.AccountDetails = accountRef
 	}
 	if workState != nil {
 		ws := domain.CaseWorkState(strings.ToLower(*workState))

@@ -386,11 +386,13 @@ type AccountView struct {
 	TechnicalOwner        *PersonRef `json:"technicalOwner"`
 	AccountManager        *PersonRef `json:"accountManager"`
 	RenewalAccountManager *PersonRef `json:"renewalAccountManager"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only). Mirrors AccountRef.CreTeam.
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source. Mirrors AccountRef.CreTeam.
 	CreTeam *EntityRef `json:"creTeam"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only). Mirrors AccountRef.SreTeam.
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source. Mirrors AccountRef.SreTeam.
 	SreTeam          *EntityRef `json:"sreTeam"`
 	ActivationDate   *string    `json:"activationDate"`
 	DeactivationDate *string    `json:"deactivationDate"`
@@ -441,11 +443,13 @@ type AccountDetail struct {
 	TechnicalOwner        *PersonRef        `json:"technicalOwner"`
 	AccountManager        *PersonRef        `json:"accountManager"`
 	RenewalAccountManager *PersonRef        `json:"renewalAccountManager"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only). Mirrors AccountRef.CreTeam.
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source. Mirrors AccountRef.CreTeam.
 	CreTeam *EntityRef `json:"creTeam"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only). Mirrors AccountRef.SreTeam.
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source. Mirrors AccountRef.SreTeam.
 	SreTeam          *EntityRef `json:"sreTeam"`
 	ActivationDate   *string    `json:"activationDate"`
 	DeactivationDate *string    `json:"deactivationDate"`
@@ -1908,11 +1912,13 @@ type AccountRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Type string `json:"type"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only).
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source, see CaseRepository.GetCaseByID.
 	CreTeam *EntityRef `json:"creTeam,omitempty"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only).
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source, see CaseRepository.GetCaseByID.
 	SreTeam *EntityRef `json:"sreTeam,omitempty"`
 }
 
