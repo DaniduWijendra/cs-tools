@@ -172,6 +172,36 @@ func TestSearchAnnouncementRegistry_GroupsCasesBelongingToTheSameRequest(t *test
 	}
 }
 
+// Reported live: a batch row's Created By column showed a raw, unreadable
+// IdP account id (e.g. "e441e951-a2f5-4813-b308-817f128f4660") right next to
+// "case" rows in the same list, which already show a resolved name/email --
+// registryAnnouncementRequestView.CreatedBy is that raw id, with nothing
+// preferring the request's own CreatedByEmail the way the Pending tab's row
+// already does.
+func TestSearchAnnouncementRegistry_BatchRowPrefersCreatedByEmailOverTheRawId(t *testing.T) {
+	client := &mockEntityAnnouncementRegistryClient{
+		searchCasesFn: singlePageCases(`[
+			{"id":"case-1","number":"CS001","internalId":"ACME-1","subject":"Maintenance","updatedOn":"2026-07-02T00:00:00Z","createdOn":"2026-07-01T00:00:00Z","project":{"id":"p-1","name":"Acme"}}
+		]`, 1),
+		searchAnnouncementRequestsFn: singlePageRequests(`[
+			{"id":"req-1","subject":"Maintenance","createdBy":"e441e951-a2f5-4813-b308-817f128f4660","createdByEmail":"jane@example.com","createdAt":"2026-07-01T00:00:00Z","updatedAt":"2026-07-02T00:00:00Z","publishedCaseIds":["case-1"]}
+		]`, 1),
+	}
+	h := NewAnnouncementRegistryHandler(client)
+	r := withUser(httptest.NewRequest(http.MethodPost, "/announcements/registry/search", strings.NewReader(`{"pagination":{"limit":20}}`)))
+	w := httptest.NewRecorder()
+	h.SearchAnnouncementRegistry(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	var got registrySearchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v; raw: %s", err, w.Body.String())
+	}
+	if len(got.Rows) != 1 || got.Rows[0].CreatedBy != "jane@example.com" {
+		t.Fatalf("expected the batch row's createdBy to be the resolved email, not the raw id, got %+v", got.Rows)
+	}
+}
+
 // A batch of 3+ member cases is the shape reported live (a real published
 // request whose "3 projects" summary had no way to reveal any of the 3
 // underlying CS numbers) — locks in that every member beyond the first two
