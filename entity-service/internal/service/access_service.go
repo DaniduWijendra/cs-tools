@@ -137,7 +137,12 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 	return access.ResolveScope(ctx)
 }
 
-// authorizeProject refuses a caller who may not see projectID.
+// authorizeProject refuses a caller who may not see projectID, and returns
+// the resolved scope so the caller can pass it on to any RLS-protected
+// repository query it makes on the project's behalf (see repository.SearchScope /
+// runWithCallerIdentity) -- authorizeProject already resolves this scope to
+// perform its own check, so returning it here means callers never need a
+// second ResolveScope call just to get the identity they must forward.
 //
 // Endpoints that return data for one project named in the path need this:
 // the id is caller-controlled, so validating only that the project EXISTS
@@ -149,18 +154,18 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 // GetProjectByID/GetCaseByID: a 403 would confirm the project exists to
 // someone not entitled to know that. Scope is resolved before any existence
 // lookup, so a caller cannot distinguish the two cases by timing either.
-func authorizeProject(ctx context.Context, access AccessService, projectID string) error {
+func authorizeProject(ctx context.Context, access AccessService, projectID string) (AccessScope, error) {
 	scope, err := access.ResolveScope(ctx)
 	if err != nil {
-		return err
+		return AccessScope{}, err
 	}
 	if scope.Unrestricted {
-		return nil
+		return scope, nil
 	}
 	for _, id := range scope.ProjectIDs {
 		if strings.EqualFold(id, projectID) {
-			return nil
+			return scope, nil
 		}
 	}
-	return &apierror.NotFoundError{Msg: "project not found"}
+	return AccessScope{}, &apierror.NotFoundError{Msg: "project not found"}
 }

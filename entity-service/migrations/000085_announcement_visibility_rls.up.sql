@@ -70,11 +70,14 @@ ALTER TABLE announcement ENABLE ROW LEVEL SECURITY;
 ALTER TABLE announcement FORCE ROW LEVEL SECURITY;
 
 -- The policy's EXISTS subquery filters project_contact by (project_id,
--- email) on every row check. There was no index covering that before this
--- migration -- confirmed by testing that the query planner falls back to a
--- full scan of project_contact for every announcement row without it.
+-- LOWER(email)) on every row check. There was no index covering that before
+-- this migration -- confirmed by testing that the query planner falls back
+-- to a full scan of project_contact for every announcement row without it.
+-- Expression index on LOWER(email), not a plain column index, since the
+-- policy itself compares LOWER(pc.email) -- a plain (project_id, email)
+-- index cannot satisfy that predicate and the planner would ignore it.
 CREATE INDEX IF NOT EXISTS idx_project_contact_project_id_email
-  ON project_contact (project_id, email);
+  ON project_contact (project_id, LOWER(email));
 
 CREATE POLICY announcement_visibility ON announcement
   FOR SELECT
@@ -88,7 +91,7 @@ CREATE POLICY announcement_visibility ON announcement
       JOIN project_group_role pgr ON pgr.project_group_id = pcg.project_group_id
       JOIN project_role pr ON pr.id = pgr.project_role_id
       WHERE wi.id = announcement.id
-        AND pc.email = current_setting('app.viewer_email', true)
+        AND LOWER(pc.email) = LOWER(current_setting('app.viewer_email', true))
         AND (
           (NOT announcement.is_security_announcement AND pr.role IN ('PORTAL_USER', 'LEAD_USER'))
           OR (announcement.is_security_announcement AND pr.role = 'SECURITY_CONTACT')

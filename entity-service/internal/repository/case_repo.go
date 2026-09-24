@@ -664,36 +664,6 @@ func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.Crea
 // other extension table has them); state/cause/close_notes/resolved_on/
 // closed_on are COALESCEd across whichever extension table actually matches
 // wi.type (caseLike*Column consts) since exactly one ever does.
-// setAnnouncementVisibility sets the two session-local GUCs the announcement
-// table's row-level-security policy (migration 000085) reads: app.is_internal
-// (Unrestricted -- true bypasses the restriction entirely, matching every
-// other scoped read's own all-access meaning for that flag) and
-// app.viewer_email (scope.ViewerEmail -- ignored by the policy once
-// is_internal is true, so it is never required to be non-empty here).
-//
-// tx must be the SAME transaction the caller runs its announcement-touching
-// query in, and this must be called before that query. Postgres's
-// set_config(..., true) ("LOCAL" scoping) only takes effect for the
-// remainder of the CURRENT transaction and reverts automatically at
-// COMMIT/ROLLBACK -- called as a bare statement outside a transaction, or in
-// a different transaction than the query that depends on it, it silently
-// has no effect on that query (confirmed empirically, not just reasoned
-// about, while building this policy). Calling it as its own statement ahead
-// of the query -- never inlined into the query's own WHERE clause -- is
-// also required: the query planner is free to evaluate the RLS policy's
-// qual before a non-leakproof function call like set_config() and was
-// observed doing exactly that under an index scan, silently using
-// whatever value the GUC held before this call ran.
-func setAnnouncementVisibility(ctx context.Context, tx pgx.Tx, scope SearchScope) error {
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.is_internal', $1, true)", fmt.Sprintf("%t", scope.Unrestricted)); err != nil {
-		return fmt.Errorf("set announcement visibility: is_internal: %w", err)
-	}
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.viewer_email', $1, true)", scope.ViewerEmail); err != nil {
-		return fmt.Errorf("set announcement visibility: viewer_email: %w", err)
-	}
-	return nil
-}
-
 func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope) (domain.CaseView, error) {
 	var cv domain.CaseView
 	var (
@@ -735,7 +705,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 	}
 
 	// A transaction, not a bare r.db.QueryRow, is required here purely so
-	// setAnnouncementVisibility's set_config calls and this SELECT share one
+	// setCallerIdentity's set_config calls and this SELECT share one
 	// transaction -- see that function's own comment for why. This read
 	// itself is not otherwise transactional.
 	tx, err := r.db.Begin(ctx)
@@ -743,7 +713,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		return domain.CaseView{}, fmt.Errorf("get case by id: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := setAnnouncementVisibility(ctx, tx, scope); err != nil {
+	if err := setCallerIdentity(ctx, tx, scope); err != nil {
 		return domain.CaseView{}, fmt.Errorf("get case by id: %w", err)
 	}
 
@@ -1756,7 +1726,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 	// one) specifically so they can still run concurrently on separate pool
 	// connections, same as before this change -- a pgx.Tx is bound to a
 	// single connection, so one shared transaction across both goroutines
-	// would have serialized them. setAnnouncementVisibility's set_config
+	// would have serialized them. setCallerIdentity's set_config
 	// calls must be repeated per transaction; there is no way to set them
 	// once and have both connections see it.
 	eg.Go(func() error {
@@ -1765,7 +1735,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			return fmt.Errorf("count cases: begin tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback(egCtx) }()
-		if err := setAnnouncementVisibility(egCtx, tx, scope); err != nil {
+		if err := setCallerIdentity(egCtx, tx, scope); err != nil {
 			return fmt.Errorf("count cases: %w", err)
 		}
 		if err := tx.QueryRow(egCtx, countQuery, filterArgs...).Scan(&total); err != nil {
@@ -1783,7 +1753,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			return fmt.Errorf("query cases: begin tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback(egCtx) }()
-		if err := setAnnouncementVisibility(egCtx, tx, scope); err != nil {
+		if err := setCallerIdentity(egCtx, tx, scope); err != nil {
 			return fmt.Errorf("query cases: %w", err)
 		}
 		rows, err := tx.Query(egCtx, dataQuery, dataArgs...)
