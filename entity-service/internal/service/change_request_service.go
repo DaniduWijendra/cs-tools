@@ -49,7 +49,17 @@ type changeRequestService struct {
 	// CreateChangeRequest delegates to createChangeRequestSNFirst instead of
 	// the plain Postgres path's ServiceUnavailableError below, mirroring
 	// incidentService's identical snMirror-gated branch for CreateIncident.
-	snMirror ChangeRequestService
+	//
+	// snWriteback is additionally set (via NewChangeRequestServiceWithSNWriteback)
+	// for PatchChangeRequest's best-effort, asynchronous ServiceNow mirror
+	// write -- see that method's own doc comment. Safe to mirror by id here,
+	// unlike call_request/time_card's writeback: change request CREATE is
+	// ServiceNow-first under this data source (createChangeRequestSNFirst),
+	// so a change request's Postgres id IS the real ServiceNow sys_id
+	// round-tripped through sysidToUUID -- uuidToSysid(id) always resolves to
+	// the correct ServiceNow record.
+	snMirror    ChangeRequestService
+	snWriteback *SNWritebackDispatcher
 }
 
 // NewChangeRequestService constructs a ChangeRequestService backed by
@@ -76,6 +86,18 @@ func NewChangeRequestService(repo repository.ChangeRequestRepository) ChangeRequ
 // here -- reads always stay on Postgres in this mode.
 func NewChangeRequestServiceWithSNMirror(repo repository.ChangeRequestRepository, mirror ChangeRequestService) ChangeRequestService {
 	return &changeRequestService{repo: repo, snMirror: mirror}
+}
+
+// NewChangeRequestServiceWithSNWriteback is NewChangeRequestServiceWithSNMirror
+// plus PatchChangeRequest's best-effort, asynchronous ServiceNow mirror write
+// -- see PatchChangeRequest's own doc comment, and changeRequestService's own
+// doc comment on snWriteback for why this is safe to do by id (unlike
+// call_request/time_card). A separate constructor rather than extending
+// NewChangeRequestServiceWithSNMirror's own signature: several existing
+// tests construct that one directly with dispatcher/writeback out of scope,
+// and keeping it as-is means they keep working unchanged.
+func NewChangeRequestServiceWithSNWriteback(repo repository.ChangeRequestRepository, mirror ChangeRequestService, dispatcher *SNWritebackDispatcher) ChangeRequestService {
+	return &changeRequestService{repo: repo, snMirror: mirror, snWriteback: dispatcher}
 }
 
 func validateChangeRequestFilters(f domain.SearchChangeRequestsFilters) error {
@@ -208,6 +230,26 @@ func (s *changeRequestService) PatchChangeRequest(ctx context.Context, id string
 	cr, err := s.repo.PatchChangeRequest(ctx, id, req, email)
 	if err != nil {
 		return domain.PatchChangeRequestResponse{}, err
+	}
+
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback is nil otherwise -- see changeRequestService's own
+	// doc comment on snWriteback). Postgres has already committed by this
+	// point; this fires after, asynchronously, and never affects this
+	// response. Safe to mirror by id -- see that same doc comment for why.
+	// snMirror.PatchChangeRequest (sn_change_request_service.go) is already
+	// a bare PATCH with no GET-before-write or notification side effects, so
+	// it's called directly here rather than through a narrower interface
+	// (unlike case's UpdateCase, which needed patchCaseFields specifically
+	// to avoid snCaseService.UpdateCase's own read-before-write behavior).
+	if s.snWriteback != nil {
+		mirrorID, mirrorReq := id, req
+		s.snWriteback.Dispatch(ctx, "change_request", id, "patch", req,
+			func(writeCtx context.Context) error {
+				_, err := s.snMirror.PatchChangeRequest(writeCtx, mirrorID, mirrorReq)
+				return err
+			},
+		)
 	}
 
 	return domain.PatchChangeRequestResponse{

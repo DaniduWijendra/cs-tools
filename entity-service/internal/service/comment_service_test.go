@@ -17,10 +17,118 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
+
+// stubCommentRepo is a minimal repository.CommentRepository whose
+// unconfigured methods panic if called -- same convention as
+// stubCallRequestRepo (call_request_service_test.go).
+type stubCommentRepo struct {
+	createComment func(ctx context.Context, referenceID string, referenceType domain.ReferenceType, typeEnum, content, createdBy string) (repository.CommentRow, error)
+}
+
+func (s *stubCommentRepo) CreateComment(ctx context.Context, referenceID string, referenceType domain.ReferenceType, typeEnum, content, createdBy string) (repository.CommentRow, error) {
+	if s.createComment != nil {
+		return s.createComment(ctx, referenceID, referenceType, typeEnum, content, createdBy)
+	}
+	panic("not implemented")
+}
+func (s *stubCommentRepo) SearchComments(context.Context, string, domain.ReferenceType, *string, domain.Pagination) ([]repository.CommentRow, int, error) {
+	panic("not implemented")
+}
+
+// stubMirrorCommentService embeds CommentService (nil) and overrides only
+// CreateComment -- same convention as stubMirrorCallRequestService.
+type stubMirrorCommentService struct {
+	CommentService
+	createComment func(ctx context.Context, req domain.CreateCommentRequest) (domain.CreateCommentResponse, error)
+}
+
+func (s *stubMirrorCommentService) CreateComment(ctx context.Context, req domain.CreateCommentRequest) (domain.CreateCommentResponse, error) {
+	return s.createComment(ctx, req)
+}
+
+// TestCommentService_CreateComment_MirrorsToServiceNow covers the writeback
+// wiring: on a successful Postgres create, the mirror's CreateComment is
+// dispatched asynchronously and does not block or affect the response.
+func TestCommentService_CreateComment_MirrorsToServiceNow(t *testing.T) {
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	req := domain.CreateCommentRequest{ReferenceID: testUUID, ReferenceType: domain.ReferenceTypeIncident, Type: domain.CommentTypeComment, Content: "hello"}
+
+	called := make(chan domain.CreateCommentRequest, 1)
+	mirror := &stubMirrorCommentService{
+		createComment: func(_ context.Context, mirrorReq domain.CreateCommentRequest) (domain.CreateCommentResponse, error) {
+			called <- mirrorReq
+			return domain.CreateCommentResponse{}, nil
+		},
+	}
+	repo := &stubCommentRepo{
+		createComment: func(context.Context, string, domain.ReferenceType, string, string, string) (repository.CommentRow, error) {
+			return repository.CommentRow{ID: testUUID}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	svc := NewCommentServiceWithSNWriteback(repo, stubUserRepo{
+		getUserByEmail: func(context.Context, string) (domain.User, error) { return domain.User{ID: testUUID, Email: "jane.doe@example.com"}, nil },
+	}, dispatcher, mirror)
+
+	if _, err := svc.CreateComment(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case got := <-called:
+		if got.ReferenceID != req.ReferenceID || got.Content != req.Content {
+			t.Errorf("mirror got %+v, want referenceId/content to match %+v", got, req)
+		}
+		if got.CreatedBy != "jane.doe@example.com" {
+			t.Errorf("mirror got createdBy %q, want the resolved caller email", got.CreatedBy)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.CreateComment was never called")
+	}
+	if got := failures.count(); got != 0 {
+		t.Errorf("expected 0 sn_writeback_failures records for a successful mirror, got %d", got)
+	}
+}
+
+// TestCommentService_CreateComment_MirrorFailureRecordsWritebackFailure
+// covers the failure half: Postgres already succeeded, so the call must
+// still report success, but the mirror error lands in sn_writeback_failures
+// for manual backfill.
+func TestCommentService_CreateComment_MirrorFailureRecordsWritebackFailure(t *testing.T) {
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	req := domain.CreateCommentRequest{ReferenceID: testUUID, ReferenceType: domain.ReferenceTypeIncident, Type: domain.CommentTypeComment, Content: "hello"}
+
+	mirror := &stubMirrorCommentService{
+		createComment: func(context.Context, domain.CreateCommentRequest) (domain.CreateCommentResponse, error) {
+			return domain.CreateCommentResponse{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubCommentRepo{
+		createComment: func(context.Context, string, domain.ReferenceType, string, string, string) (repository.CommentRow, error) {
+			return repository.CommentRow{ID: testUUID}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	svc := NewCommentServiceWithSNWriteback(repo, stubUserRepo{
+		getUserByEmail: func(context.Context, string) (domain.User, error) { return domain.User{ID: testUUID, Email: "jane.doe@example.com"}, nil },
+	}, dispatcher, mirror)
+
+	if _, err := svc.CreateComment(ctx, req); err != nil {
+		t.Fatalf("expected the Postgres-side success to be reported despite the mirror failure, got %v", err)
+	}
+
+	waitFor(t, func() bool { return failures.count() == 1 })
+}
 
 // TestCommentRowToDomain_PrefersResolvedName covers a real bug found live:
 // the webapp showed a commenter's raw email ("dinithin@wso2.com") instead of
