@@ -773,6 +773,9 @@ func TestAnnouncementRequestService_AutoPublish(t *testing.T) {
 		if len(cases.taggedCases) != 1 || cases.taggedCases[0] != "case-existing" {
 			t.Fatalf("expected only the tag_failed project's existing case retagged, got %v", cases.taggedCases)
 		}
+		if len(cases.taggedActorEmails) != 1 || cases.taggedActorEmails[0] != "user-3@example.com" {
+			t.Fatalf("expected the retry to use the request's CreatedByEmail, got %v", cases.taggedActorEmails)
+		}
 	})
 
 	t.Run("returns a conflict without touching cases when the claim is already held (overlapping attempt)", func(t *testing.T) {
