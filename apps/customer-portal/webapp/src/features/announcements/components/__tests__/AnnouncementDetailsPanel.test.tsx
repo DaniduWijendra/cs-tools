@@ -88,6 +88,47 @@ describe("AnnouncementDetailsPanel", () => {
     expect(table).toHaveTextContent("4.2.0");
   });
 
+  it("shows a Security chip when the case carries the Security Announcement tag", () => {
+    render(
+      <AnnouncementDetailsPanel
+        data={{
+          title: "Critical vulnerability notice",
+          number: "ANN-102",
+          description: "<p>Details</p>",
+          status: { id: "1", label: "Open" },
+          createdOn: "2024-01-15T10:00:00Z",
+          tags: [{ id: "tag-1", label: "Security Announcement" }],
+        } as never}
+        isLoading={false}
+        isError={false}
+        caseId="case-1"
+        projectId="proj-1"
+        onBack={() => {}}
+      />,
+    );
+    expect(screen.getByText("Security")).toBeInTheDocument();
+  });
+
+  it("shows no Security chip when the case has no tags", () => {
+    render(
+      <AnnouncementDetailsPanel
+        data={{
+          title: "Maintenance window",
+          number: "ANN-100",
+          description: "<p>Details</p>",
+          status: { id: "1", label: "Open" },
+          createdOn: "2024-01-15T10:00:00Z",
+        } as never}
+        isLoading={false}
+        isError={false}
+        caseId="case-1"
+        projectId="proj-1"
+        onBack={() => {}}
+      />,
+    );
+    expect(screen.queryByText("Security")).not.toBeInTheDocument();
+  });
+
   it("renders back button while loading", () => {
     render(
       <AnnouncementDetailsPanel

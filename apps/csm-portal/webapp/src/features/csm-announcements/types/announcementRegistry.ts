@@ -48,6 +48,14 @@ export interface AnnouncementRegistryRow {
   announcementRequestId?: string;
   /** Set for kind="batch" only. */
   projectCount?: number;
+  /**
+   * Set for kind="batch" only — a bare legacy case (kind="case") has no
+   * owning request to read this from, and is never displayed as security
+   * even if its own case happens to carry the tag (the backend has no cheap
+   * way to know that for a whole page of rows — see the backend's own doc
+   * comment on this field).
+   */
+  isSecurityAnnouncement?: boolean;
   /** Every member case this batch's request published, one per project. Set for kind="batch" only. */
   cases?: AnnouncementRegistryCaseMember[];
 

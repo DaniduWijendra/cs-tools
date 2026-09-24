@@ -30,6 +30,27 @@ type Ref struct {
 	Name string `json:"name"`
 }
 
+// Tag is a free-text label attached to a case (e.g. "Security Announcement",
+// attached to every case a security announcement creates) — customer-
+// appropriate as-is, unlike most of this file's trimming: a tag is written
+// specifically to be visible, not an internal CSM annotation.
+type Tag struct {
+	ID    string  `json:"id"`
+	Label string  `json:"label"`
+	Color *string `json:"color,omitempty"`
+}
+
+func mapTags(tags []entity.Tag) []Tag {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]Tag, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, Tag{ID: t.ID, Label: t.Label, Color: t.Color})
+	}
+	return out
+}
+
 func mapRef(r *entity.EntityRef) *Ref {
 	if r == nil {
 		return nil
@@ -345,6 +366,7 @@ type CaseDetails struct {
 	// the label is built here — the same split as case status and severity.
 	EscalationLevel *IDLabelRef `json:"escalationLevel,omitempty"`
 	IsEscalated     *bool       `json:"isEscalated,omitempty"`
+	Tags            []Tag       `json:"tags,omitempty"`
 }
 
 // MapCaseDetails builds the portal response from entity-service's CaseView.
@@ -419,6 +441,7 @@ func MapCaseDetails(c entity.CaseView) CaseDetails {
 		Duration:            c.Duration,
 		EscalationLevel:     caseEscalationLevelRef(c.EscalationLevel),
 		IsEscalated:         c.IsEscalated,
+		Tags:                mapTags(c.Tags),
 	}
 }
 

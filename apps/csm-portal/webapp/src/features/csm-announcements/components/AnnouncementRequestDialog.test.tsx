@@ -832,6 +832,34 @@ describe("AnnouncementRequestDialog — published", () => {
     expect(screen.queryByRole("button", { name: /^publish$/i })).not.toBeInTheDocument();
   });
 
+  it("shows a persistent Security chip next to the subject once published, not just during the editable checkbox state", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      isSecurityAnnouncement: true,
+    });
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.getByText("Security")).toBeInTheDocument();
+  });
+
+  it("shows no Security chip for a non-security published request", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      isSecurityAnnouncement: false,
+    });
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.queryByText("Security")).not.toBeInTheDocument();
+  });
+
   it("shows a Delivered to list with each project's own case number when caseMembers is passed (e.g. opened from a batch row)", () => {
     mockGet({
       state: "published",
