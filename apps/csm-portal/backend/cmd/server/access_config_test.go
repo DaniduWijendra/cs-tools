@@ -40,7 +40,7 @@ func TestLoadAccessConfig(t *testing.T) {
 		for name, roles := range map[string][]string{
 			"Viewer": got.Viewer, "Escalator": got.Escalator,
 			"AttachmentDownloader": got.AttachmentDownloader, "UsageMetricsViewer": got.UsageMetricsViewer,
-			"SupportEngineer": got.SupportEngineer, "Admin": got.Admin,
+			"CsEngineer": got.CsEngineer, "Admin": got.Admin,
 			"TimecardApprover": got.TimecardApprover, "DashboardDesigner": got.DashboardDesigner,
 		} {
 			if len(roles) != 0 {
@@ -56,18 +56,21 @@ func TestLoadAccessConfig(t *testing.T) {
 		if want := []string{"test-notes", "test-interns"}; !slices.Equal(got.Escalator, want) {
 			t.Errorf("Escalator = %v, want %v", got.Escalator, want)
 		}
-		if len(got.SupportEngineer) != 0 {
-			t.Errorf("SupportEngineer = %v, want it untouched by another role's variable", got.SupportEngineer)
+		if len(got.CsEngineer) != 0 {
+			t.Errorf("CsEngineer = %v, want it untouched by another role's variable", got.CsEngineer)
 		}
 	})
 
+	// The env var name stays AUTH_SUPPORT_ENGINEER_ROLES even though the
+	// portal role and Go field were renamed to CsEngineer -- see
+	// handler.AccessConfig.CsEngineer's own doc comment for why.
 	t.Run("each role reads its own variable", func(t *testing.T) {
 		resetEnv(t)
 		t.Setenv("AUTH_SUPPORT_ENGINEER_ROLES", "test-se")
 		t.Setenv("AUTH_ADMIN_ROLES", "test-adm")
 		got := loadAccessConfig()
-		if !slices.Equal(got.SupportEngineer, []string{"test-se"}) || !slices.Equal(got.Admin, []string{"test-adm"}) {
-			t.Errorf("SupportEngineer = %v, Admin = %v", got.SupportEngineer, got.Admin)
+		if !slices.Equal(got.CsEngineer, []string{"test-se"}) || !slices.Equal(got.Admin, []string{"test-adm"}) {
+			t.Errorf("CsEngineer = %v, Admin = %v", got.CsEngineer, got.Admin)
 		}
 	})
 

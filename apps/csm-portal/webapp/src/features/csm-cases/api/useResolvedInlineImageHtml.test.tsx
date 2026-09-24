@@ -26,7 +26,7 @@ const { postMock, getBlobMock, sftpgoFlag, userRoles } = vi.hoisted(() => ({
   // Defaults to a role that can download attachments, so the existing
   // resolution tests below exercise the real fetch/data-URL path; the
   // permission tests further down override this per-case.
-  userRoles: { value: ["support_engineer"] as string[] },
+  userRoles: { value: ["cs_engineer"] as string[] },
 }));
 
 vi.mock("@api/backend/client", () => ({
@@ -63,7 +63,7 @@ describe("useResolvedInlineImageHtml", () => {
     postMock.mockReset();
     getBlobMock.mockReset();
     sftpgoFlag.enabled = false;
-    userRoles.value = ["support_engineer"];
+    userRoles.value = ["cs_engineer"];
   });
 
   it("flag off: resolves via GET /attachments/{id}/content into a data: URL", async () => {

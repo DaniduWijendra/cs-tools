@@ -102,7 +102,7 @@ type userMeResponse struct {
 	FirstName *string `json:"firstName,omitempty"`
 	LastName  *string `json:"lastName,omitempty"`
 	TimeZone  *string `json:"timeZone,omitempty"`
-	// Roles is which portal roles (viewer, support_engineer, admin, ...) the
+	// Roles is which portal roles (viewer, cs_engineer, admin, ...) the
 	// caller's token roles grant: several are possible. It is not the entity
 	// service's role data, which this response no longer carries. Always
 	// present, [] when they hold none.

@@ -80,11 +80,11 @@ vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: showErrorMock }),
 }));
 const CURRENT_USER_ID = "00000000-0000-0000-0000-00000000000c";
-// The signed-in user's portal roles. Defaults to a support engineer, who can
+// The signed-in user's portal roles. Defaults to a CS engineer, who can
 // do everything, so every test that isn't about role gating sees every control;
 // the role-gating describe below overrides it per test.
 const { currentUserRoles } = vi.hoisted(() => ({
-  currentUserRoles: { value: ["support_engineer"] as string[] },
+  currentUserRoles: { value: ["cs_engineer"] as string[] },
 }));
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   useCurrentUser: () => ({
@@ -1519,10 +1519,10 @@ describe("CsmCaseDetailPage — announcement comment composer", () => {
 
 describe("CsmCaseDetailPage — role-based controls", () => {
   afterEach(() => {
-    currentUserRoles.value = ["support_engineer"];
+    currentUserRoles.value = ["cs_engineer"];
   });
 
-  it("a support engineer sees the action bar and the reply composer", () => {
+  it("a CS engineer sees the action bar and the reply composer", () => {
     renderPage();
     expect(screen.getByRole("button", { name: /stub request info/i })).toBeInTheDocument();
     expect(
@@ -1548,14 +1548,14 @@ describe("CsmCaseDetailPage — role-based controls", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("the Time tracking tab needs support engineer, admin or the time-card approver role", () => {
+  it("the Time tracking tab needs CS engineer, admin or the time-card approver role", () => {
     for (const role of ["viewer", "escalator", "attachment_downloader"]) {
       currentUserRoles.value = [role];
       const { unmount } = renderPage();
       expect(screen.queryByRole("tab", { name: /time tracking/i })).not.toBeInTheDocument();
       unmount();
     }
-    for (const role of ["support_engineer", "admin", "timecard_approver"]) {
+    for (const role of ["cs_engineer", "admin", "timecard_approver"]) {
       currentUserRoles.value = [role];
       const { unmount } = renderPage();
       expect(screen.getByRole("tab", { name: /time tracking/i })).toBeInTheDocument();
@@ -1571,7 +1571,7 @@ describe("CsmCaseDetailPage — role-based controls", () => {
   });
 
   it("a ?tab=time deep link stays on Time tracking for a user with time-card access", () => {
-    for (const role of ["support_engineer", "timecard_approver"]) {
+    for (const role of ["cs_engineer", "timecard_approver"]) {
       currentUserRoles.value = [role];
       const { unmount } = renderPageAt("/cases/case-1?tab=time");
       expect(screen.getByRole("tab", { name: /time tracking/i })).toHaveAttribute("aria-selected", "true");
@@ -1589,7 +1589,7 @@ describe("CsmCaseDetailPage — role-based controls", () => {
   });
 
   it("gates Export as PDF on canWrite", () => {
-    currentUserRoles.value = ["support_engineer"];
+    currentUserRoles.value = ["cs_engineer"];
     const { unmount } = renderPage();
     expect(screen.getByRole("button", { name: /export as pdf/i })).toBeInTheDocument();
     unmount();

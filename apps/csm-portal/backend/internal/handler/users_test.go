@@ -290,9 +290,9 @@ func TestGetMeRoles(t *testing.T) {
 
 	t.Run("a caller can hold several roles, and unrelated token roles are ignored", func(t *testing.T) {
 		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, def), "agent@example.com",
-			[]string{"test-support-engineer", "test-usage-metrics-viewer", "wso2-everyone"})
-		if joined(resp.Roles) != "support_engineer,usage_metrics_viewer" {
-			t.Errorf("roles = %s, want support_engineer,usage_metrics_viewer", joined(resp.Roles))
+			[]string{"test-cs-engineer", "test-usage-metrics-viewer", "wso2-everyone"})
+		if joined(resp.Roles) != "cs_engineer,usage_metrics_viewer" {
+			t.Errorf("roles = %s, want cs_engineer,usage_metrics_viewer", joined(resp.Roles))
 		}
 	})
 

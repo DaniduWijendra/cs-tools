@@ -42,7 +42,7 @@ function lastActiveItem(): string | undefined {
 const navigateMock = vi.fn();
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   useCurrentUser: () => ({
-    user: { roles: ["support_engineer"] },
+    user: { roles: ["cs_engineer"] },
     isLoading: false,
     isError: false,
     error: null,

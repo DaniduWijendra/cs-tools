@@ -290,7 +290,7 @@ func userWithRoles(r *http.Request, roles []string) *http.Request {
 func TestGetDashboards_Restricted(t *testing.T) {
 	withRestrictedDashboard(t)
 
-	t.Run("a caller without a support-engineer/admin role never sees the restricted dashboard", func(t *testing.T) {
+	t.Run("a caller without a cs-engineer/admin role never sees the restricted dashboard", func(t *testing.T) {
 		h := NewDashboardHandler(NewAccessGuard(testAccessConfig()))
 		r := withUser(httptest.NewRequest(http.MethodGet, "/dashboards", nil))
 		w := httptest.NewRecorder()
@@ -311,7 +311,7 @@ func TestGetDashboards_Restricted(t *testing.T) {
 		}
 	})
 
-	for _, role := range []string{"test-support-engineer", "test-admin"} {
+	for _, role := range []string{"test-cs-engineer", "test-admin"} {
 		t.Run("a "+role+" sees every dashboard, including the restricted one", func(t *testing.T) {
 			h := NewDashboardHandler(NewAccessGuard(testAccessConfig()))
 			r := userWithRoles(httptest.NewRequest(http.MethodGet, "/dashboards", nil), []string{role})
@@ -342,7 +342,7 @@ func TestGetDashboards_Restricted(t *testing.T) {
 func TestGetDashboardDetail_Restricted(t *testing.T) {
 	withRestrictedDashboard(t)
 
-	t.Run("a caller without a support-engineer/admin role gets 403, not the dashboard", func(t *testing.T) {
+	t.Run("a caller without a cs-engineer/admin role gets 403, not the dashboard", func(t *testing.T) {
 		h := NewDashboardHandler(NewAccessGuard(testAccessConfig()))
 		r := withUser(withDashboardID(httptest.NewRequest(http.MethodGet, "/dashboards/restricted-dashboard", nil), "restricted-dashboard"))
 		w := httptest.NewRecorder()
@@ -359,7 +359,7 @@ func TestGetDashboardDetail_Restricted(t *testing.T) {
 		assertStatus(t, w, http.StatusOK)
 	})
 
-	for _, role := range []string{"test-support-engineer", "test-admin"} {
+	for _, role := range []string{"test-cs-engineer", "test-admin"} {
 		t.Run("a "+role+" can open the restricted dashboard", func(t *testing.T) {
 			h := NewDashboardHandler(NewAccessGuard(testAccessConfig()))
 			r := userWithRoles(withDashboardID(httptest.NewRequest(http.MethodGet, "/dashboards/restricted-dashboard", nil), "restricted-dashboard"), []string{role})

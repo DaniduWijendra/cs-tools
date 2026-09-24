@@ -40,8 +40,8 @@ const (
 	PermViewOperations
 	// PermTimeCardsAndUpdates is the Time Cards and Updates areas: every time-card
 	// route (search, create, update, delete) and the update-level lookups. Held by
-	// support engineer and admin, and by the time-card approver so approving does
-	// not require being a support engineer. Narrower than PermView on purpose: a
+	// the CS engineer and admin, and by the time-card approver so approving does
+	// not require being a CS engineer. Narrower than PermView on purpose: a
 	// view-only role sees neither area.
 	PermTimeCardsAndUpdates
 	// PermEscalate is escalating or de-escalating a case.
@@ -59,9 +59,18 @@ const (
 	// result rather than reject the whole request.
 	PermViewAllDashboards
 	// PermAdmin is held by the admin role only — unlike PermWrite, which
-	// support_engineer also holds. Reserved for actions no non-admin staff
+	// cs_engineer also holds. Reserved for actions no non-admin staff
 	// role should ever reach, such as creating a new platform user.
 	PermAdmin
+	// PermViewSecurityCenter is the Security Center area: security-report
+	// cases (POST /cases/search and GET /cases/{id}, type-checked inside
+	// CaseHandler itself — see its own doc comment for why a route-level
+	// permission alone can't express this) and both /products/vulnerabilities
+	// routes. Admin and cs_engineer only — every other role, including plain
+	// viewer/escalator/attachment_downloader, is denied even though they hold
+	// PermView, since this is deliberately narrower than the general case/
+	// product-data access PermView otherwise grants.
+	PermViewSecurityCenter
 )
 
 // AccessConfig names, per portal role, the role names on the token that grant
@@ -74,10 +83,14 @@ type AccessConfig struct {
 	Escalator            []string
 	AttachmentDownloader []string
 	UsageMetricsViewer   []string
-	SupportEngineer      []string
-	Admin                []string
-	TimecardApprover     []string
-	DashboardDesigner    []string
+	// CsEngineer is read from AUTH_SUPPORT_ENGINEER_ROLES -- the portal role
+	// was renamed from support_engineer to cs_engineer, but the env var name
+	// was deliberately left as-is to avoid a coordinated deployment config
+	// change alongside this rename.
+	CsEngineer        []string
+	Admin             []string
+	TimecardApprover  []string
+	DashboardDesigner []string
 }
 
 // AccessGuard authorises a request from the roles on the caller's validated
@@ -99,15 +112,19 @@ type portalRole struct {
 }
 
 // NewAccessGuard builds a guard from cfg. Admin satisfies every permission.
-// Support engineer, the role for people who work cases, satisfies every one
+// CS engineer (renamed from support_engineer -- see AccessConfig.CsEngineer's
+// own doc comment), the role for people who work cases, satisfies every one
 // too, EXCEPT PermAdmin — that one is admin-only, held by no other role,
 // unlike PermWrite which both share. The escalator and attachment-downloader
 // roles exist separately so other staff can be granted just that one ability.
 // The time-card approver also holds PermTimeCardsAndUpdates, so it can
-// approve without being a support engineer. The usage-metrics and
+// approve without being a CS engineer. The usage-metrics and
 // dashboard-designer roles gate nothing here (this backend has no route for
 // those features) and grant only View. Every role implies View, so a user
 // granted only one specialised role can still open the pages it acts on.
+// PermViewSecurityCenter is the one exception to "every role implies View
+// covers it": plain viewer/escalator/attachment_downloader/usage_metrics_viewer/
+// timecard_approver/dashboard_designer all hold PermView but not this.
 func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 	build := func(lists ...[]string) map[string]struct{} {
 		set := make(map[string]struct{})
@@ -123,7 +140,7 @@ func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 			{"viewer", build(cfg.Viewer)},
 			{"escalator", build(cfg.Escalator)},
 			{"attachment_downloader", build(cfg.AttachmentDownloader)},
-			{"support_engineer", build(cfg.SupportEngineer)},
+			{"cs_engineer", build(cfg.CsEngineer)},
 			{"usage_metrics_viewer", build(cfg.UsageMetricsViewer)},
 			{"timecard_approver", build(cfg.TimecardApprover)},
 			{"dashboard_designer", build(cfg.DashboardDesigner)},
@@ -131,14 +148,15 @@ func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 		},
 		allowed: map[Permission]map[string]struct{}{
 			PermView: build(cfg.Viewer, cfg.Escalator, cfg.AttachmentDownloader,
-				cfg.UsageMetricsViewer, cfg.SupportEngineer, cfg.Admin, cfg.TimecardApprover, cfg.DashboardDesigner),
-			PermViewOperations:      build(cfg.SupportEngineer, cfg.Admin),
-			PermTimeCardsAndUpdates: build(cfg.SupportEngineer, cfg.Admin, cfg.TimecardApprover),
-			PermEscalate:            build(cfg.Escalator, cfg.SupportEngineer, cfg.Admin),
-			PermDownloadAttachment:  build(cfg.AttachmentDownloader, cfg.SupportEngineer, cfg.Admin),
-			PermWrite:               build(cfg.SupportEngineer, cfg.Admin),
-			PermViewAllDashboards:   build(cfg.SupportEngineer, cfg.Admin),
+				cfg.UsageMetricsViewer, cfg.CsEngineer, cfg.Admin, cfg.TimecardApprover, cfg.DashboardDesigner),
+			PermViewOperations:      build(cfg.CsEngineer, cfg.Admin),
+			PermTimeCardsAndUpdates: build(cfg.CsEngineer, cfg.Admin, cfg.TimecardApprover),
+			PermEscalate:            build(cfg.Escalator, cfg.CsEngineer, cfg.Admin),
+			PermDownloadAttachment:  build(cfg.AttachmentDownloader, cfg.CsEngineer, cfg.Admin),
+			PermWrite:               build(cfg.CsEngineer, cfg.Admin),
+			PermViewAllDashboards:   build(cfg.CsEngineer, cfg.Admin),
 			PermAdmin:               build(cfg.Admin),
+			PermViewSecurityCenter:  build(cfg.CsEngineer, cfg.Admin),
 		},
 	}
 }

@@ -21,7 +21,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   useCurrentUser: () => ({
-    user: { roles: ["support_engineer"] },
+    user: { roles: ["cs_engineer"] },
     isLoading: false,
     isError: false,
     error: null,

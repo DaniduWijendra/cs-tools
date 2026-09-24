@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 )
 
 // upstreamErrorCases is the table used by every PATCH/update handler — the
@@ -897,6 +898,92 @@ func TestSearchCases(t *testing.T) {
 		if resp["total"] != float64(1) {
 			t.Errorf("total = %v, want 1", resp["total"])
 		}
+	})
+
+	t.Run("security report search: denied without PermViewSecurityCenter (no guard wired)", func(t *testing.T) {
+		called := false
+		client := &mockEntityCaseClient{
+			searchCasesFn: func(context.Context, []byte) ([]byte, error) {
+				called = true
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/cases/search",
+			strings.NewReader(`{"filters":{"filters":[{"field":"type","op":"in","values":["security_report_analysis"]}]}}`)))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+		if called {
+			t.Fatal("entity service must not be called for a denied security-report search")
+		}
+	})
+
+	t.Run("security report search: denied for a role that isn't cs_engineer/admin", func(t *testing.T) {
+		h := NewCaseHandler(&mockEntityCaseClient{
+			searchCasesFn: func(context.Context, []byte) ([]byte, error) { return []byte(`{}`), nil },
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPost, "/cases/search",
+			strings.NewReader(`{"filters":{"filters":[{"field":"type","op":"in","values":["security_report_analysis"]}]}}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "viewer@example.com", UserID: "u1", Roles: []string{"test-viewer"}}))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("security report search: allowed for cs_engineer", func(t *testing.T) {
+		var capturedBody []byte
+		h := NewCaseHandler(&mockEntityCaseClient{
+			searchCasesFn: func(_ context.Context, body []byte) ([]byte, error) {
+				capturedBody = body
+				return []byte(`{"cases":[],"total":0}`), nil
+			},
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		const reqBody = `{"filters":{"filters":[{"field":"type","op":"in","values":["security_report_analysis"]}]}}`
+		r := httptest.NewRequest(http.MethodPost, "/cases/search", strings.NewReader(reqBody))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "cs@example.com", UserID: "u2", Roles: []string{"test-cs-engineer"}}))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(capturedBody) != reqBody {
+			t.Errorf("upstream received %q, want %q", capturedBody, reqBody)
+		}
+	})
+
+	t.Run("security report search: allowed for admin, mixed with another type in the same filter", func(t *testing.T) {
+		h := NewCaseHandler(&mockEntityCaseClient{
+			searchCasesFn: func(context.Context, []byte) ([]byte, error) { return []byte(`{"cases":[],"total":0}`), nil },
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPost, "/cases/search",
+			strings.NewReader(`{"filters":{"filters":[{"field":"type","op":"in","values":["case","security_report_analysis"]}]}}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "admin@example.com", UserID: "u3", Roles: []string{"test-admin"}}))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusOK)
+	})
+
+	t.Run("security report search: denied when named only inside an anyOf branch", func(t *testing.T) {
+		h := NewCaseHandler(&mockEntityCaseClient{
+			searchCasesFn: func(context.Context, []byte) ([]byte, error) { return []byte(`{}`), nil },
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPost, "/cases/search",
+			strings.NewReader(`{"filters":{"anyOf":[{"filters":[{"field":"type","op":"in","values":["security_report_analysis"]}]}]}}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "viewer@example.com", UserID: "u1", Roles: []string{"test-viewer"}}))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("a search naming an unrelated type is unaffected by the security-report check", func(t *testing.T) {
+		h := NewCaseHandler(&mockEntityCaseClient{
+			searchCasesFn: func(context.Context, []byte) ([]byte, error) { return []byte(`{"cases":[],"total":0}`), nil },
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPost, "/cases/search",
+			strings.NewReader(`{"filters":{"filters":[{"field":"type","op":"in","values":["case"]}]}}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "viewer@example.com", UserID: "u1", Roles: []string{"test-viewer"}}))
+		w := httptest.NewRecorder()
+		h.SearchCases(w, r)
+		assertStatus(t, w, http.StatusOK)
 	})
 
 	t.Run("forwards body without projectIds unchanged", func(t *testing.T) {
