@@ -60,6 +60,7 @@ type stubCaseRepo struct {
 	createCaseComment        func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
 	createCase               func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
 	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
+	setCaseWatchList         func(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error)
 }
 
 func (s *stubCaseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error) {
@@ -149,7 +150,10 @@ func (s *stubCaseRepo) RemoveCaseTag(context.Context, string, string, string) er
 func (s *stubCaseRepo) SearchTags(context.Context, string, string, int) ([]domain.Tag, error) {
 	panic("not implemented")
 }
-func (s *stubCaseRepo) SetCaseWatchList(context.Context, string, []string, string) ([]domain.WatchListUser, time.Time, error) {
+func (s *stubCaseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error) {
+	if s.setCaseWatchList != nil {
+		return s.setCaseWatchList(ctx, caseID, userIDs, callerEmail)
+	}
 	panic("not implemented")
 }
 func (s *stubCaseRepo) SearchCaseActivities(context.Context, domain.SearchCaseActivitiesRequest) ([]domain.CaseActivity, int, error) {
@@ -1086,6 +1090,133 @@ func TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds(t *testing.T)
 	}
 	if publisher.calls[0].eventType != events.TypeCaseCreated || publisher.calls[0].entityID != caseID {
 		t.Errorf("unexpected publish call: %+v", publisher.calls[0])
+	}
+}
+
+// TestCaseService_CreateCase_MirrorsWatchListIntoPostgres is the regression
+// guard for a real gap: createCaseSNFirst forwarded req.WatchList to
+// ServiceNow via s.snMirror.CreateCase, but CreateCaseFromServiceNow's own
+// insert never touched work_item_watcher -- so a case created with an
+// explicit watch list showed no watchers at all on every Postgres-sourced
+// read (GetCaseByID, SearchCases), and case.created's own Recipients (built
+// from a GetCaseByID call) went out to nobody even though ServiceNow's copy
+// of the case had the watchers. Proves both watch-list shapes
+// CreateCaseRequest.WatchList accepts -- an already-resolved user UUID (CSM)
+// and a watcher email (Customer Portal/Ballerina, resolved here via
+// userRepo) -- reach SetCaseWatchList as user ids, and that this happens
+// before the case.created publish (see TestCaseService_CreateCase_
+// PublishesOnlyAfterPostgresSucceeds's own getCaseByID stub for how a
+// missing mirror would otherwise show up as empty Recipients).
+func TestCaseService_CreateCase_MirrorsWatchListIntoPostgres(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+	const existingUserID = "99999999-9999-9999-9999-999999999999"
+	req := validCreateCaseRequest()
+	req.WatchList = []string{existingUserID, "known@example.com"}
+
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	var setWatchListCaseID string
+	var setWatchListUserIDs []string
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
+		},
+		setCaseWatchList: func(_ context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error) {
+			setWatchListCaseID = caseID
+			setWatchListUserIDs = userIDs
+			return nil, time.Time{}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+	}
+	userRepo := stubUserRepo{getUserByEmail: func(_ context.Context, email string) (domain.User, error) {
+		if email == "known@example.com" {
+			return domain.User{ID: "resolved-user-id", Email: email}, nil
+		}
+		return domain.User{}, &apierror.NotFoundError{Msg: "no user found with email: " + email}
+	}}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if setWatchListCaseID != caseID {
+		t.Fatalf("SetCaseWatchList caseID = %q, want %q", setWatchListCaseID, caseID)
+	}
+	want := []string{existingUserID, "resolved-user-id"}
+	if len(setWatchListUserIDs) != len(want) || setWatchListUserIDs[0] != want[0] || setWatchListUserIDs[1] != want[1] {
+		t.Fatalf("SetCaseWatchList userIDs = %v, want %v", setWatchListUserIDs, want)
+	}
+}
+
+// TestCaseService_CreateCase_DropsUnresolvableWatchListEntryWithoutFailing
+// proves the other half: ServiceNow already has the case by the time the
+// watch list is mirrored, so a watcher email that doesn't resolve to a known
+// Postgres user must be dropped, not fail the whole create.
+func TestCaseService_CreateCase_DropsUnresolvableWatchListEntryWithoutFailing(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+	req := validCreateCaseRequest()
+	req.WatchList = []string{"unknown@example.com"}
+
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	setWatchListCalled := false
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
+		},
+		setCaseWatchList: func(context.Context, string, []string, string) ([]domain.WatchListUser, time.Time, error) {
+			setWatchListCalled = true
+			return nil, time.Time{}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+			}, nil
+		},
+	}
+	userRepo := stubUserRepo{getUserByEmail: func(_ context.Context, email string) (domain.User, error) {
+		return domain.User{}, &apierror.NotFoundError{Msg: "no user found with email: " + email}
+	}}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if setWatchListCalled {
+		t.Error("SetCaseWatchList must not be called when every watch list entry is unresolvable")
 	}
 }
 

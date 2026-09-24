@@ -1352,6 +1352,31 @@ changed.
   (`domain.NewUserReference("", ...)`), never the watcher's own resolved id
   — `WatchListUser.User`'s own doc comment requires that field to stay null
   regardless of whether this data source happens to know it.
+
+  **`CreateCaseRequest.WatchList` reached ServiceNow but never the Postgres
+  mirror.** `createCaseSNFirst`'s `s.snMirror.CreateCase(ctx, req)` call
+  passes ServiceNow the full request, `WatchList` included, but
+  `CaseRepository.CreateCaseFromServiceNow`'s own insert only ever writes
+  `work_item`/the type-specific extension table — never
+  `work_item_watcher`. So a case created with an explicit watch list (the
+  Customer Portal always sends one — see `CreateCasePage.tsx`'s own
+  creator-plus-eligible-project-contacts default) had it on the ServiceNow
+  side only: every Postgres-sourced read (`GetCaseByID`, `SearchCases`)
+  showed no watchers at all, and worse, `publishCaseCreatedEvent`'s own
+  `Recipients` (built from a `GetCaseByID` call, not from `req.WatchList`
+  directly) went out to nobody — a real, silent regression from the
+  ServiceNow-only data source, where the same read naturally sees whatever
+  ServiceNow received. `createCaseSNFirst` now calls
+  `mirrorInitialWatchList` right after `CreateCaseFromServiceNow` succeeds
+  and before `publishCaseCreatedEvent`, resolving each `req.WatchList`
+  entry (an email — Customer Portal/Ballerina — or a user UUID — CSM, per
+  that field's own doc comment) to a real `"user"` id via `userRepo`, then
+  writing them with the same `CaseRepository.SetCaseWatchList` the
+  `UpdateCase` branch above already uses. An entry that can't be resolved
+  to a known user is dropped with a warning, not a failure — ServiceNow
+  already has the case by this point, so a partially-mirrored watch list
+  must not be reported as a failed create, same posture as every other
+  post-ServiceNow-success step in this file (event publishing included).
 - **Account contacts** (`account_contact`, migration 000020) and **project
   contacts** (`project_contact` + `project_contact_group`/`project_group`/
   `project_group_role`/`project_role`, migrations 000022-000025): new

@@ -492,6 +492,19 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 		return domain.CreateCaseResponse{}, err
 	}
 
+	// req.WatchList reaches ServiceNow via s.snMirror.CreateCase above (it
+	// builds its own SN payload from the same req), but
+	// CreateCaseFromServiceNow's insert never touches work_item_watcher --
+	// it only writes work_item/"case". Without this, a case created with an
+	// explicit watch list has it on the ServiceNow side only: every
+	// Postgres-sourced read (GetCaseByID, SearchCases) shows no watchers at
+	// all, and the case.created publish below -- which builds its
+	// Recipients from a GetCaseByID call, not from req.WatchList directly --
+	// would send to nobody. Must run before that publish call, not after.
+	if len(req.WatchList) > 0 {
+		s.mirrorInitialWatchList(ctx, c.ID, c.CreatedBy, req.WatchList)
+	}
+
 	// Only now — Postgres has confirmed the row this mode's reads actually
 	// depend on — is it safe to publish. See publishCaseCreatedEvent's doc
 	// comment for why this can't just be snCaseService's own automatic
@@ -515,6 +528,48 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 			State:      responseState,
 		},
 	}, nil
+}
+
+// mirrorInitialWatchList resolves a just-created case's caller-supplied
+// watch list into the Postgres work_item_watcher mirror -- see
+// createCaseSNFirst's own call site comment for why this exists at all.
+// watchList entries are either watcher emails (Customer Portal/Ballerina) or
+// platform user UUIDs (CSM), per CreateCaseRequest.WatchList's own doc
+// comment; ServiceNow already has both shapes handled (watchListEmails), but
+// work_item_watcher.user_id needs a real user id either way, so an email is
+// resolved via userRepo first.
+//
+// Best-effort throughout: ServiceNow already has the case by the time this
+// runs (see createCaseSNFirst's own "no orphan gets created" vs. "real
+// drift" distinction), so a watch list that can't be fully mirrored must not
+// fail the create -- an entry that can't be resolved to a known user is
+// dropped with a warning rather than rejecting the whole list, and a
+// downstream repository failure is logged rather than returned, the same
+// posture publishCaseCreatedEvent's own doc comment documents for the
+// sibling publish step right after this one.
+func (s *caseService) mirrorInitialWatchList(ctx context.Context, caseID, callerEmail string, watchList []string) {
+	userIDs := make([]string, 0, len(watchList))
+	for _, v := range watchList {
+		switch {
+		case uuidRE.MatchString(v):
+			userIDs = append(userIDs, v)
+		case emailRE.MatchString(v):
+			user, err := s.userRepo.GetUserByEmail(ctx, v)
+			if err != nil {
+				slog.WarnContext(ctx, "create case: watch list email did not resolve to a known user, dropped from watch list", "caseId", caseID, "email", v)
+				continue
+			}
+			userIDs = append(userIDs, user.ID)
+		default:
+			slog.WarnContext(ctx, "create case: watch list value is neither a user id nor an email, dropped from watch list", "caseId", caseID, "value", v)
+		}
+	}
+	if len(userIDs) == 0 {
+		return
+	}
+	if _, _, err := s.repo.SetCaseWatchList(ctx, caseID, userIDs, callerEmail); err != nil {
+		slog.ErrorContext(ctx, "create case: mirroring watch list into postgres failed", "caseId", caseID, "error", err)
+	}
 }
 
 // GetCaseByID implements CaseService.
