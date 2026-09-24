@@ -238,12 +238,24 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 	).Scan(&outID, &retStatus, &appID, &clientID, &createdOn, &updatedOn)
 
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Zero rows is ambiguous: either the project does not exist, or the
+		// forward-only guard refused the transition. Distinguish them.
 		var existsID string
 		checkErr := r.db.QueryRow(ctx, `SELECT id FROM project WHERE id = $1`, projectID).Scan(&existsID)
-		if errors.Is(checkErr, pgx.ErrNoRows) {
+		switch {
+		case errors.Is(checkErr, pgx.ErrNoRows):
 			return domain.ProjectConsumption{}, &apierror.NotFoundError{Msg: "project not found"}
+		case checkErr != nil:
+			// Anything else -- a dropped connection, a timeout, a cancelled
+			// context -- says nothing about the status, and must not be
+			// reported as staleness: UpdateProjectConsumption treats
+			// ErrConsumptionStatusStale as success and answers "already at or
+			// beyond the requested status", so a transient database failure
+			// would surface to the caller as a successful no-op.
+			return domain.ProjectConsumption{}, fmt.Errorf("upsert project consumption: check project exists: %w", checkErr)
+		default:
+			return domain.ProjectConsumption{}, ErrConsumptionStatusStale
 		}
-		return domain.ProjectConsumption{}, ErrConsumptionStatusStale
 	}
 	if err != nil {
 		return domain.ProjectConsumption{}, fmt.Errorf("upsert project consumption: %w", err)
@@ -261,6 +273,13 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 
 // GetSigningContext returns the credentials and metadata needed to sign a deployment
 // licence for projectID and deploymentID.
+//
+// Both ids are bound as uuid rather than compared against a ::text cast of the
+// column, so the primary-key indexes are usable; casting the column instead
+// made every call scan project, deployment and deployed_product in full. The
+// consequence is that a malformed id is now a driver error rather than simply
+// matching nothing, which is why callers validate first -- ProcessLicenseDownload
+// runs validateUUIDs on both before reaching this.
 func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectID, deploymentID string) (*domain.SigningContext, error) {
 	const query = `
 		SELECT
@@ -274,9 +293,9 @@ func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectI
 			COALESCE(d.number, dp.number, '') AS deployment_number,
 			(d.id IS NOT NULL OR dp.id IS NOT NULL) AS deployment_matched
 		FROM project p
-		LEFT JOIN deployment d ON d.id::text = $2 AND d.project_id = p.id
-		LEFT JOIN deployed_product dp ON dp.id::text = $2 AND dp.project_id = p.id
-		WHERE p.id::text = $1`
+		LEFT JOIN deployment d ON d.id = $2::uuid AND d.project_id = p.id
+		LEFT JOIN deployed_product dp ON dp.id = $2::uuid AND dp.project_id = p.id
+		WHERE p.id = $1::uuid`
 
 	var (
 		clientID          string
