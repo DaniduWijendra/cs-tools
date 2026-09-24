@@ -188,27 +188,32 @@ func (s *salesforceEventService) ingestMembership(ctx context.Context, membershi
 		"membershipSfId", membershipSfID, "state", in.State, "projectId", res.ProjectID, "projectContactId", res.ProjectContactID,
 		"createdUser", res.CreatedUser, "createdAccountContact", res.CreatedAccountContact, "createdProjectContact", res.CreatedProjectContact)
 
-	// ECHO SUPPRESSION. Publish only for a project_contact row this ingest
-	// actually CREATED.
+	// ECHO SUPPRESSION. Publish only when this event MOVED the membership
+	// into an invited state — the row was created here, or its stored state
+	// was something else before this upsert overwrote it.
 	//
 	// Every portal membership write also writes Salesforce, and every
 	// Salesforce write comes back to us through the Service Bus subscriber
-	// as an ordinary CREATED/UPDATED envelope. By the time that echo lands
-	// the row already exists, because the portal write wrote it first — so
-	// an event for a membership we already knew about is our own write
-	// returning, and publishing project_contact.invited for it would have
-	// csm-notification-service send a SECOND invitation email for the one
-	// invitation the customer admin sent. Updating the row silently is the
-	// whole point of the echo.
+	// as an ordinary CREATED/UPDATED envelope. The portal has already
+	// written the new state by the time its echo lands, so the echo finds
+	// PreviousState equal to the state it carries and stays silent.
+	// Publishing there would have csm-notification-service send a SECOND
+	// invitation email for the one invitation the customer admin sent.
 	//
-	// A genuinely Salesforce-originated invitation (someone invited through
-	// Salesforce itself, or the historical backfill) still creates the row
-	// here and still publishes. The state check stays: a CREATED row that
-	// arrives already REGISTERED or DEACTIVATED is not an invitation.
-	if res.CreatedProjectContact && (in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited) {
+	// The gate is the TRANSITION, not the row insert. Row creation alone is
+	// not a reliable echo signal: a re-invitation made in Salesforce moves
+	// an existing DEACTIVATED row to RE-INVITED, so nothing is created and
+	// the person would never be told — the previous state is what tells
+	// that apart from our own write returning. A genuinely
+	// Salesforce-originated first invitation (or the historical backfill)
+	// still creates the row and still publishes. The state check stays: an
+	// event that lands on REGISTERED or DEACTIVATED is not an invitation.
+	invited := in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited
+	movedIntoInvited := res.CreatedProjectContact || !strings.EqualFold(res.PreviousState, in.State)
+	if invited && movedIntoInvited {
 		s.publishProjectContactInvited(ctx, in, pc, eventModifiedOn, hasModified)
-	} else if in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited {
-		slog.InfoContext(ctx, "salesforce: membership already known, not re-publishing project_contact.invited",
+	} else if invited {
+		slog.InfoContext(ctx, "salesforce: membership already in this state, not re-publishing project_contact.invited",
 			"membershipSfId", membershipSfID, "state", in.State)
 	}
 	return nil

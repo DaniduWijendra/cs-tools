@@ -111,12 +111,13 @@ type Config struct {
 	// constructs EventPublisherService when both this is true AND
 	// EventHubBroker is set.
 	EventPublishingEnabled bool
-	// SalesforceMembershipIngestEnabled turns on the Project_Contact__c /
-	// Contact branch of POST /salesforce/events (the customer onboarding
-	// database write). Defaults to false: those envelopes are then
-	// acknowledged and ignored, as before the branch existed. The Account
-	// branch is unaffected by this flag.
-	SalesforceMembershipIngestEnabled bool
+	// CSMMigrationSalesforceMembershipIngestEnabled turns on the
+	// Project_Contact__c / Contact branch of POST /salesforce/events (the
+	// customer onboarding database write), from
+	// CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true. Defaults to
+	// false: those envelopes are then acknowledged and ignored, as before
+	// the branch existed. The Account branch is unaffected by this flag.
+	CSMMigrationSalesforceMembershipIngestEnabled bool
 	// CSMMigrationMembershipRegistrationEnabled turns on POST /users/me/memberships/register,
 	// which marks the signed-in user's still-INVITED memberships as
 	// REGISTERED in Salesforce (see membership_registration_service.go). Defaults to
@@ -260,59 +261,59 @@ type Config struct {
 // validate required fields (e.g. DBUser, DBPassword, DBName) before use.
 func Load() *Config {
 	cfg := &Config{
-		DBHost:                                    getEnvOrDefault("DB_HOST", "localhost"),
-		DBPort:                                    getEnvOrDefault("DB_PORT", "5432"),
-		DBUser:                                    os.Getenv("DB_USER"),
-		DBPassword:                                os.Getenv("DB_PASSWORD"),
-		DBName:                                    os.Getenv("DB_NAME"),
-		DBSSLMode:                                 os.Getenv("DB_SSLMODE"),
-		ServerPort:                                getEnvOrDefault("SERVER_PORT", "8080"),
-		HealthPort:                                getEnvOrDefault("HEALTH_PORT", "8081"),
-		DataSource:                                DataSource(getEnvOrDefault("DATA_SOURCE", string(DataSourcePostgres))),
-		ServiceNowIntegrationServiceBaseURL:       os.Getenv("SERVICENOW_INTEGRATION_SERVICE_BASE_URL"),
-		ServiceNowIntegrationServiceTokenURL:      os.Getenv("SERVICENOW_INTEGRATION_SERVICE_TOKEN_URL"),
-		ServiceNowIntegrationServiceClientID:      os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_ID"),
-		ServiceNowIntegrationServiceClientSecret:  os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_SECRET"),
-		ServiceNowIntegrationServiceScopes:        os.Getenv("SERVICENOW_INTEGRATION_SERVICE_SCOPES"),
-		ConsumptionOperationBaseURL:               os.Getenv("PRODUCT_CONSUMPTION_OPERATION_URL"),
-		ConsumptionOperationTokenURL:              os.Getenv("PRODUCT_CONSUMPTION_OPERATION_TOKEN_URL"),
-		ConsumptionOperationClientID:              os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_ID"),
-		ConsumptionOperationClientSecret:          os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_SECRET"),
-		ConsumptionOperationScopes:                os.Getenv("PRODUCT_CONSUMPTION_OPERATION_SCOPES"),
-		ConsumptionDualWriteEnabled:               getBoolOrDefault("CONSUMPTION_DUAL_WRITE_ENABLED", true),
-		EventHubBroker:                            os.Getenv("EVENT_HUB_BROKER"),
-		EventHubConnectionString:                  os.Getenv("EVENT_HUB_CONNECTION_STRING"),
-		EventHubTopic:                             os.Getenv("EVENT_HUB_TOPIC"),
-		EventPublishingEnabled:                    os.Getenv("EVENT_PUBLISHING_ENABLED") == "true",
-		GithubIntegrationEnabled:                  os.Getenv("GITHUB_INTEGRATION_ENABLED") == "true",
-		GithubBaseURL:                             getEnvOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),
-		GithubToken:                               os.Getenv("GITHUB_TOKEN"),
-		GithubWebhookSecret:                       os.Getenv("GITHUB_WEBHOOK_SECRET"),
-		GithubIntegrationLogin:                    os.Getenv("GITHUB_INTEGRATION_LOGIN"),
-		GithubOutboundInterval:                    envDuration("GITHUB_OUTBOUND_INTERVAL", 15*time.Second),
-		CSMPortalBaseURL:                          os.Getenv("CSM_PORTAL_BASE_URL"),
-		GithubLabelTypeIncident:                   os.Getenv("GITHUB_LABEL_TYPE_INCIDENT"),
-		GithubLabelTypeServiceRequest:             os.Getenv("GITHUB_LABEL_TYPE_SERVICE_REQUEST"),
-		GithubLabelsClass:                         os.Getenv("GITHUB_LABELS_CLASS"),
-		GithubLabelStatusAssigned:                 os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
-		CRNoticesEnabled:                          os.Getenv("CR_NOTICES_ENABLED") == "true",
-		SalesforceMembershipIngestEnabled:         os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
-		CSMMigrationPortalWritesEnabled:           os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
-		CREventHubTopic:                           getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
-		ProjectEventHubTopic:                      getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
-		CRNoticePollInterval:                      envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
-		AuthIssuer:                                os.Getenv("AUTH_ISSUER"),
-		AuthJWKSURL:                               os.Getenv("AUTH_JWKS_URL"),
-		AuthUserTokenAudiences:                    splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
-		AuthClockSkew:                             envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
-		AuthInternalClientIDsRaw:                  os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
-		CustomerRoles:                             splitComma(os.Getenv("CUSTOMER_ROLES")),
-		SalesEntityBaseURL:                        os.Getenv("SALES_ENTITY_BASE_URL"),
-		SalesEntityTokenURL:                       os.Getenv("SALES_ENTITY_TOKEN_URL"),
-		SalesEntityClientID:                       os.Getenv("SALES_ENTITY_CLIENT_ID"),
-		SalesEntityClientSecret:                   os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
-		SalesEntityScopes:                         os.Getenv("SALES_ENTITY_SCOPES"),
-		CSMMigrationMembershipRegistrationEnabled: os.Getenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED") == "true",
+		DBHost:                                   getEnvOrDefault("DB_HOST", "localhost"),
+		DBPort:                                   getEnvOrDefault("DB_PORT", "5432"),
+		DBUser:                                   os.Getenv("DB_USER"),
+		DBPassword:                               os.Getenv("DB_PASSWORD"),
+		DBName:                                   os.Getenv("DB_NAME"),
+		DBSSLMode:                                os.Getenv("DB_SSLMODE"),
+		ServerPort:                               getEnvOrDefault("SERVER_PORT", "8080"),
+		HealthPort:                               getEnvOrDefault("HEALTH_PORT", "8081"),
+		DataSource:                               DataSource(getEnvOrDefault("DATA_SOURCE", string(DataSourcePostgres))),
+		ServiceNowIntegrationServiceBaseURL:      os.Getenv("SERVICENOW_INTEGRATION_SERVICE_BASE_URL"),
+		ServiceNowIntegrationServiceTokenURL:     os.Getenv("SERVICENOW_INTEGRATION_SERVICE_TOKEN_URL"),
+		ServiceNowIntegrationServiceClientID:     os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_ID"),
+		ServiceNowIntegrationServiceClientSecret: os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_SECRET"),
+		ServiceNowIntegrationServiceScopes:       os.Getenv("SERVICENOW_INTEGRATION_SERVICE_SCOPES"),
+		ConsumptionOperationBaseURL:              os.Getenv("PRODUCT_CONSUMPTION_OPERATION_URL"),
+		ConsumptionOperationTokenURL:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_TOKEN_URL"),
+		ConsumptionOperationClientID:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_ID"),
+		ConsumptionOperationClientSecret:         os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_SECRET"),
+		ConsumptionOperationScopes:               os.Getenv("PRODUCT_CONSUMPTION_OPERATION_SCOPES"),
+		ConsumptionDualWriteEnabled:              getBoolOrDefault("CONSUMPTION_DUAL_WRITE_ENABLED", true),
+		EventHubBroker:                           os.Getenv("EVENT_HUB_BROKER"),
+		EventHubConnectionString:                 os.Getenv("EVENT_HUB_CONNECTION_STRING"),
+		EventHubTopic:                            os.Getenv("EVENT_HUB_TOPIC"),
+		EventPublishingEnabled:                   os.Getenv("EVENT_PUBLISHING_ENABLED") == "true",
+		GithubIntegrationEnabled:                 os.Getenv("GITHUB_INTEGRATION_ENABLED") == "true",
+		GithubBaseURL:                            getEnvOrDefault("GITHUB_API_BASE_URL", "https://api.github.com"),
+		GithubToken:                              os.Getenv("GITHUB_TOKEN"),
+		GithubWebhookSecret:                      os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GithubIntegrationLogin:                   os.Getenv("GITHUB_INTEGRATION_LOGIN"),
+		GithubOutboundInterval:                   envDuration("GITHUB_OUTBOUND_INTERVAL", 15*time.Second),
+		CSMPortalBaseURL:                         os.Getenv("CSM_PORTAL_BASE_URL"),
+		GithubLabelTypeIncident:                  os.Getenv("GITHUB_LABEL_TYPE_INCIDENT"),
+		GithubLabelTypeServiceRequest:            os.Getenv("GITHUB_LABEL_TYPE_SERVICE_REQUEST"),
+		GithubLabelsClass:                        os.Getenv("GITHUB_LABELS_CLASS"),
+		GithubLabelStatusAssigned:                os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
+		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
+		CSMMigrationSalesforceMembershipIngestEnabled: os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		CSMMigrationPortalWritesEnabled:               os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
+		CREventHubTopic:                               getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
+		ProjectEventHubTopic:                          getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
+		CRNoticePollInterval:                          envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
+		AuthIssuer:                                    os.Getenv("AUTH_ISSUER"),
+		AuthJWKSURL:                                   os.Getenv("AUTH_JWKS_URL"),
+		AuthUserTokenAudiences:                        splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
+		AuthClockSkew:                                 envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
+		AuthInternalClientIDsRaw:                      os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
+		CustomerRoles:                                 splitComma(os.Getenv("CUSTOMER_ROLES")),
+		SalesEntityBaseURL:                            os.Getenv("SALES_ENTITY_BASE_URL"),
+		SalesEntityTokenURL:                           os.Getenv("SALES_ENTITY_TOKEN_URL"),
+		SalesEntityClientID:                           os.Getenv("SALES_ENTITY_CLIENT_ID"),
+		SalesEntityClientSecret:                       os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
+		SalesEntityScopes:                             os.Getenv("SALES_ENTITY_SCOPES"),
+		CSMMigrationMembershipRegistrationEnabled:     os.Getenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED") == "true",
 	}
 	cfg.AuthInternalClientIDs = ParseInternalClientIDs(cfg.AuthInternalClientIDsRaw)
 	return cfg

@@ -47,22 +47,46 @@ const (
 // fakeWriteSalesEntity records every Salesforce call, so a test can assert
 // that a create was NOT made when a search already found the record.
 type fakeWriteSalesEntity struct {
-	contact        *salesentity.Contact
-	membership     *salesentity.ProjectContact
-	contactSearchs []string
-	pcSearches     [][2]string
-	createdContact []salesentity.CreateContactInput
-	createdPC      []salesentity.CreateProjectContactInput
-	updates        []writeUpdateCall
-	searchErr      error
-	createErr      error
-	updateErr      error
+	contact *salesentity.Contact
+	// contactByID is what GetContact answers with when the caller resolves
+	// the linked contact by its Salesforce id instead of by address. Left
+	// nil it falls back to contact, so a test that does not care about the
+	// distinction behaves as it did before the by-id lookup existed.
+	contactByID   *salesentity.Contact
+	getContactErr error
+	// createdContactOmitsFlags models the contract POST /contacts actually
+	// promises: an id, and not necessarily anything else.
+	createdContactOmitsFlags bool
+	membership               *salesentity.ProjectContact
+	contactGets              []string
+	contactSearchs           []string
+	pcSearches               [][2]string
+	createdContact           []salesentity.CreateContactInput
+	createdPC                []salesentity.CreateProjectContactInput
+	updates                  []writeUpdateCall
+	searchErr                error
+	createErr                error
+	updateErr                error
 }
 
 type writeUpdateCall struct {
 	id    string
 	state *string
 	roles *[]string
+}
+
+func (f *fakeWriteSalesEntity) GetContact(_ context.Context, id string) (salesentity.Contact, error) {
+	f.contactGets = append(f.contactGets, id)
+	if f.getContactErr != nil {
+		return salesentity.Contact{}, f.getContactErr
+	}
+	if f.contactByID != nil {
+		return *f.contactByID, nil
+	}
+	if f.contact != nil {
+		return *f.contact, nil
+	}
+	return salesentity.Contact{}, &apierror.ServiceUnavailableError{Msg: "salesentity: contact not found"}
 }
 
 func (f *fakeWriteSalesEntity) SearchContactByEmail(_ context.Context, email string) (salesentity.Contact, bool, error) {
@@ -84,6 +108,11 @@ func (f *fakeWriteSalesEntity) CreateContact(_ context.Context, in salesentity.C
 	// The real service echoes the created record back, including the
 	// integration-user flag, which everything downstream then reads off the
 	// contact rather than off the request.
+	if f.createdContactOmitsFlags {
+		c := salesentity.Contact{ID: sampleStr(writeContactSfID), Email: sampleStr(in.Email)}
+		f.contact = &c
+		return c, nil
+	}
 	isIntegration := in.IsCsIntegrationUser
 	c := salesentity.Contact{
 		ID: sampleStr(writeContactSfID), Email: sampleStr(in.Email),
@@ -631,6 +660,108 @@ func TestMembershipWrite_DeactivateSetsBothSides(t *testing.T) {
 	}
 }
 
+// TestMembershipWrite_DeactivateUsesTheLinkedContactIdNotTheInvitedAddress
+// is the data-integrity rule for a membership we already hold ids for. The
+// linked Salesforce Contact's own Email is a different field from the address
+// the membership was invited under and does drift apart on real rows, so
+// resolving by address can miss the real Contact -- and a miss used to mean
+// a brand new Contact plus a brand new Project_Contact__c in state
+// DEACTIVATED, while the membership that actually matters stayed active.
+func TestMembershipWrite_DeactivateUsesTheLinkedContactIdNotTheInvitedAddress(t *testing.T) {
+	h := newInternalWriteHarness(t)
+	h.repo.existing = &domain.ProjectMembershipRow{
+		ProjectContactID: "pc-1", MembershipSfID: writeMembershipID, ContactSfID: writeContactSfID,
+		Email: writeEmail, State: domain.MembershipStateRegistered,
+		ProjectGroups: []string{projectGroupFullAccess},
+	}
+	// The Contact record carries a DIFFERENT address, so the by-address
+	// search finds nothing at all.
+	linked := existingSalesforceContact()
+	linked.Email = sampleStr("jane.doe@acme-corp.example")
+	h.se.contactByID = linked
+	h.se.contact = nil
+	h.se.membership = &salesentity.ProjectContact{ID: writeMembershipID}
+
+	if err := h.svc.Deactivate(context.Background(), writeProjectID, writeEmail); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if !reflect.DeepEqual(h.se.contactGets, []string{writeContactSfID}) {
+		t.Errorf("GetContact calls = %v, want the linked contact id", h.se.contactGets)
+	}
+	if len(h.se.contactSearchs) != 0 {
+		t.Errorf("the address search must not run when the id resolved: %v", h.se.contactSearchs)
+	}
+	if len(h.se.createdContact) != 0 || len(h.se.createdPC) != 0 {
+		t.Fatalf("nothing may be created: contacts=%v memberships=%v", h.se.createdContact, h.se.createdPC)
+	}
+	if len(h.se.updates) != 1 || h.se.updates[0].id != writeMembershipID {
+		t.Errorf("updates = %+v, want a PATCH of the real membership", h.se.updates)
+	}
+}
+
+// TestMembershipWrite_FallsBackToTheAddressSearchWhenTheLinkedIdIsStale keeps
+// every self-healing path the by-id lookup was added in front of: an id that
+// no longer resolves must not fail the write.
+func TestMembershipWrite_FallsBackToTheAddressSearchWhenTheLinkedIdIsStale(t *testing.T) {
+	h := newInternalWriteHarness(t)
+	h.repo.existing = &domain.ProjectMembershipRow{
+		ProjectContactID: "pc-1", MembershipSfID: writeMembershipID, ContactSfID: writeContactSfID,
+		Email: writeEmail, State: domain.MembershipStateRegistered,
+		ProjectGroups: []string{projectGroupFullAccess},
+	}
+	h.se.getContactErr = &apierror.ServiceUnavailableError{Msg: "salesentity: contact not found"}
+	h.se.contact = existingSalesforceContact()
+	h.se.membership = &salesentity.ProjectContact{ID: writeMembershipID}
+
+	if err := h.svc.Deactivate(context.Background(), writeProjectID, writeEmail); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if len(h.se.contactSearchs) != 1 {
+		t.Errorf("contact searches = %v, want the address search to have run", h.se.contactSearchs)
+	}
+	if len(h.se.updates) != 1 {
+		t.Errorf("updates = %+v, want the write to have gone through anyway", h.se.updates)
+	}
+}
+
+// TestMembershipWrite_CreatedContactKeepsTheRequestedIntegrationFlag covers a
+// POST /contacts response that carries only the id: the flag we ASKED for is
+// then the only evidence there is, and reading the missing field as false
+// would give a machine account global roles and an invitation e-mail.
+func TestMembershipWrite_CreatedContactKeepsTheRequestedIntegrationFlag(t *testing.T) {
+	h := newInternalWriteHarness(t)
+	h.se.createdContactOmitsFlags = true
+
+	req := inviteReq("Portal user")
+	req.IsCsIntegrationUser = true
+	if _, err := h.svc.Invite(context.Background(), writeProjectID, req); err != nil {
+		t.Fatalf("Invite: %v", err)
+	}
+	if len(h.repo.upserts) != 1 {
+		t.Fatalf("upserts = %d", len(h.repo.upserts))
+	}
+	in := h.repo.upserts[0]
+	if !in.IsCsIntegrationUser {
+		t.Error("an integration user must stay one when the create response omits the flag")
+	}
+	if len(in.GlobalRoles) != 0 || in.AdminRoleName != "" {
+		t.Errorf("an integration user gets no global roles: roles=%v adminRole=%q", in.GlobalRoles, in.AdminRoleName)
+	}
+	// The event is still published -- csm-notification-service is what acts
+	// on the flag (no Asgardeo identity, no e-mail) -- but it must carry the
+	// flag, not a silent false.
+	if len(h.pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(h.pub.published))
+	}
+	var payload events.ProjectContactInvitedPayload
+	if err := json.Unmarshal(h.pub.published[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.IsIntegrationUser {
+		t.Error("the invitation event must tell the consumer this is a machine account")
+	}
+}
+
 func TestMembershipWrite_DeactivateRequiresAnExistingMembership(t *testing.T) {
 	h := newInternalWriteHarness(t)
 	err := h.svc.Deactivate(context.Background(), writeProjectID, writeEmail)
@@ -685,8 +816,8 @@ func TestMembershipWrite_ResendPublishesWithTheResendMarker(t *testing.T) {
 	}
 }
 
-func TestMembershipWrite_ResendOutsideInvitedIsAConflict(t *testing.T) {
-	for _, state := range []string{domain.MembershipStateRegistered, domain.MembershipStateReInvited, domain.MembershipStateDeactivated} {
+func TestMembershipWrite_ResendOutsideAnOutstandingInvitationIsAConflict(t *testing.T) {
+	for _, state := range []string{domain.MembershipStateRegistered, domain.MembershipStateDeactivated} {
 		t.Run(state, func(t *testing.T) {
 			h := newInternalWriteHarness(t)
 			row := invitedMembershipRow()
@@ -699,9 +830,35 @@ func TestMembershipWrite_ResendOutsideInvitedIsAConflict(t *testing.T) {
 				t.Fatalf("err = %v, want ConflictError", err)
 			}
 			if len(h.pub.published) != 0 {
-				t.Error("nothing may be published outside INVITED")
+				t.Error("nothing may be published once the invitation is no longer outstanding")
 			}
 		})
+	}
+}
+
+// TestMembershipWrite_ResendIsAllowedForAReInvitedMembership pins that
+// RE-INVITED is an OUTSTANDING invitation, not an already-re-sent one. It is
+// the state Invite writes when it brings a deactivated contact back, so a
+// person left in it by a notification service that was down has no other way
+// to be sent their invitation.
+func TestMembershipWrite_ResendIsAllowedForAReInvitedMembership(t *testing.T) {
+	h := newInternalWriteHarness(t)
+	row := invitedMembershipRow()
+	row.State = domain.MembershipStateReInvited
+	h.repo.existing = row
+
+	if err := h.svc.ResendInvitation(context.Background(), writeProjectID, writeEmail); err != nil {
+		t.Fatalf("ResendInvitation: %v", err)
+	}
+	if len(h.pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(h.pub.published))
+	}
+	var payload events.ProjectContactInvitedPayload
+	if err := json.Unmarshal(h.pub.published[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Resend {
+		t.Error("a resend must carry the resend marker whatever the outstanding state")
 	}
 }
 

@@ -39,11 +39,16 @@ import (
 
 // NewRouter builds the dependency graph (repository → service → handler),
 // registers all routes, and wraps the mux with the middleware chain:
-// CorrelationID → Recovery → Logger → UserIDToken → Timeout. Also returns
-// the constructed EventPublisherService (nil if EVENT_HUB_BROKER is unset or
-// EVENT_PUBLISHING_ENABLED isn't "true") so the caller (server.New, then
-// cmd/api/main.go) can close it gracefully on shutdown.
-func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.EventPublisherService) {
+// CorrelationID → Recovery → Logger → UserIDToken → Timeout.
+//
+// It also returns a shutdown function that closes EVERY Kafka producer it
+// constructed — the shared-topic publisher and the onboarding-topic one —
+// so the caller (server.New, then cmd/api/main.go) releases both. Returning
+// one of the publishers instead, as this used to, left the second producer's
+// connections open and a buffered project_contact.invited unflushed at exit.
+// The function is never nil; with publishing unconfigured it simply has
+// nothing to close.
+func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	userRepo := repository.NewUserRepository(db)
 	userSvc := service.NewUserService(userRepo)
 	userHandler := handler.NewUserHandler(userSvc)
@@ -300,7 +305,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 			ClientSecret: cfg.SalesEntityClientSecret,
 			Scopes:       cfg.SalesEntityScopes,
 		})
-		if cfg.SalesforceMembershipIngestEnabled {
+		if cfg.CSMMigrationSalesforceMembershipIngestEnabled {
 			// The membership branch (Project_Contact__c / Contact envelopes)
 			// writes user/account_contact/project_contact rows and the
 			// DATABASE onboarding step, and publishes project_contact.invited
@@ -324,7 +329,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// it 404s and nothing on this path can write to Salesforce. It also needs
 	// what it depends on to exist — the SALES_ENTITY_* client for the two
 	// PATCHes, and the membership-ingest service to re-ingest each flipped
-	// membership — so SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
+	// membership — so CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
 	// this 404 too, rather than flipping Salesforce with no matching database
 	// write.
 	var membershipRegistrationHandler *handler.MembershipRegistrationHandler
@@ -1208,6 +1213,18 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		panic("auth: could not initialise token validation: " + err.Error())
 	}
 
+	// Both producers are closed together: they are constructed under the
+	// same conditions and neither caller has any reason to outlive the
+	// other.
+	closePublishers := func() {
+		if eventPublisher != nil {
+			eventPublisher.Close()
+		}
+		if projectEventPublisher != nil {
+			projectEventPublisher.Close()
+		}
+	}
+
 	return middleware.CorrelationID(
 		middleware.Recovery(
 			middleware.Logger(
@@ -1218,5 +1235,5 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				),
 			),
 		),
-	), eventPublisher
+	), closePublishers
 }

@@ -42,13 +42,13 @@ func newMembershipRegistrationRouter(t *testing.T, membershipRegistrationEnabled
 	t.Cleanup(pool.Close)
 
 	cfg := &config.Config{
-		DataSource:                                config.DataSourcePostgres,
-		SalesEntityBaseURL:                        "https://example.invalid",
-		SalesEntityTokenURL:                       "https://example.invalid/oauth2/token",
-		SalesEntityClientID:                       "test-client",
-		SalesEntityClientSecret:                   "test-secret",
-		SalesforceMembershipIngestEnabled:         true,
-		CSMMigrationMembershipRegistrationEnabled: membershipRegistrationEnabled,
+		DataSource:              config.DataSourcePostgres,
+		SalesEntityBaseURL:      "https://example.invalid",
+		SalesEntityTokenURL:     "https://example.invalid/oauth2/token",
+		SalesEntityClientID:     "test-client",
+		SalesEntityClientSecret: "test-secret",
+		CSMMigrationSalesforceMembershipIngestEnabled: true,
+		CSMMigrationMembershipRegistrationEnabled:     membershipRegistrationEnabled,
 	}
 	withTestAuth(t, cfg)
 	router, _ := NewRouter(pool, cfg)
