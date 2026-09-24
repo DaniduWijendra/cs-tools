@@ -492,6 +492,14 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 		return domain.CreateCaseResponse{}, err
 	}
 
+	// Only now — Postgres has confirmed the row this mode's reads actually
+	// depend on — is it safe to publish. See publishCaseCreatedEvent's doc
+	// comment for why this can't just be snCaseService's own automatic
+	// publish (that fires right after the ServiceNow POST, before this
+	// Postgres insert was even attempted) — same reasoning
+	// incidentService.createIncidentSNFirst already established.
+	publishCaseCreatedEvent(ctx, s.publisher, s.GetCaseByID, req, c.ID)
+
 	responseState := ""
 	if c.State != nil {
 		responseState = string(*c.State)

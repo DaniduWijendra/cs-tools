@@ -27,6 +27,7 @@ import (
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
 
@@ -57,6 +58,7 @@ type stubCaseRepo struct {
 	createCaseFromServiceNow func(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error)
 	createCaseComment        func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
 	createCase               func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
+	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
 }
 
 func (s *stubCaseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error) {
@@ -71,7 +73,10 @@ func (s *stubCaseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.
 	}
 	panic("not implemented")
 }
-func (s *stubCaseRepo) GetCaseByID(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+func (s *stubCaseRepo) GetCaseByID(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error) {
+	if s.getCaseByID != nil {
+		return s.getCaseByID(ctx, id, scope)
+	}
 	panic("not implemented")
 }
 func (s *stubCaseRepo) SearchCases(ctx context.Context, req domain.SearchCasesRequest, scope repository.SearchScope) ([]domain.SearchCaseView, int, error) {
@@ -843,6 +848,96 @@ func TestCaseService_CreateCase_SNSuccessCreatesPostgresRowWithMatchingIdentity(
 	}
 	if resp.Case.ID != snID || resp.Case.Number != snNumber || resp.Case.InternalID != snInternalID {
 		t.Errorf("CreateCase response = %+v, want identity matching ServiceNow's (%q, %q, %q)", resp.Case, snID, snNumber, snInternalID)
+	}
+}
+
+// TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds is the
+// regression guard for a real bug: createCaseSNFirst never called
+// publishCaseCreatedEvent at all, so case.created never fired for
+// DATA_SOURCE=postgres-servicenow-dual-write's case pilot even with Event
+// Hub fully configured and enabled -- the wiring incidentService.
+// createIncidentSNFirst already had (see
+// TestIncidentService_CreateIncident_PublishesOnlyAfterPostgresSucceeds) was
+// simply missing here. Also proves the event only fires after
+// CreateCaseFromServiceNow has actually confirmed the Postgres row, same
+// ordering guarantee as incident's own version -- never right after the
+// ServiceNow POST, which a consumer could observe before the Postgres
+// -backed read API (the only one live in this mode) can return anything for
+// it.
+func TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds(t *testing.T) {
+	const caseID = "44444444-4444-4444-4444-444444444444"
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: caseID, InternalID: "WSO2-CS-2", Number: "CS0023002",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(_ context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+			respState := domain.CaseStateOpen
+			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
+				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call after Postgres success, got %d", len(publisher.calls))
+	}
+	if publisher.calls[0].eventType != events.TypeCaseCreated || publisher.calls[0].entityID != caseID {
+		t.Errorf("unexpected publish call: %+v", publisher.calls[0])
+	}
+}
+
+// TestCaseService_CreateCase_DoesNotPublishWhenPostgresFails proves the
+// other half: if ServiceNow already has the case but the Postgres insert
+// fails (real drift, logged separately), no event fires -- a consumer must
+// never see case.created for a case the Postgres-backed read API cannot
+// return.
+func TestCaseService_CreateCase_DoesNotPublishWhenPostgresFails(t *testing.T) {
+	mirror := &stubMirrorCaseService{
+		createCase: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+			return domain.CreateCaseResponse{
+				Message: "Case created successfully.",
+				Case: domain.CreateCaseDetails{
+					ID: "55555555-5555-5555-5555-555555555555", InternalID: "WSO2-CS-3", Number: "CS0023003",
+					CreatedBy: "jane.doe@example.com", State: "Open",
+				},
+			}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		createCaseFromServiceNow: func(context.Context, domain.CreateCaseRequest, string, string, string, string, string) (domain.Case, error) {
+			return domain.Case{}, errors.New("postgres insert failed")
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	publisher := &mockEventPublisher{}
+	svc := NewCaseServiceWithSNWriteback(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	if _, err := svc.CreateCase(context.Background(), validCreateCaseRequest()); err == nil {
+		t.Fatal("expected an error when the Postgres insert fails")
+	}
+	if len(publisher.calls) != 0 {
+		t.Errorf("expected no publish call when the Postgres insert fails, got %d", len(publisher.calls))
 	}
 }
 
