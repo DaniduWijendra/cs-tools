@@ -19,11 +19,13 @@ package server
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/eventbus"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/github"
@@ -37,11 +39,16 @@ import (
 
 // NewRouter builds the dependency graph (repository → service → handler),
 // registers all routes, and wraps the mux with the middleware chain:
-// CorrelationID → Recovery → Logger → UserIDToken → Timeout. Also returns
-// the constructed EventPublisherService (nil if EVENT_HUB_BROKER is unset or
-// EVENT_PUBLISHING_ENABLED isn't "true") so the caller (server.New, then
-// cmd/api/main.go) can close it gracefully on shutdown.
-func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.EventPublisherService) {
+// CorrelationID → Recovery → Logger → UserIDToken → Timeout.
+//
+// It also returns a shutdown function that closes EVERY Kafka producer it
+// constructed — the shared-topic publisher and the onboarding-topic one —
+// so the caller (server.New, then cmd/api/main.go) releases both. Returning
+// one of the publishers instead, as this used to, left the second producer's
+// connections open and a buffered project_contact.invited unflushed at exit.
+// The function is never nil; with publishing unconfigured it simply has
+// nothing to close.
+func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	userRepo := repository.NewUserRepository(db)
 	userSvc := service.NewUserService(userRepo)
 	userHandler := handler.NewUserHandler(userSvc)
@@ -78,6 +85,85 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		eventPublishFailureHandler = handler.NewEventPublishFailureHandler(eventPublishFailureSvc)
 	}
 
+	// Project consumption is gated on having a database, NOT on the data
+	// source. It used to be Postgres-only, on the reasoning that ServiceNow
+	// deployments keep this state on the customer_project record; it now
+	// dual-writes both stores, and staging and production run
+	// DATA_SOURCE=servicenow, so gating on the data source would have disabled
+	// the feature exactly where it is needed. ServiceNow remains the source of
+	// truth for status, reached through the Choreo subscription operation.
+	//
+	// The two halves are configured independently, because they need different
+	// things and failing one must not take out the other.
+	//
+	// Reading and writing the stored state needs a pool. Issuing a licence does
+	// not:
+	// the sequence reads status from ServiceNow and runs through the Choreo
+	// operation, touching Postgres only to mirror state, which is best-effort
+	// and skipped entirely when there is no repository. Gating the licence
+	// route on the database would take licence downloads out of any deployment
+	// that happens not to have one — and the customer portal now issues every
+	// licence through this service.
+	//
+	// Every path that leaves a route unregistered says so at startup. A
+	// disabled route is otherwise indistinguishable from a typo in the URL —
+	// both are a bare 404 — and the one thing a person debugging that 404
+	// cannot discover from the outside is that the service deliberately chose
+	// not to register it.
+	// Not logged when db is nil: with no database pool configured, stored state
+	// cannot be registered. The licence route below does not depend on it.
+	var consumptionRepo repository.ProjectConsumptionRepository
+	if db != nil {
+		consumptionRepo = repository.NewProjectConsumptionRepository(db)
+	}
+
+	// Provisioning reaches an upstream that mints Choreo applications for real
+	// customers, so an unconfigured or partially-configured operation leaves
+	// the route absent rather than registering something that fails — or worse,
+	// succeeds — against the wrong environment.
+	var choreoClient choreosubscription.Client
+	if cfg.ConsumptionOperationBaseURL == "" {
+		slog.Info("deployment licence route not registered: PRODUCT_CONSUMPTION_OPERATION_URL is unset",
+			"routes", "POST /projects/{id}/deployments/{deploymentId}/license")
+	} else {
+		client, err := choreosubscription.NewClient(choreosubscription.Config{
+			BaseURL: cfg.ConsumptionOperationBaseURL,
+			Creds: choreosubscription.ClientCredentialsConfig{
+				TokenURL:     cfg.ConsumptionOperationTokenURL,
+				ClientID:     cfg.ConsumptionOperationClientID,
+				ClientSecret: cfg.ConsumptionOperationClientSecret,
+				Scopes:       cfg.ConsumptionOperationScopes,
+			},
+		})
+		if err != nil {
+			// The error names the offending field, never a credential value.
+			slog.Error("deployment licence route not registered: the product-consumption operation is not configured correctly",
+				"routes", "POST /projects/{id}/deployments/{deploymentId}/license", "error", err)
+		} else {
+			choreoClient = client
+		}
+	}
+
+	consumptionStateEnabled := consumptionRepo != nil
+	licenseProvisioningEnabled := choreoClient != nil
+
+	var projectConsumptionHandler *handler.ProjectConsumptionHandler
+	if consumptionStateEnabled || licenseProvisioningEnabled {
+		if !consumptionStateEnabled {
+			slog.Info("deployment licence route registered without Postgres state",
+				"routes", "POST /projects/{id}/deployments/{deploymentId}/license",
+				"reason", "ServiceNow remains the source of truth for status; the Postgres mirror is skipped")
+		}
+		projectConsumptionHandler = handler.NewProjectConsumptionHandler(
+			service.NewProjectConsumptionService(
+				consumptionRepo,
+				choreoClient,
+				accessSvc,
+				cfg.ConsumptionDualWriteEnabled,
+			),
+		)
+	}
+
 	// EventPublisherService is optional, like every ServiceNow-only
 	// dependency below — gated on EventHubBroker rather than cfg.DataSource,
 	// since publishing is a distinct concern from which backend serves reads
@@ -94,6 +180,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				Broker:           cfg.EventHubBroker,
 				ConnectionString: cfg.EventHubConnectionString,
 				Topic:            cfg.EventHubTopic,
+			}),
+			eventPublishFailureSvc,
+		)
+	}
+
+	// Onboarding events go to their own topic, not the shared one, so a
+	// case-event backlog cannot delay an invitation and the onboarding
+	// dead-letter queue can be watched separately. Same broker, same
+	// credentials, same failure recording -- only the topic differs. nil
+	// under exactly the same conditions as eventPublisher above, and the
+	// membership ingest already treats a nil publisher as "write the rows,
+	// send nothing".
+	var projectEventPublisher service.EventPublisherService
+	if cfg.EventHubBroker != "" && cfg.EventPublishingEnabled {
+		projectEventPublisher = service.NewEventPublisherService(
+			eventbus.NewProducer(eventbus.Config{
+				Broker:           cfg.EventHubBroker,
+				ConnectionString: cfg.EventHubConnectionString,
+				Topic:            cfg.ProjectEventHubTopic,
 			}),
 			eventPublishFailureSvc,
 		)
@@ -119,6 +224,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// it authenticates by HMAC rather than by bearer token, and an endpoint
 	// that mutates change requests should appear only when asked for.
 	var githubWebhookHandler *handler.GithubWebhookHandler
+	var githubServiceRequestHandler *handler.GithubServiceRequestHandler
 
 	// Assigned inside the GitHub-integration block below and read further down,
 	// where activeCaseSvc finally exists, to build the native issue-filing
@@ -134,14 +240,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		scheduledTaskRunHandler = handler.NewScheduledTaskRunHandler(service.NewScheduledTaskRunService(repository.NewScheduledTaskRunRepository(db)))
 		if cfg.HasGithubIntegration() {
 			githubLabels, labelErr := service.NewGithubLabels(service.GithubLabelOverrides{
-				ChangeRequest:    cfg.GithubLabelChangeRequest,
-				TypePrefix:       cfg.GithubLabelTypePrefix,
-				ScopePrefix:      cfg.GithubLabelScopePrefix,
-				ScopeToType:      cfg.GithubLabelsScope,
-				Impact:           cfg.GithubLabelsImpact,
-				Likelihood:       cfg.GithubLabelsLikelihood,
-				State:            cfg.GithubLabelsState,
-				StrippedOnCreate: cfg.GithubLabelsStrippedOnCreate,
+				TypeIncident:       cfg.GithubLabelTypeIncident,
+				TypeServiceRequest: cfg.GithubLabelTypeServiceRequest,
+				Class:              cfg.GithubLabelsClass,
+				StatusAssigned:     cfg.GithubLabelStatusAssigned,
 			})
 			if labelErr != nil {
 				// A label override that does not parse would leave the sync
@@ -157,16 +259,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				Token:   cfg.GithubToken,
 			})
 			githubLabelSet = githubLabels
-			githubWebhookHandler = handler.NewGithubWebhookHandler(
-				service.NewGithubSyncServiceWriting(
-					githubSyncRepo,
-					repository.NewGithubMutationRepository(db),
-					githubClient,
-					cfg.GithubIntegrationLogin,
-					githubLabels,
-				),
-				cfg.GithubWebhookSecret,
+			githubSyncSvc := service.NewGithubSyncServiceWriting(
+				githubSyncRepo,
+				repository.NewGithubMutationRepository(db),
+				githubClient,
+				cfg.GithubIntegrationLogin,
+				githubLabels,
 			)
+			githubWebhookHandler = handler.NewGithubWebhookHandler(githubSyncSvc, cfg.GithubWebhookSecret)
+			githubServiceRequestHandler = handler.NewGithubServiceRequestHandler(githubSyncSvc, cfg.AuthInternalClientIDs)
 		}
 	}
 
@@ -192,28 +293,53 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
 
 	var salesforceEventHandler *handler.SalesforceEventHandler
+	// membershipRegistrationHandler and projectContactSyncHandler both need
+	// the very same membership-ingest-enabled SalesforceEventService this
+	// block builds, so all three are wired together rather than side by side.
+	var membershipIngestSvc service.SalesforceEventService
+	var salesEntityClient *salesentity.Client
 	if db != nil && cfg.DataSource == config.DataSourcePostgres && cfg.SalesEntityConfigured() {
-		salesEntityClient := salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
+		salesEntityClient = salesentity.New(cfg.SalesEntityBaseURL, salesentity.ClientCredentialsConfig{
 			TokenURL:     cfg.SalesEntityTokenURL,
 			ClientID:     cfg.SalesEntityClientID,
 			ClientSecret: cfg.SalesEntityClientSecret,
 			Scopes:       cfg.SalesEntityScopes,
 		})
-		if cfg.SalesforceMembershipIngestEnabled {
+		if cfg.CSMMigrationSalesforceMembershipIngestEnabled {
 			// The membership branch (Project_Contact__c / Contact envelopes)
 			// writes user/account_contact/project_contact rows and the
 			// DATABASE onboarding step, and publishes project_contact.invited
 			// when eventPublisher is configured (nil is a no-op there).
-			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventServiceWithMembershipIngest(
+			membershipIngestSvc = service.NewSalesforceEventServiceWithMembershipIngest(
 				accountRepo, salesEntityClient, service.MembershipIngest{
 					Memberships: repository.NewProjectMembershipRepository(db),
 					Steps:       repository.NewOnboardingStepRepository(db),
 					SalesEntity: salesEntityClient,
-					Publisher:   eventPublisher,
-				}))
+					Publisher:   projectEventPublisher,
+				})
+			salesforceEventHandler = handler.NewSalesforceEventHandler(membershipIngestSvc)
 		} else {
 			salesforceEventHandler = handler.NewSalesforceEventHandler(service.NewSalesforceEventService(accountRepo, salesEntityClient))
 		}
+	}
+
+	// POST /users/me/memberships/register (H-0 of the customer onboarding flow).
+	// Postgres-only, and off unless CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED is
+	// exactly "true": with the flag off the route is not registered at all, so
+	// it 404s and nothing on this path can write to Salesforce. It also needs
+	// what it depends on to exist — the SALES_ENTITY_* client for the two
+	// PATCHes, and the membership-ingest service to re-ingest each flipped
+	// membership — so CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED being off leaves
+	// this 404 too, rather than flipping Salesforce with no matching database
+	// write.
+	var membershipRegistrationHandler *handler.MembershipRegistrationHandler
+	if db != nil && cfg.CSMMigrationMembershipRegistrationEnabled && salesEntityClient != nil && membershipIngestSvc != nil {
+		membershipRegistrationHandler = handler.NewMembershipRegistrationHandler(service.NewMembershipRegistrationService(
+			repository.NewMembershipRegistrationRepository(db),
+			salesEntityClient,
+			membershipIngestSvc,
+			repository.NewOnboardingStepRepository(db),
+		))
 	}
 
 	// onboarding_step has no ServiceNow equivalent; Postgres-only, like
@@ -221,6 +347,25 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	var onboardingStepHandler *handler.OnboardingStepHandler
 	if db != nil {
 		onboardingStepHandler = handler.NewOnboardingStepHandler(service.NewOnboardingStepService(repository.NewOnboardingStepRepository(db), accessSvc))
+	}
+
+	// The portal-driven membership writes. Gated on a pool AND
+	// cfg.HasPortalMembershipWrites() -- the flag, the Postgres data source
+	// and a complete sales-entity-service connection -- because every one of
+	// these writes is half a Postgres transaction and half a Salesforce
+	// call. Off by default: nil handler means the four routes below are
+	// never registered, so a portal built against them fails loudly with a
+	// 404 rather than writing one system and not the other.
+	var projectMembershipHandler *handler.ProjectMembershipHandler
+	if db != nil && cfg.HasPortalMembershipWrites() && salesEntityClient != nil {
+		projectMembershipHandler = handler.NewProjectMembershipHandler(service.NewProjectMembershipWriteService(service.MembershipWriteDeps{
+			Memberships: repository.NewProjectMembershipRepository(db),
+			Steps:       repository.NewOnboardingStepRepository(db),
+			SalesEntity: salesEntityClient,
+			Publisher:   projectEventPublisher,
+			Failures:    eventPublishFailureSvc,
+			Access:      accessSvc,
+		}))
 	}
 
 	// Also constructed for DataSourcePostgresServiceNowDualWrite: that mode's
@@ -560,10 +705,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	catalogHandler := handler.NewCatalogHandler(activeCatalogSvc)
 
-	var feedbackHandler *handler.FeedbackHandler
+	// Case feedback (CSAT submissions) is a ServiceNow-only entity -- no
+	// feedback table exists anywhere in migrations/ -- but the routes are
+	// registered for both data sources, same as tasks above: with no handler
+	// the mux answers a silent, undocumented 404, while the OpenAPI spec
+	// documents a 503 ErrorResponse for these paths. The Postgres stand-in
+	// supplies that 503.
+	var activeFeedbackSvc service.FeedbackService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		feedbackHandler = handler.NewFeedbackHandler(service.NewServiceNowFeedbackService(serviceNowIntegrationServiceClient))
+		activeFeedbackSvc = service.NewServiceNowFeedbackService(serviceNowIntegrationServiceClient)
+	} else {
+		activeFeedbackSvc = service.NewUnavailableFeedbackService()
 	}
+	feedbackHandler := handler.NewFeedbackHandler(activeFeedbackSvc)
 
 	productVulnerabilityRepo := repository.NewProductVulnerabilityRepository(db)
 	var activeProductVulnerabilitySvc service.ProductVulnerabilityService
@@ -786,6 +940,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	if githubWebhookHandler != nil {
 		mux.HandleFunc("POST /webhooks/github", githubWebhookHandler.Handle)
+		mux.HandleFunc("POST /github/service-requests", githubServiceRequestHandler.Create)
 	}
 
 	if scheduledTaskRunHandler != nil {
@@ -816,9 +971,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	if savedFilterViewHandler != nil {
 		mux.HandleFunc("GET /users/me/saved-filter-views", savedFilterViewHandler.List)
-		mux.HandleFunc("PUT /users/me/saved-filter-views", savedFilterViewHandler.Save)
+		mux.HandleFunc("PATCH /users/me/saved-filter-views", savedFilterViewHandler.Save)
 		mux.HandleFunc("DELETE /users/me/saved-filter-views", savedFilterViewHandler.Delete)
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
+	}
+
+	if membershipRegistrationHandler != nil {
+		mux.HandleFunc("POST /users/me/memberships/register", membershipRegistrationHandler.RegisterInvitedMemberships)
 	}
 
 	if snUserHandler != nil {
@@ -830,6 +989,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("GET /users/{id}", userHandler.GetUser)
 		mux.HandleFunc("GET /users/me", userHandler.GetMe)
 		mux.HandleFunc("POST /users/search", userHandler.SearchUsers)
+		mux.HandleFunc("POST /users", userHandler.CreateUser)
 	}
 	if snAccountHandler != nil {
 		mux.HandleFunc("GET /accounts/{id}", snAccountHandler.GetAccount)
@@ -852,8 +1012,26 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
+	// Registered independently: the stored-state routes read and write
+	// Postgres, the licence route does not need it at all.
+	if consumptionStateEnabled {
+		mux.HandleFunc("GET /projects/{id}/consumption", projectConsumptionHandler.GetProjectConsumption)
+		mux.HandleFunc("PATCH /projects/{id}/consumption", projectConsumptionHandler.UpdateProjectConsumption)
+	}
+	if licenseProvisioningEnabled {
+		mux.HandleFunc("POST /projects/{id}/deployments/{deploymentId}/license", projectConsumptionHandler.GetDeploymentLicense)
+	}
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
+	if projectMembershipHandler != nil {
+		// Beside the search and get above, in the same namespace. {email}
+		// keys a membership; {contactId} on the GET above is a user id, and
+		// the two never collide because the methods differ.
+		mux.HandleFunc("POST /projects/{id}/contacts", projectMembershipHandler.InviteProjectContact)
+		mux.HandleFunc("PATCH /projects/{id}/contacts/{email}", projectMembershipHandler.UpdateProjectContactRoles)
+		mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", projectMembershipHandler.DeactivateProjectContact)
+		mux.HandleFunc("POST /projects/{id}/contacts/{email}/resend-invitation", projectMembershipHandler.ResendProjectContactInvitation)
+	}
 	if projectUpdateHandler != nil {
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	}
@@ -888,10 +1066,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	mux.HandleFunc("POST /cases", caseHandler.CreateCase)
 	mux.HandleFunc("POST /cases/search", caseHandler.SearchCases)
 	mux.HandleFunc("POST /cases/aggregate", caseHandler.AggregateCases)
-	if feedbackHandler != nil {
-		mux.HandleFunc("POST /cases/feedback/search", feedbackHandler.SearchFeedback)
-		mux.HandleFunc("POST /cases/feedback/aggregate", feedbackHandler.AggregateFeedback)
-	}
+	mux.HandleFunc("POST /cases/feedback/search", feedbackHandler.SearchFeedback)
+	mux.HandleFunc("POST /cases/feedback/aggregate", feedbackHandler.AggregateFeedback)
 	mux.HandleFunc("POST /cases/{id}/comments", caseHandler.CreateCaseComment)
 	mux.HandleFunc("POST /cases/{id}/comments/search", caseHandler.SearchCaseComments)
 	mux.HandleFunc("POST /cases/{id}/activities/search", caseHandler.SearchCaseActivities)
@@ -1038,6 +1214,18 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		panic("auth: could not initialise token validation: " + err.Error())
 	}
 
+	// Both producers are closed together: they are constructed under the
+	// same conditions and neither caller has any reason to outlive the
+	// other.
+	closePublishers := func() {
+		if eventPublisher != nil {
+			eventPublisher.Close()
+		}
+		if projectEventPublisher != nil {
+			projectEventPublisher.Close()
+		}
+	}
+
 	return middleware.CorrelationID(
 		middleware.Recovery(
 			middleware.Logger(
@@ -1048,5 +1236,5 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				),
 			),
 		),
-	), eventPublisher
+	), closePublishers
 }

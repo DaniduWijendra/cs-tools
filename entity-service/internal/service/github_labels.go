@@ -21,242 +21,251 @@ import (
 	"strings"
 )
 
-// GithubLabels is the label vocabulary the sync recognises.
+// The label and title vocabulary the integration recognises, taken from the
+// servicenow-integration repository that is installed in the product repos --
+// .github/labels.yml and .github/workflows/issue_servicenow.yml.
 //
-// CONFIGURABLE VALUES, FIXED SHAPE. Which strings a repository uses is a
-// deployment's business and may differ between dev and production, so every
-// one is overridable. What is NOT configurable is the shape: that a type label
-// exists, that scope is prefix-grouped, that exactly one scope is allowed. The
-// parsing depends on those, and an operator who could change them in config
-// would be able to break the code that reads them without any way to find out
-// until a webhook arrived.
+// AN EARLIER VERSION OF THIS FILE HAD A DIFFERENT VOCABULARY ENTIRELY:
+// Type/ChangeRequest, CRType/*, CRScope/*, state labels, impact and likelihood.
+// Those came from GitHubIssueContentProcessor, a script include on the
+// ServiceNow instance, and they appear in exactly one file across the product
+// repos -- an issue template named "(DO NOT USE THIS YET) (WIP)". Nothing
+// applies them, so nothing would ever have matched. The vocabulary below is
+// the one the live workflows use.
 //
-// Defaults are ServiceNow's values verbatim, so an unconfigured deployment
-// behaves exactly as the integration being replaced.
+// WHAT IS DELIBERATELY ABSENT, because the live integration has no equivalent:
+// scope, impact, likelihood, and state labels. It never changes a record's
+// state from GitHub at all -- its only writes are creating a case, editing a
+// case's fields, and adding a comment. State travels the other way.
 type GithubLabels struct {
-	// ChangeRequest marks an issue as a change request at all.
-	ChangeRequest string
-	// TypePrefix groups the type labels (CRType/Normal, CRType/Emergency, ...).
-	// Which suffixes exist is the repository's business; the sync only needs
-	// to know there is exactly one.
-	TypePrefix string
-	// ScopePrefix groups the scope labels.
-	ScopePrefix string
-	// ScopeToType maps a full scope label onto change_request_type.
-	ScopeToType map[string]string
-	// ImpactByLabel and LikelihoodByLabel map a label onto their enums.
-	ImpactByLabel     map[string]string
-	LikelihoodByLabel map[string]string
-	// StateByLabel maps a label onto change_request_state_enum.
-	StateByLabel map[string]string
-	// StrippedOnCreate are removed from the issue when the change request is
-	// created, because the new record starts at its own initial state.
-	StrippedOnCreate map[string]bool
+	// TypeIncident and TypeServiceRequest identify the two templated kinds.
+	TypeIncident       string
+	TypeServiceRequest string
+
+	// ClassByLabel maps a CR class label onto the service request's sr_type.
+	//
+	// NOT onto a change request. A [CR]: issue creates a SERVICE REQUEST --
+	// issue_servicenow.yml sets case_type "Service Request", catalog
+	// "Generic Requests", and carries the class as sr_type. The change request
+	// proper is raised later, by a person, through the portal, with the
+	// approval path and planned window an issue cannot supply.
+	ClassByLabel map[string]string
+
+	// StatusAssigned is written by the outbound sync when the case gains an
+	// assignee. Listed here because the inbound half must not treat it as a
+	// signal: it is our own output coming back.
+	StatusAssigned string
+
+	// ValidationPassed and ValidationFailed are applied by the repository's own
+	// validation workflow, before this service ever sees the issue.
+	ValidationPassed string
+	ValidationFailed string
 }
 
-// DefaultGithubLabels is ServiceNow's vocabulary, verbatim.
+// Title prefixes. A change request carries no template label; the prefix is
+// the only signal, which is why these are part of the vocabulary rather than
+// an implementation detail of the matcher.
+const (
+	TitlePrefixChangeRequest          = "[CR]:"
+	TitlePrefixEmergencyChangeRequest = "[ECR]:"
+)
+
+// DefaultGithubLabels is .github/labels.yml, verbatim.
 func DefaultGithubLabels() GithubLabels {
 	return GithubLabels{
-		ChangeRequest: "Type/ChangeRequest",
-		TypePrefix:    "CRType/",
-		ScopePrefix:   "CRScope/",
-		ScopeToType: map[string]string{
-			"CRScope/Application":    "GENERAL",
-			"CRScope/Infrastructure": "INFRA",
+		TypeIncident:       "Type/Incident",
+		TypeServiceRequest: "Type/ServiceRequest",
+		ClassByLabel: map[string]string{
+			"CR/NormalChange":    "Normal Change",
+			"CR/StandardChange":  "Standard Change",
+			"CR/EmergencyChange": "Emergency Change",
 		},
-		ImpactByLabel:     map[string]string{"Impact 1": "HIGH", "Impact 2": "MEDIUM"},
-		LikelihoodByLabel: map[string]string{"Likelihood 1": "HIGH", "Likelihood 2": "MEDIUM"},
-		StateByLabel: map[string]string{
-			"Assessed":    "ASSESS",
-			"Authorized":  "AUTHORIZE",
-			"Scheduled":   "SCHEDULED",
-			"Implemented": "IMPLEMENT",
-			"Reviewed":    "REVIEW",
-		},
-		// ServiceNow's issueStates: Closed is stripped, Canceled is not. That
-		// asymmetry looks accidental, but reproducing it keeps a migrated
-		// repository looking the same either side of the cutover.
-		StrippedOnCreate: map[string]bool{
-			"Assessed": true, "Authorized": true, "Scheduled": true,
-			"Implemented": true, "Reviewed": true, "Closed": true,
-		},
+		StatusAssigned:   "Status/Assigned",
+		ValidationPassed: "validation-passed",
+		ValidationFailed: "validation-failed",
 	}
 }
 
-// GithubLabelOverrides is the flat, single-line configuration Choreo can carry.
-// Empty fields keep the ServiceNow default for that entry.
+// GithubLabelOverrides are the flat single-line strings Choreo can carry.
+// Empty keeps the default.
 type GithubLabelOverrides struct {
-	ChangeRequest string // GITHUB_LABEL_CHANGE_REQUEST
-	TypePrefix    string // GITHUB_LABEL_TYPE_PREFIX
-	ScopePrefix   string // GITHUB_LABEL_SCOPE_PREFIX
-	// Each of these is "label:value,label:value".
-	ScopeToType      string // GITHUB_LABELS_SCOPE
-	Impact           string // GITHUB_LABELS_IMPACT
-	Likelihood       string // GITHUB_LABELS_LIKELIHOOD
-	State            string // GITHUB_LABELS_STATE
-	StrippedOnCreate string // GITHUB_LABELS_STRIPPED_ON_CREATE  ("a,b,c")
+	TypeIncident       string // GITHUB_LABEL_TYPE_INCIDENT
+	TypeServiceRequest string // GITHUB_LABEL_TYPE_SERVICE_REQUEST
+	Class              string // GITHUB_LABELS_CLASS  "CR/NormalChange:Normal Change,..."
+	StatusAssigned     string // GITHUB_LABEL_STATUS_ASSIGNED
 }
 
-// NewGithubLabels applies overrides onto the ServiceNow defaults.
+// NewGithubLabels applies overrides to the defaults.
 //
-// An unparseable override is an error rather than a silent fallback: a typo in
-// a label map would otherwise leave the sync quietly recognising nothing, which
-// is exactly the failure that took ServiceNow's own integration down for a year
-// when git.valid.org.list stopped parsing.
+// An unparseable override is an ERROR, not a fallback. A label vocabulary that
+// silently reverts to the default is a sync that recognises nothing and
+// reports nothing -- refusing to start is the louder failure, and the cheaper
+// one to diagnose.
 func NewGithubLabels(o GithubLabelOverrides) (GithubLabels, error) {
 	l := DefaultGithubLabels()
 
-	if v := strings.TrimSpace(o.ChangeRequest); v != "" {
-		l.ChangeRequest = v
+	if v := strings.TrimSpace(o.TypeIncident); v != "" {
+		l.TypeIncident = v
 	}
-	if v := strings.TrimSpace(o.TypePrefix); v != "" {
-		l.TypePrefix = v
+	if v := strings.TrimSpace(o.TypeServiceRequest); v != "" {
+		l.TypeServiceRequest = v
 	}
-	if v := strings.TrimSpace(o.ScopePrefix); v != "" {
-		l.ScopePrefix = v
+	if v := strings.TrimSpace(o.StatusAssigned); v != "" {
+		l.StatusAssigned = v
 	}
-
-	for _, spec := range []struct {
-		raw   string
-		name  string
-		apply func(map[string]string)
-	}{
-		{o.ScopeToType, "GITHUB_LABELS_SCOPE", func(m map[string]string) { l.ScopeToType = m }},
-		{o.Impact, "GITHUB_LABELS_IMPACT", func(m map[string]string) { l.ImpactByLabel = m }},
-		{o.Likelihood, "GITHUB_LABELS_LIKELIHOOD", func(m map[string]string) { l.LikelihoodByLabel = m }},
-		{o.State, "GITHUB_LABELS_STATE", func(m map[string]string) { l.StateByLabel = m }},
-	} {
-		if strings.TrimSpace(spec.raw) == "" {
-			continue
+	if v := strings.TrimSpace(o.Class); v != "" {
+		m, err := parseLabelMap(v, "GITHUB_LABELS_CLASS")
+		if err == nil {
+			err = validateClassValues(m)
 		}
-		m, err := parseLabelMap(spec.raw)
 		if err != nil {
-			return GithubLabels{}, fmt.Errorf("%s: %w", spec.name, err)
+			return GithubLabels{}, err
 		}
-		spec.apply(m)
-	}
-
-	if v := strings.TrimSpace(o.StrippedOnCreate); v != "" {
-		set := map[string]bool{}
-		for _, item := range strings.Split(v, ",") {
-			if item = strings.TrimSpace(item); item != "" {
-				set[item] = true
-			}
-		}
-		l.StrippedOnCreate = set
+		l.ClassByLabel = m
 	}
 	return l, nil
 }
 
-// parseLabelMap reads "label:value,label:value".
+
+// canonicalClassValues are the only values a class label may map to. A class
+// value becomes the service request's sr_type and is written to u_sr_type, so
+// an arbitrary replacement is not merely unusual -- it puts a value downstream
+// consumers have never seen into the record.
 //
-// Splits on the LAST colon, so a label may contain one: "CRScope/A:B:GENERAL"
-// means the label "CRScope/A:B" maps to GENERAL. GitHub allows colons in label
-// names and the first-colon reading would silently mangle them.
-func parseLabelMap(raw string) (map[string]string, error) {
-	out := map[string]string{}
+// The labels themselves stay free-form, because a repository may well name them
+// differently; what they resolve TO is fixed vocabulary. Checked at startup so
+// a typo fails the deployment rather than silently classifying every change
+// request as unrecognised and skipping it.
+var canonicalClassValues = map[string]bool{
+	"Normal Change":    true,
+	"Standard Change":  true,
+	"Emergency Change": true,
+}
+
+// validateClassValues rejects a GITHUB_LABELS_CLASS override that maps a label
+// to something outside the canonical set.
+func validateClassValues(m map[string]string) error {
+	for label, value := range m {
+		if !canonicalClassValues[value] {
+			return fmt.Errorf(
+				"GITHUB_LABELS_CLASS: %q maps to %q, which is not one of "+
+					"\"Normal Change\", \"Standard Change\" or \"Emergency Change\"", label, value)
+		}
+	}
+	return nil
+}
+
+// parseLabelMap reads "label:value,label:value". Values may contain spaces
+// ("Normal Change"); labels may contain a slash ("CR/NormalChange").
+func parseLabelMap(raw, name string) (map[string]string, error) {
+	out := make(map[string]string)
 	for _, pair := range strings.Split(raw, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
 		}
-		i := strings.LastIndex(pair, ":")
-		if i <= 0 || i == len(pair)-1 {
-			return nil, fmt.Errorf("%q is not label:value", pair)
-		}
-		label := strings.TrimSpace(pair[:i])
-		value := strings.TrimSpace(pair[i+1:])
-		if label == "" || value == "" {
-			return nil, fmt.Errorf("%q has an empty label or value", pair)
+		label, value, ok := strings.Cut(pair, ":")
+		label, value = strings.TrimSpace(label), strings.TrimSpace(value)
+		if !ok || label == "" || value == "" {
+			return nil, fmt.Errorf("%s: %q is not label:value", name, pair)
 		}
 		out[label] = value
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no entries")
+		return nil, fmt.Errorf("%s: no label:value pairs found in %q", name, raw)
 	}
 	return out, nil
 }
 
-// Valid reports whether an issue's labels mark it as a change request: the
-// type label, one type, and exactly one scope.
-func (l GithubLabels) Valid(labels []string) bool {
-	var hasCR, hasType bool
-	scopes := 0
-	for _, s := range labels {
-		switch {
-		case s == l.ChangeRequest:
-			hasCR = true
-		case strings.HasPrefix(s, l.TypePrefix):
-			hasType = true
-		case strings.HasPrefix(s, l.ScopePrefix):
-			scopes++
-		}
-	}
-	return hasCR && hasType && scopes == 1
+// IsChangeRequestTitle reports whether a title marks the issue as a change
+// request. Both prefixes count: [ECR]: is an emergency change, which is still
+// a change request, and the class label is what distinguishes them.
+func IsChangeRequestTitle(title string) bool {
+	t := strings.TrimSpace(title)
+	return strings.HasPrefix(t, TitlePrefixChangeRequest) ||
+		strings.HasPrefix(t, TitlePrefixEmergencyChangeRequest)
 }
 
-// Attributes derives the change request's fields from an issue's labels.
-func (l GithubLabels) Attributes(labels []string) (impact, likelihood, crType string) {
-	for _, s := range labels {
-		if v, ok := l.ImpactByLabel[s]; ok {
-			impact = v
-		}
-		if v, ok := l.LikelihoodByLabel[s]; ok {
-			likelihood = v
-		}
-		if v, ok := l.ScopeToType[s]; ok {
-			crType = v
-		}
-	}
-	return impact, likelihood, crType
-}
-
-// StateFor reports the state a label moves a change request into.
-func (l GithubLabels) StateFor(label string) (string, bool) {
-	s, ok := l.StateByLabel[label]
-	return s, ok
-}
-
-// ResolveOnCreate computes the labels an issue should carry once its change
-// request exists: one type label first, state labels stripped, everything else
-// the author put there kept.
-func (l GithubLabels) ResolveOnCreate(issueLabels []string) []string {
-	out := make([]string, 0, len(issueLabels))
-	seen := map[string]bool{}
-
-	for _, s := range issueLabels {
-		if strings.HasPrefix(s, l.TypePrefix) {
-			out = append(out, s)
-			seen[s] = true
-			break
+// ClassOf returns the sr_type for an issue's labels, and whether
+// exactly one was found. Zero or several is not a class we can act on: the
+// record has one type, and guessing which would be worse than declining.
+func (l GithubLabels) ClassOf(labels []string) (string, bool) {
+	var found string
+	for _, name := range labels {
+		if v, ok := l.ClassByLabel[name]; ok {
+			if found != "" {
+				return "", false
+			}
+			found = v
 		}
 	}
-	for _, s := range issueLabels {
-		if s == "" || seen[s] || strings.HasPrefix(s, l.TypePrefix) || l.StrippedOnCreate[s] {
+	return found, found != ""
+}
+
+// The two catalogs issue_servicenow.yml routes to.
+const (
+	CatalogGenericRequests = "Generic Requests"
+	CatalogGeneralRequests = "General Requests"
+)
+
+// ExtractTemplateFields reads a template-filled issue body into the u_-prefixed
+// keys the service request stores in json_data.
+//
+// A SCAN, NOT THE REGEX extractFields.js USES. That one ends each section with
+// a lookahead for the next "###", and Go's RE2 has no lookahead -- copying it
+// across compiles at init and panics the process on startup. Walking the lines
+// says the same thing and is easier to follow besides.
+//
+// The naming follows extractFields.js: lower-cased, punctuation to
+// underscores, u_ in front. CS0441366 holds {"u_request_details": ...}, so
+// matching it keeps a record raised from GitHub indistinguishable from one
+// raised any other way.
+//
+// A body with no "###" sections yields nothing rather than guessing -- an
+// issue written free-hand has no fields to capture.
+func ExtractTemplateFields(body string) map[string]string {
+	out := map[string]string{}
+	var label string
+	var value []string
+
+	flush := func() {
+		if label == "" {
+			return
+		}
+		v := strings.TrimSpace(strings.Join(value, "\n"))
+		// GitHub writes this for a field the author left blank.
+		if v != "" && v != "_No response_" {
+			out["u_"+templateKey(label)] = v
+		}
+		label, value = "", nil
+	}
+
+	for _, line := range strings.Split(body, "\n") {
+		if h := strings.TrimSpace(line); strings.HasPrefix(h, "### ") {
+			flush()
+			label = strings.TrimSpace(strings.TrimPrefix(h, "### "))
 			continue
 		}
-		seen[s] = true
-		out = append(out, s)
+		if label != "" {
+			value = append(value, line)
+		}
 	}
+	flush()
 	return out
 }
 
-// DefaultCommentSkipAuthors are the comment authors whose comments are not
-// mirrored to GitHub unless GITHUB_COMMENT_SKIP_AUTHORS overrides the list.
-//
-// "system" writes the auto-closure reminders. The two integration accounts
-// wrote the old ServiceNow-era GitHub sync's own entries; nothing should push
-// those back at GitHub, whatever else is decided about machine-written text.
-//
-// Set GITHUB_COMMENT_SKIP_AUTHORS to an empty-but-present value to mirror
-// everything, which is what ServiceNow may have done -- see the type comment
-// on githubOutboundService.skipAuthors.
-func DefaultCommentSkipAuthors() []string {
-	return []string{"system", "github_integration", "github_pipeline"}
+func templateKey(label string) string {
+	var b strings.Builder
+	lastUnderscore := true
+	for _, r := range strings.ToLower(label) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastUnderscore = false
+		case !lastUnderscore:
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
-
-// DefaultAssignedLabel is the label the outbound sync puts on an issue when
-// its case is assigned and removes when the case closes. Taken from the
-// GitHub Actions workflow this replaces, which hardcoded it.
-// Override with GITHUB_LABEL_STATUS_ASSIGNED; empty disables the behaviour.
-const DefaultAssignedLabel = "Status/Assigned"

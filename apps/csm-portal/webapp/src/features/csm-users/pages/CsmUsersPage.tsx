@@ -16,6 +16,7 @@
 
 import {
   Box,
+  Button,
   Checkbox,
   FormControl,
   IconButton,
@@ -38,7 +39,7 @@ import {
   Typography,
   type SelectChangeEvent,
 } from "@wso2/oxygen-ui";
-import { X } from "@wso2/oxygen-ui-icons-react";
+import { Plus, X } from "@wso2/oxygen-ui-icons-react";
 import { useMemo, useState, type ChangeEvent, type JSX, type KeyboardEvent } from "react";
 import { useLocation, useSearchParams } from "react-router";
 import QueryErrorState from "@components/QueryErrorState";
@@ -46,12 +47,14 @@ import UserRefLink from "@components/UserRefLink";
 import AsyncEntityMultiSelect from "@components/AsyncEntityMultiSelect";
 import { useDebouncedValue } from "@hooks/useDebouncedValue";
 import { useNavTransition } from "@hooks/useNavTransition";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useSearchGroups } from "@api/useSearchGroups";
 import { useSearchUsers } from "@features/csm-users/api/useSearchUsers";
 import { useSearchRoles } from "@features/csm-admin/api/useSearchRoles";
 import { useSearchTeams } from "@features/csm-admin/api/useSearchTeams";
 import ResponsiveRoleChips from "@components/ResponsiveRoleChips";
 import RefreshButton from "@components/RefreshButton";
+import AddUserDialog from "@features/csm-users/components/AddUserDialog";
 import type { SearchUsersRequest } from "@features/csm-users/types/csmUsers";
 import {
   readUsersFiltersFromUrl,
@@ -93,6 +96,8 @@ export default function CsmUsersPage(): JSX.Element {
   const backState = location.state as { from?: string } | undefined;
   const [searchParams, setSearchParams] = useSearchParams();
   const filters = useMemo(() => readUsersFiltersFromUrl(searchParams), [searchParams]);
+  const { canCreateUser } = usePortalAccess();
+  const [addUserOpen, setAddUserOpen] = useState(false);
 
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(DEFAULT_ROWS_PER_PAGE);
@@ -172,12 +177,24 @@ export default function CsmUsersPage(): JSX.Element {
           Search across username and email (case-insensitive). Filter by role, group, team and
           status.
         </Typography>
-        <RefreshButton
-          onRefresh={() => void refetch()}
-          isFetching={isFetching}
-          updatedAt={dataUpdatedAt}
-          label="Refresh users"
-        />
+        <Stack direction="row" spacing={1} alignItems="center">
+          {canCreateUser && (
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<Plus size={16} />}
+              onClick={() => setAddUserOpen(true)}
+            >
+              Add user
+            </Button>
+          )}
+          <RefreshButton
+            onRefresh={() => void refetch()}
+            isFetching={isFetching}
+            updatedAt={dataUpdatedAt}
+            label="Refresh users"
+          />
+        </Stack>
       </Box>
 
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
@@ -537,6 +554,10 @@ export default function CsmUsersPage(): JSX.Element {
           showLastButton
         />
       </Box>
+
+      {canCreateUser && (
+        <AddUserDialog open={addUserOpen} onClose={() => setAddUserOpen(false)} />
+      )}
     </Box>
   );
 }

@@ -133,6 +133,7 @@ describe("DashboardWidgetPreviewPage — case_feedback gets a real, editable rat
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "case-feedback",
+        resourceType: "case_feedback",
         widgetId: "feedback_rating_distribution",
         displayName: "Rating Distribution",
         filters: { rating: 5 },
@@ -156,6 +157,7 @@ describe("DashboardWidgetPreviewPage — case_feedback gets a real, editable rat
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "case-feedback",
+        resourceType: "case_feedback",
         widgetId: "feedback_list",
         displayName: "Feedback Records",
         filters: {},
@@ -186,6 +188,7 @@ describe("DashboardWidgetPreviewPage — case_feedback gets a real, editable rat
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "case-feedback",
+        resourceType: "case_feedback",
         widgetId: "feedback_rating_distribution",
         displayName: "Rating Distribution",
         filters: { rating: 5 },
@@ -273,6 +276,7 @@ describe("DashboardWidgetPreviewPage — call_request gets a real, editable filt
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "call-requests",
+        resourceType: "call_request",
         widgetId: "team_open_calls",
         displayName: "Team Open Calls",
         filters: { states: ["scheduled"], caseStates: ["open"] },
@@ -299,6 +303,7 @@ describe("DashboardWidgetPreviewPage — call_request gets a real, editable filt
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "call-requests",
+        resourceType: "call_request",
         widgetId: "team_open_calls",
         displayName: "Team Open Calls",
         filters: {},
@@ -329,6 +334,7 @@ describe("DashboardWidgetPreviewPage — call_request gets a real, editable filt
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "call-requests",
+        resourceType: "call_request",
         widgetId: "team_open_calls",
         displayName: "Team Open Calls",
         filters: { states: ["scheduled"] },
@@ -371,6 +377,7 @@ describe("DashboardWidgetPreviewPage — call_request gets a real, editable filt
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "call-requests",
+        resourceType: "call_request",
         widgetId: "team_open_calls",
         displayName: "Team Open Calls",
         filters: {},
@@ -400,6 +407,7 @@ describe("DashboardWidgetPreviewPage", () => {
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "not-a-real-resource",
+        resourceType: "case",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Cases",
         filters: {},
@@ -414,6 +422,7 @@ describe("DashboardWidgetPreviewPage", () => {
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Cases",
         filters: {},
@@ -450,6 +459,7 @@ describe("DashboardWidgetPreviewPage — generic resourceTypes keep the read-onl
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "incidents",
+        resourceType: "incident",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Incidents",
         filters: { priorities: ["critical"] },
@@ -493,6 +503,7 @@ describe("DashboardWidgetPreviewPage — generic resourceTypes keep the read-onl
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "incidents",
+        resourceType: "incident",
         widgetId: "my_incidents",
         displayName: "My Incidents",
         filters: { assignedUserIds: [CURRENT_USER_ID] },
@@ -523,6 +534,7 @@ describe("DashboardWidgetPreviewPage — generic resourceTypes keep the read-onl
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "incidents",
+        resourceType: "incident",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Incidents",
         filters: { priorities: ["critical"] },
@@ -556,6 +568,7 @@ describe("DashboardWidgetPreviewPage — generic resourceTypes keep the read-onl
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "incidents",
+        resourceType: "incident",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Incidents",
         filters: { priorities: ["critical", "high"] },
@@ -579,6 +592,7 @@ describe("DashboardWidgetPreviewPage — generic resourceTypes keep the read-onl
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "incidents",
+        resourceType: "incident",
         widgetId: "my_critical_open",
         displayName: "My Critical & High Incidents",
         filters: {},
@@ -622,6 +636,7 @@ describe("DashboardWidgetPreviewPage — a case-family widget with anyOf skips t
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "wow_p0p1",
         displayName: "WOW P0/P1",
         filters: {
@@ -674,6 +689,7 @@ describe("DashboardWidgetPreviewPage — case-family widgets get the real, edita
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "team_open_cases",
         displayName: "Team Open Cases",
         filters: { filters: [{ field: "state", op: "in", values: ["open"] }] },
@@ -715,6 +731,7 @@ describe("DashboardWidgetPreviewPage — case-family widgets get the real, edita
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "team_open_cases",
         displayName: "Team Open Cases",
         filters: { filters: [{ field: "state", op: "in", values: ["open"] }] },
@@ -747,6 +764,7 @@ describe("DashboardWidgetPreviewPage — case-family widgets get the real, edita
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "team_open_cases",
         displayName: "Team Open Cases",
         filters: {},
@@ -782,6 +800,7 @@ describe("DashboardWidgetPreviewPage — case-family widgets get the real, edita
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "excl_tag_widget",
         displayName: "Discussions on Going",
         filters: { filters: [{ field: "tag", op: "notIn", values: ["s_dip"] }] },
@@ -816,6 +835,7 @@ describe("DashboardWidgetPreviewPage — case-family widgets get the real, edita
     renderAt(
       buildWidgetPreviewHref({
         previewSlug: "cases",
+        resourceType: "case",
         widgetId: "excl_tag_widget",
         displayName: "Discussions on Going",
         filters: { filters: [{ field: "tag", op: "notIn", values: ["s_dip"] }] },

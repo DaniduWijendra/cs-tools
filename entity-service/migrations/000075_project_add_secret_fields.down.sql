@@ -14,6 +14,6 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
-ALTER TABLE project DROP COLUMN IF EXISTS primary_secret_key;
-ALTER TABLE project DROP COLUMN IF EXISTS secondary_secret_key;
-ALTER TABLE project DROP COLUMN IF EXISTS license_secrets;
+ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_primary_secret_key;
+ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_secondary_secret_key;
+ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_license_secrets;

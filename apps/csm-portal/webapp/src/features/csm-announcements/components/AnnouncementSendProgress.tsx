@@ -42,6 +42,18 @@ interface AnnouncementSendProgressProps {
    * when omitted, or when a given id has no known key yet.
    */
   projectLabel?: (projectId: string) => string;
+  /**
+   * Hides the progress bar and the succeeded/failed tally row, showing only
+   * the title and the failed-project chips. For a *live* send (a create
+   * form, or a dialog's first Publish attempt) the full tally is useful —
+   * it's the only feedback the sender has while the batch is in flight. Once
+   * a request is being *resumed* later (reopening an approved request that
+   * already has some succeeded deliveries from an earlier session), the
+   * succeeded count is stale history, not something worth re-litigating each
+   * time — only what's still outstanding matters. Defaults to false so
+   * every existing caller keeps the full tally unless it opts into this.
+   */
+  hideSucceededTally?: boolean;
 }
 
 /**
@@ -66,6 +78,7 @@ interface AnnouncementSendProgressProps {
 export default function AnnouncementSendProgress({
   progress,
   projectLabel = (projectId) => projectId,
+  hideSucceededTally = false,
 }: AnnouncementSendProgressProps): JSX.Element {
   const { total, completed, succeeded, failed, failedProjectIds } = progress;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -95,34 +108,40 @@ export default function AnnouncementSendProgress({
                 : "Announcement sent"}
           </Typography>
         </Box>
-        <Typography variant="body2" color="text.secondary" fontWeight={600}>
-          {completed}/{total}
-        </Typography>
-      </Box>
-
-      <LinearProgress
-        variant="determinate"
-        value={percent}
-        color={failed > 0 ? "warning" : "primary"}
-        sx={{ height: 8, borderRadius: 1 }}
-      />
-
-      <Box sx={{ display: "flex", gap: 2.5 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: "success.main" }}>
-          <CheckCircle size={14} aria-hidden />
-          <Typography variant="caption" color="success.main">
-            {succeeded} succeeded
+        {!hideSucceededTally && (
+          <Typography variant="body2" color="text.secondary" fontWeight={600}>
+            {completed}/{total}
           </Typography>
-        </Box>
-        {failed > 0 && (
-          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: "error.main" }}>
-            <XCircle size={14} aria-hidden />
-            <Typography variant="caption" color="error.main">
-              {failed} failed
-            </Typography>
-          </Box>
         )}
       </Box>
+
+      {!hideSucceededTally && (
+        <>
+          <LinearProgress
+            variant="determinate"
+            value={percent}
+            color={failed > 0 ? "warning" : "primary"}
+            sx={{ height: 8, borderRadius: 1 }}
+          />
+
+          <Box sx={{ display: "flex", gap: 2.5 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: "success.main" }}>
+              <CheckCircle size={14} aria-hidden />
+              <Typography variant="caption" color="success.main">
+                {succeeded} succeeded
+              </Typography>
+            </Box>
+            {failed > 0 && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: "error.main" }}>
+                <XCircle size={14} aria-hidden />
+                <Typography variant="caption" color="error.main">
+                  {failed} failed
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        </>
+      )}
 
       {failedProjectIds.length > 0 && (
         <Box>

@@ -20,6 +20,7 @@ import {
   Box,
   Button,
   Checkbox,
+  Chip,
   DatePickers,
   Dialog,
   DialogActions,
@@ -62,6 +63,7 @@ import AnnouncementSendProgress, {
   type AnnouncementSendProgressState,
 } from "@features/csm-announcements/components/AnnouncementSendProgress";
 import PublishConfirmationDialog from "@features/csm-announcements/components/PublishConfirmationDialog";
+import { useResolvedAudiencePreview } from "@features/csm-announcements/api/useResolvedAudiencePreview";
 import AddUpdateConfirmationDialog from "@features/csm-announcements/components/AddUpdateConfirmationDialog";
 import { useCreateAnnouncementRequestUpdate } from "@features/csm-announcements/api/useCreateAnnouncementRequestUpdate";
 import { useListAnnouncementRequestUpdates } from "@features/csm-announcements/api/useListAnnouncementRequestUpdates";
@@ -167,6 +169,24 @@ export default function AnnouncementRequestDialog({
   const claimsReady = claims !== undefined;
   const isRequestCreator = !!request && !!claims?.userid && claims.userid === request.createdBy;
   const [confirmPublishOpen, setConfirmPublishOpen] = useState(false);
+  const [confirmGiveUpOpen, setConfirmGiveUpOpen] = useState(false);
+  const [givingUp, setGivingUp] = useState(false);
+
+  // Resolves failedProjectIds to their real short keys (e.g. "CUPPTSUB") for
+  // the send-progress card's chips below — those ids come straight off the
+  // frozen resolvedProjectIds snapshot, which carries no key/name data of
+  // its own. Re-resolves whenever the failed set actually changes (a retry
+  // narrowing it, a fresh failure widening it), not on every render.
+  const failedProjectsPreview = useResolvedAudiencePreview();
+  const failedProjectIdsKey = publish.failedProjectIds.join(",");
+  useEffect(() => {
+    if (publish.failedProjectIds.length > 0) {
+      void failedProjectsPreview.resolve(publish.failedProjectIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedProjectIdsKey]);
+  const failedProjectLabel = (projectId: string): string =>
+    failedProjectsPreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
   // Schedule: an alternative to clicking Publish immediately — pick a
   // future date/time and operations/csm-scheduled-tasks' own sub-cron
@@ -483,9 +503,14 @@ export default function AnnouncementRequestDialog({
               </>
             ) : (
               <>
-                <Typography variant="body1" sx={{ fontWeight: 600 }}>
-                  {request.subject || "(no subject)"}
-                </Typography>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                  <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                    {request.subject || "(no subject)"}
+                  </Typography>
+                  {request.isSecurityAnnouncement && (
+                    <Chip size="small" color="warning" label="Security" sx={{ flexShrink: 0 }} />
+                  )}
+                </Box>
                 <Box
                   sx={{ fontSize: "0.875rem", lineHeight: 1.5, wordBreak: "break-word" }}
                   dangerouslySetInnerHTML={{ __html: sanitizeRichTextHtml(request.description) }}
@@ -661,6 +686,23 @@ export default function AnnouncementRequestDialog({
                             ? "Retry security label"
                             : "Publish"}
                   </Button>
+                  {claimsReady &&
+                    isRequestCreator &&
+                    publish.readyToPublish &&
+                    !publish.publishing &&
+                    publish.failedProjectIds.length > 0 &&
+                    publish.failedTagProjectIds.length === 0 &&
+                    publish.succeededProjectIds.length > 0 && (
+                      <Button
+                        variant="outlined"
+                        color="warning"
+                        size="small"
+                        disabled={hasUnsavedChanges || !canWrite}
+                        onClick={() => setConfirmGiveUpOpen(true)}
+                      >
+                        Publish anyway
+                      </Button>
+                    )}
                 </Box>
                 {claimsReady && !isRequestCreator && (
                   <Typography variant="caption" color="text.secondary">
@@ -696,7 +738,18 @@ export default function AnnouncementRequestDialog({
                   </Box>
                 )}
                 {(publish.publishing || priorSucceededCount > 0 || publish.failedProjectIds.length > 0) && (
-                  <AnnouncementSendProgress progress={sendProgress} />
+                  <AnnouncementSendProgress
+                    progress={sendProgress}
+                    // Once there's an outstanding failure, the succeeded
+                    // count is either stale history (reopening a request
+                    // with prior progress) or already visible via the
+                    // "Retry failed projects" flow itself — only the
+                    // currently-failing projects need attention. A fully
+                    // successful send (no failures at all) still shows the
+                    // reassuring full tally.
+                    hideSucceededTally={publish.failedProjectIds.length > 0}
+                    projectLabel={failedProjectLabel}
+                  />
                 )}
                 {publish.failedTagProjectIds.length > 0 && (
                   <Typography variant="caption" color="warning.main">
@@ -969,6 +1022,48 @@ export default function AnnouncementRequestDialog({
             void publish.handlePublish();
           }}
         />
+      )}
+
+      {request && (
+        <Dialog open={confirmGiveUpOpen} onClose={givingUp ? undefined : () => setConfirmGiveUpOpen(false)} maxWidth="sm" fullWidth>
+          <DialogTitle>Publish without the failed projects?</DialogTitle>
+          <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            <Typography variant="body2">
+              This marks the request published using only the {publish.succeededProjectIds.length} project
+              {publish.succeededProjectIds.length === 1 ? "" : "s"} that already received a case. The
+              following {publish.failedProjectIds.length === 1 ? "project" : "projects"} will be permanently
+              skipped — there's no way to send this announcement to {publish.failedProjectIds.length === 1 ? "it" : "them"} afterward:
+            </Typography>
+            <Typography variant="body2" fontWeight={600} color="error.main">
+              {publish.failedProjectIds.map(failedProjectLabel).join(", ")}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Only use this once you've confirmed the retry genuinely can't succeed — a project that's just
+              slow or transiently failing should be retried instead.
+            </Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmGiveUpOpen(false)} disabled={givingUp}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              color="warning"
+              disabled={givingUp}
+              onClick={async () => {
+                setGivingUp(true);
+                try {
+                  await publish.publishGivingUpOnFailed();
+                } finally {
+                  setGivingUp(false);
+                  setConfirmGiveUpOpen(false);
+                }
+              }}
+            >
+              {givingUp ? "Publishing…" : "Publish anyway"}
+            </Button>
+          </DialogActions>
+        </Dialog>
       )}
 
       {request && (

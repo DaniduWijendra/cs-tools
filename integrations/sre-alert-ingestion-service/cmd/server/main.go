@@ -40,6 +40,17 @@ import (
 )
 
 func main() {
+	// "gen-basic-auth-hash" is a one-shot local CLI subcommand (not the
+	// server), invoked as `go run . gen-basic-auth-hash` — see
+	// genBasicAuthHash's doc comment. Dispatched before loadDotEnv/
+	// ConfigureLogger since it needs neither: no server config, no logger,
+	// no CSM/database env vars — those are mustEnv'd below and would fail
+	// startup for a caller who only wants a password hash.
+	if len(os.Args) > 1 && os.Args[1] == "gen-basic-auth-hash" {
+		genBasicAuthHash()
+		return
+	}
+
 	loadDotEnv(".env")
 	middleware.ConfigureLogger()
 
@@ -102,9 +113,19 @@ func main() {
 		"SRE Alert Ingestion Service: incident delivery to CSM has been failing",
 	)
 
+	// PollInterval feeds time.NewTicker, which panics for a non-positive
+	// duration — validated here instead of letting a misconfigured
+	// SRE_ALERT_POLL_INTERVAL_SECONDS=0 (or negative) crash the worker
+	// goroutine after startup.
+	pollIntervalSeconds := envInt("SRE_ALERT_POLL_INTERVAL_SECONDS", 15)
+	if pollIntervalSeconds <= 0 {
+		slog.Error("SRE_ALERT_POLL_INTERVAL_SECONDS must be greater than zero", "value", pollIntervalSeconds)
+		os.Exit(1)
+	}
+
 	w := worker.New(dbStore, csmClient, escalator, worker.Config{
 		MaxRetries:   envInt("SRE_ALERT_MAX_RETRIES", 3),
-		PollInterval: time.Duration(envInt("SRE_ALERT_POLL_INTERVAL_SECONDS", 15)) * time.Second,
+		PollInterval: time.Duration(pollIntervalSeconds) * time.Second,
 		GroupWindow:  time.Duration(envInt("SRE_ALERT_GROUP_WINDOW_MINUTES", 15)) * time.Minute,
 	})
 
@@ -119,8 +140,8 @@ func main() {
 	// authentication is HTTP Basic Auth on POST /alerts (see the wiring
 	// comment below), so a missing/malformed value must fail startup, not
 	// silently leave the route unauthenticated. See internal/middleware.BasicAuth
-	// and cmd/gen-basic-auth-hash for the credential format and how to
-	// generate a hash.
+	// and the "gen-basic-auth-hash" subcommand (gen_basic_auth_hash.go) for
+	// the credential format and how to generate a hash.
 	authUsers, err := middleware.ParseBasicAuthUsers(mustEnv("SRE_ALERT_AUTH_USERS"))
 	if err != nil {
 		slog.Error("invalid SRE_ALERT_AUTH_USERS", "err", err)

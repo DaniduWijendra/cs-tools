@@ -267,8 +267,8 @@ configured at all, nobody can use the portal.
 | `AUTH_VIEWER_ROLES` | view |
 | `AUTH_ESCALATOR_ROLES` | view, escalate |
 | `AUTH_ATTACHMENT_DOWNLOADER_ROLES` | view, download_attachment |
-| `AUTH_SUPPORT_ENGINEER_ROLES` | view, view_operations, time_cards_and_updates, escalate, download_attachment, write (which includes posting comments) |
-| `AUTH_ADMIN_ROLES` | everything |
+| `AUTH_SUPPORT_ENGINEER_ROLES` | view, view_operations, time_cards_and_updates, escalate, download_attachment, write (which includes posting comments) — everything except `admin`-only routes |
+| `AUTH_ADMIN_ROLES` | everything, including `admin`-only routes no other role holds |
 | `AUTH_USAGE_METRICS_VIEWER_ROLES` | view |
 | `AUTH_TIMECARD_APPROVER_ROLES` | view, time_cards_and_updates |
 | `AUTH_DASHBOARD_DESIGNER_ROLES` | view |
@@ -286,7 +286,8 @@ AUTH_ESCALATOR_ROLES=example-escalators-role,example-leads-role
 | `time_cards_and_updates` | every time-card route (`POST /time-cards/search`, `POST /time-cards`, `PATCH`/`DELETE /time-cards/{id}`) and the update-level lookups (`GET /updates/product-update-levels`, `POST /updates/levels/search`) — support engineer, admin and time-card approver only, so a view-only role sees neither area, and an approver can approve without being a support engineer |
 | `escalate` | `POST /cases/{id}/escalations` |
 | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` |
-| `write` | every other `POST`/`PATCH`/`DELETE`, including case, incident and change-request comments |
+| `write` | every other `POST`/`PATCH`/`DELETE`, including case, incident and change-request comments — except the `admin`-only routes below |
+| `admin` | `POST /users` (create a new platform user) — held by the `admin` role alone; `support_engineer` does not grant it |
 
 A caller whose token holds none of the required roles gets `403`. Escalation and
 attachment-download are separate from `support_engineer` so other staff can be granted just that one
@@ -379,6 +380,7 @@ backend/
 - `PATCH /users/me` — Update current user profile (`phoneNumber` via SCIM, `timeZone` via entity service)
 - `POST /users/search` — Search users; optional `filters` (`searchQuery`, `roles`, `userNames`, `emails`, `active`) and `sortBy` (`field`, `order`); response shape depends on data source (`User` for postgres, `SNUser` for ServiceNow)
 - `GET /users/{id}` — Get one user's full profile (ServiceNow data source only); adds `teams` (derived from `groups`) and, for external contacts only, `externalAccount` (`exists`/`locked`, from SCIM's "external" org search). Both are best-effort — absent rather than failing the request if their lookup fails
+- `POST /users` — Create a new user (`firstName`, `lastName`, `email` required to have at least one of firstName/lastName; optional `roles`, validated against the configured role allow-list). **Admin-only** (`admin` permission — see "Access control" above); Postgres data source only
 
 ### Accounts
 

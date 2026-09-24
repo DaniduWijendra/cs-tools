@@ -47,11 +47,12 @@ const (
 
 // Queue event names, which are internal, unlike the dispatch types above.
 const (
-	outboundCRCreated    = "cr_created"
-	outboundCRUpdated    = "cr_updated"
-	outboundCommentAdded = "comment_added"
-	outboundCaseClosed   = "case_closed"
-	outboundCaseAssigned = "case_assigned"
+	outboundCRCreated     = "cr_created"
+	outboundCRUpdated     = "cr_updated"
+	outboundCommentAdded  = "comment_added"
+	outboundCaseClosed    = "case_closed"
+	outboundCaseAssigned  = "case_assigned"
+	outboundRecordCreated = "record_created"
 )
 
 // githubDispatcher is the one GitHub call this half makes.
@@ -102,7 +103,7 @@ func dispatchTypeFor(item repository.OutboundItem) (string, error) {
 	switch item.Event {
 	case outboundCommentAdded:
 		return dispatchNote, nil
-	case outboundCaseClosed, outboundCaseAssigned:
+	case outboundCaseClosed, outboundCaseAssigned, outboundRecordCreated:
 		return dispatchCaseUpdate, nil
 	case outboundCRCreated, outboundCRUpdated:
 		return dispatchCRUpdate, nil

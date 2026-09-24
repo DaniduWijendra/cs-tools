@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -35,6 +36,21 @@ var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 // emailRE matches the Ballerina `Email` constraint used by the Customer Portal
 // backend (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`).
 var emailRE = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
+// validateEmail returns a ValidationError unless email is present and matches
+// emailRE. Used where a caller-supplied address is documented as
+// `format: email` in openapi.yaml and would otherwise be forwarded upstream
+// unchecked — a schema constraint the service does not enforce is not a
+// constraint.
+func validateEmail(email string) error {
+	if email == "" {
+		return &apierror.ValidationError{Msg: "email is required"}
+	}
+	if !emailRE.MatchString(email) {
+		return &apierror.ValidationError{Msg: "email is not a valid email address"}
+	}
+	return nil
+}
 
 // validateUUIDs returns a ValidationError if any element of ids is not a valid UUID.
 func validateUUIDs(field string, ids []string) error {
@@ -280,4 +296,28 @@ func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, erro
 		Roles:     roles,
 		Groups:    groups,
 	}, nil
+}
+
+// CreateUser implements UserService.
+func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (domain.User, error) {
+	token := middleware.UserIDTokenFromContext(ctx)
+	if token == "" {
+		return domain.User{}, &apierror.UnauthorizedError{Msg: "x-user-id-token header is required"}
+	}
+	actor, err := emailFromJWT(token)
+	if err != nil {
+		return domain.User{}, &apierror.ValidationError{Msg: "x-user-id-token: " + err.Error()}
+	}
+
+	if err := validateEmail(req.Email); err != nil {
+		return domain.User{}, err
+	}
+	if strings.TrimSpace(req.FirstName) == "" && strings.TrimSpace(req.LastName) == "" {
+		return domain.User{}, &apierror.ValidationError{Msg: "firstName or lastName is required"}
+	}
+	if len(req.Roles) > 50 {
+		return domain.User{}, &apierror.ValidationError{Msg: "roles cannot contain more than 50 values"}
+	}
+
+	return s.repo.CreateUser(ctx, req, actor)
 }

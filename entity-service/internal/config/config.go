@@ -19,9 +19,11 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -75,6 +77,23 @@ type Config struct {
 	ServiceNowIntegrationServiceClientID     string
 	ServiceNowIntegrationServiceClientSecret string
 	ServiceNowIntegrationServiceScopes       string
+	// ConsumptionOperationBaseURL is the base URL of the Choreo subscription
+	// operation (operations/choreo-subscription-on-project-create), with the
+	// client credentials it is reached with.
+	//
+	// There is deliberately no default. The operation creates Choreo
+	// applications and issues signed licences for real customers, so a
+	// deployment that forgets to configure it must fail to register the
+	// licence route rather than quietly provision against whatever
+	// environment a baked-in default names.
+	ConsumptionOperationBaseURL      string
+	ConsumptionOperationTokenURL     string
+	ConsumptionOperationClientID     string
+	ConsumptionOperationClientSecret string
+	ConsumptionOperationScopes       string
+	// ConsumptionDualWriteEnabled controls whether provisioning state and
+	// artifacts are mirrored into Postgres alongside ServiceNow. Defaults to true.
+	ConsumptionDualWriteEnabled bool
 	// EventHubBroker/EventHubConnectionString/EventHubTopic configure this
 	// service's EventPublisherService (internal/service/
 	// event_publisher_service.go). Optional — gated on EventHubBroker being
@@ -92,12 +111,30 @@ type Config struct {
 	// constructs EventPublisherService when both this is true AND
 	// EventHubBroker is set.
 	EventPublishingEnabled bool
-	// SalesforceMembershipIngestEnabled turns on the Project_Contact__c /
-	// Contact branch of POST /salesforce/events (the customer onboarding
-	// database write). Defaults to false: those envelopes are then
-	// acknowledged and ignored, as before the branch existed. The Account
-	// branch is unaffected by this flag.
-	SalesforceMembershipIngestEnabled bool
+	// CSMMigrationSalesforceMembershipIngestEnabled turns on the
+	// Project_Contact__c / Contact branch of POST /salesforce/events (the
+	// customer onboarding database write), from
+	// CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED=true. Defaults to
+	// false: those envelopes are then acknowledged and ignored, as before
+	// the branch existed. The Account branch is unaffected by this flag.
+	CSMMigrationSalesforceMembershipIngestEnabled bool
+	// CSMMigrationMembershipRegistrationEnabled turns on POST /users/me/memberships/register,
+	// which marks the signed-in user's still-INVITED memberships as
+	// REGISTERED in Salesforce (see membership_registration_service.go). Defaults to
+	// false, and while it is false routes.go does not register the route at
+	// all — it 404s, and nothing on this path can write to Salesforce.
+	CSMMigrationMembershipRegistrationEnabled bool
+	// CSMMigrationPortalWritesEnabled turns on the portal-driven membership
+	// write endpoints (POST/PATCH/DELETE /projects/{id}/contacts[/{email}]
+	// and the resend-invitation call). Both portals invite, re-role and
+	// deactivate customer users through them, and each one writes Postgres
+	// and Salesforce together.
+	//
+	// OFF BY DEFAULT (the value must be exactly "true"), and with it off the
+	// routes are not registered at all rather than answering 403: until the
+	// Sales Entity create endpoints this depends on are deployed, a portal
+	// that called them would write the database and leave Salesforce behind.
+	CSMMigrationPortalWritesEnabled bool
 	// GithubIntegrationEnabled gates the GitHub change-request sync: the
 	// webhook endpoint and the client that answers it.
 	//
@@ -124,15 +161,11 @@ type Config struct {
 	// CSMPortalBaseURL builds the link back to a change request in comments
 	// posted to GitHub. Empty omits the link rather than rendering a broken one.
 	CSMPortalBaseURL string
-	// GitHub label vocabulary overrides. Empty keeps ServiceNow's value.
-	GithubLabelChangeRequest     string
-	GithubLabelTypePrefix        string
-	GithubLabelScopePrefix       string
-	GithubLabelsScope            string
-	GithubLabelsImpact           string
-	GithubLabelsLikelihood       string
-	GithubLabelsState            string
-	GithubLabelsStrippedOnCreate string
+	// GitHub label vocabulary overrides. Empty keeps .github/labels.yml's value.
+	GithubLabelTypeIncident       string
+	GithubLabelTypeServiceRequest string
+	GithubLabelsClass             string
+	GithubLabelStatusAssigned     string
 
 	// CRNoticesEnabled turns on the change-request notice drainer: the poller
 	// that reads event_outbox and asks csm-notification-service to send the
@@ -151,6 +184,13 @@ type Config struct {
 	// A distinct topic is what actually isolates the two volumes; a distinct
 	// consumer group alone would only isolate the processing.
 	CREventHubTopic string
+
+	// ProjectEventHubTopic carries the onboarding events
+	// (project_contact.invited) rather than the shared EventHubTopic, so a
+	// backlog of case events can never delay an invitation and the
+	// onboarding dead-letter queue can be watched on its own.
+	// csm-notification-service consumes it with its own consumer group.
+	ProjectEventHubTopic string
 	// CRNoticePollInterval is how often to poll event_outbox when the last
 	// pass came back short. A backlog drains at full speed regardless, so this
 	// governs only the idle case: notice latency against query volume.
@@ -235,6 +275,12 @@ func Load() *Config {
 		ServiceNowIntegrationServiceClientID:     os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_ID"),
 		ServiceNowIntegrationServiceClientSecret: os.Getenv("SERVICENOW_INTEGRATION_SERVICE_CLIENT_SECRET"),
 		ServiceNowIntegrationServiceScopes:       os.Getenv("SERVICENOW_INTEGRATION_SERVICE_SCOPES"),
+		ConsumptionOperationBaseURL:              os.Getenv("PRODUCT_CONSUMPTION_OPERATION_URL"),
+		ConsumptionOperationTokenURL:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_TOKEN_URL"),
+		ConsumptionOperationClientID:             os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_ID"),
+		ConsumptionOperationClientSecret:         os.Getenv("PRODUCT_CONSUMPTION_OPERATION_CLIENT_SECRET"),
+		ConsumptionOperationScopes:               os.Getenv("PRODUCT_CONSUMPTION_OPERATION_SCOPES"),
+		ConsumptionDualWriteEnabled:              getBoolOrDefault("CONSUMPTION_DUAL_WRITE_ENABLED", true),
 		EventHubBroker:                           os.Getenv("EVENT_HUB_BROKER"),
 		EventHubConnectionString:                 os.Getenv("EVENT_HUB_CONNECTION_STRING"),
 		EventHubTopic:                            os.Getenv("EVENT_HUB_TOPIC"),
@@ -246,29 +292,28 @@ func Load() *Config {
 		GithubIntegrationLogin:                   os.Getenv("GITHUB_INTEGRATION_LOGIN"),
 		GithubOutboundInterval:                   envDuration("GITHUB_OUTBOUND_INTERVAL", 15*time.Second),
 		CSMPortalBaseURL:                         os.Getenv("CSM_PORTAL_BASE_URL"),
-		GithubLabelChangeRequest:                 os.Getenv("GITHUB_LABEL_CHANGE_REQUEST"),
-		GithubLabelTypePrefix:                    os.Getenv("GITHUB_LABEL_TYPE_PREFIX"),
-		GithubLabelScopePrefix:                   os.Getenv("GITHUB_LABEL_SCOPE_PREFIX"),
-		GithubLabelsScope:                        os.Getenv("GITHUB_LABELS_SCOPE"),
-		GithubLabelsImpact:                       os.Getenv("GITHUB_LABELS_IMPACT"),
-		GithubLabelsLikelihood:                   os.Getenv("GITHUB_LABELS_LIKELIHOOD"),
-		GithubLabelsState:                        os.Getenv("GITHUB_LABELS_STATE"),
-		GithubLabelsStrippedOnCreate:             os.Getenv("GITHUB_LABELS_STRIPPED_ON_CREATE"),
+		GithubLabelTypeIncident:                  os.Getenv("GITHUB_LABEL_TYPE_INCIDENT"),
+		GithubLabelTypeServiceRequest:            os.Getenv("GITHUB_LABEL_TYPE_SERVICE_REQUEST"),
+		GithubLabelsClass:                        os.Getenv("GITHUB_LABELS_CLASS"),
+		GithubLabelStatusAssigned:                os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
-		SalesforceMembershipIngestEnabled:        os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
-		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
-		CRNoticePollInterval:                     envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
-		AuthIssuer:                               os.Getenv("AUTH_ISSUER"),
-		AuthJWKSURL:                              os.Getenv("AUTH_JWKS_URL"),
-		AuthUserTokenAudiences:                   splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
-		AuthClockSkew:                            envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
-		AuthInternalClientIDsRaw:                 os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
-		CustomerRoles:                            splitComma(os.Getenv("CUSTOMER_ROLES")),
-		SalesEntityBaseURL:                       os.Getenv("SALES_ENTITY_BASE_URL"),
-		SalesEntityTokenURL:                      os.Getenv("SALES_ENTITY_TOKEN_URL"),
-		SalesEntityClientID:                      os.Getenv("SALES_ENTITY_CLIENT_ID"),
-		SalesEntityClientSecret:                  os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
-		SalesEntityScopes:                        os.Getenv("SALES_ENTITY_SCOPES"),
+		CSMMigrationSalesforceMembershipIngestEnabled: os.Getenv("CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
+		CSMMigrationPortalWritesEnabled:               os.Getenv("CSM_MIGRATION_PORTAL_WRITES_ENABLED") == "true",
+		CREventHubTopic:                               getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
+		ProjectEventHubTopic:                          getEnvOrDefault("PROJECT_EVENT_HUB_TOPIC", "project-events"),
+		CRNoticePollInterval:                          envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
+		AuthIssuer:                                    os.Getenv("AUTH_ISSUER"),
+		AuthJWKSURL:                                   os.Getenv("AUTH_JWKS_URL"),
+		AuthUserTokenAudiences:                        splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
+		AuthClockSkew:                                 envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
+		AuthInternalClientIDsRaw:                      os.Getenv("AUTH_INTERNAL_CLIENT_IDS"),
+		CustomerRoles:                                 splitComma(os.Getenv("CUSTOMER_ROLES")),
+		SalesEntityBaseURL:                            os.Getenv("SALES_ENTITY_BASE_URL"),
+		SalesEntityTokenURL:                           os.Getenv("SALES_ENTITY_TOKEN_URL"),
+		SalesEntityClientID:                           os.Getenv("SALES_ENTITY_CLIENT_ID"),
+		SalesEntityClientSecret:                       os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
+		SalesEntityScopes:                             os.Getenv("SALES_ENTITY_SCOPES"),
+		CSMMigrationMembershipRegistrationEnabled:     os.Getenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED") == "true",
 	}
 	cfg.AuthInternalClientIDs = ParseInternalClientIDs(cfg.AuthInternalClientIDsRaw)
 	return cfg
@@ -291,6 +336,27 @@ func getEnvOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// getBoolOrDefault parses a boolean env var, falling back to defaultVal when it
+// is unset or unparseable.
+//
+// The other boolean flags here compare against "true" directly, which is safe
+// for a flag that defaults to off: a typo leaves it off, as it already was.
+// This one exists for flags that default to ON — there, "TRUE" or "1" silently
+// turning the flag off is a real failure, so accept everything ParseBool does.
+func getBoolOrDefault(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		slog.Warn("ignoring unparseable boolean configuration value",
+			"key", key, "value", v, "using", defaultVal)
+		return defaultVal
+	}
+	return parsed
 }
 
 // splitComma parses a comma-separated env var into a trimmed, non-empty
@@ -450,6 +516,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("SALES_ENTITY_BASE_URL, SALES_ENTITY_TOKEN_URL, SALES_ENTITY_CLIENT_ID, and SALES_ENTITY_CLIENT_SECRET must be set together or not at all")
 	}
 	return nil
+}
+
+// HasPortalMembershipWrites reports whether the portal-driven membership
+// write endpoints may be registered: the flag is on, the data source is
+// Postgres (the write is a Postgres transaction — there is no ServiceNow
+// equivalent), and the REST sales/sales-entity-service connection is
+// complete, since half of every one of those writes goes to Salesforce.
+// routes.go ANDs this with db != nil, the same way every other
+// Postgres-only feature set is gated.
+func (c *Config) HasPortalMembershipWrites() bool {
+	return c.CSMMigrationPortalWritesEnabled &&
+		c.DataSource == DataSourcePostgres &&
+		c.SalesEntityConfigured()
 }
 
 // SalesEntityConfigured reports whether every REST sales/sales-entity-service env var is set.

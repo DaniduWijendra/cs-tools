@@ -188,8 +188,33 @@ func (s *salesforceEventService) ingestMembership(ctx context.Context, membershi
 		"membershipSfId", membershipSfID, "state", in.State, "projectId", res.ProjectID, "projectContactId", res.ProjectContactID,
 		"createdUser", res.CreatedUser, "createdAccountContact", res.CreatedAccountContact, "createdProjectContact", res.CreatedProjectContact)
 
-	if in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited {
-		s.publishProjectContactInvited(ctx, in, pc)
+	// ECHO SUPPRESSION. Publish only when this event MOVED the membership
+	// into an invited state — the row was created here, or its stored state
+	// was something else before this upsert overwrote it.
+	//
+	// Every portal membership write also writes Salesforce, and every
+	// Salesforce write comes back to us through the Service Bus subscriber
+	// as an ordinary CREATED/UPDATED envelope. The portal has already
+	// written the new state by the time its echo lands, so the echo finds
+	// PreviousState equal to the state it carries and stays silent.
+	// Publishing there would have csm-notification-service send a SECOND
+	// invitation email for the one invitation the customer admin sent.
+	//
+	// The gate is the TRANSITION, not the row insert. Row creation alone is
+	// not a reliable echo signal: a re-invitation made in Salesforce moves
+	// an existing DEACTIVATED row to RE-INVITED, so nothing is created and
+	// the person would never be told — the previous state is what tells
+	// that apart from our own write returning. A genuinely
+	// Salesforce-originated first invitation (or the historical backfill)
+	// still creates the row and still publishes. The state check stays: an
+	// event that lands on REGISTERED or DEACTIVATED is not an invitation.
+	invited := in.State == domain.MembershipStateInvited || in.State == domain.MembershipStateReInvited
+	movedIntoInvited := res.CreatedProjectContact || !strings.EqualFold(res.PreviousState, in.State)
+	if invited && movedIntoInvited {
+		s.publishProjectContactInvited(ctx, in, pc, eventModifiedOn, hasModified)
+	} else if invited {
+		slog.InfoContext(ctx, "salesforce: membership already in this state, not re-publishing project_contact.invited",
+			"membershipSfId", membershipSfID, "state", in.State)
 	}
 	return nil
 }
@@ -212,9 +237,13 @@ func (s *salesforceEventService) recordDatabaseStepFailed(ctx context.Context, s
 // csm-notification-service can provision the Asgardeo identity and send the
 // invitation. Failures are logged, never returned: the database write is
 // already committed and EventPublisherService records the failure durably.
-func (s *salesforceEventService) publishProjectContactInvited(ctx context.Context, in domain.SalesforceMembershipUpsert, pc salesentity.ProjectContact) {
+func (s *salesforceEventService) publishProjectContactInvited(ctx context.Context, in domain.SalesforceMembershipUpsert, pc salesentity.ProjectContact, eventModifiedOn time.Time, hasModified bool) {
 	if s.membership.Publisher == nil {
 		return
+	}
+	modifiedOn := ""
+	if hasModified {
+		modifiedOn = eventModifiedOn.UTC().Format(time.RFC3339Nano)
 	}
 	roles := pc.Roles
 	if len(roles) == 0 {
@@ -234,6 +263,7 @@ func (s *salesforceEventService) publishProjectContactInvited(ctx context.Contex
 		Roles:             roles,
 		IsIntegrationUser: in.IsCsIntegrationUser,
 		Type:              in.Type,
+		EventModifiedOn:   modifiedOn,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "salesforce: encode project_contact.invited payload", "membershipSfId", in.MembershipSfID, "err", err)
@@ -278,7 +308,7 @@ func buildMembershipUpsert(pc salesentity.ProjectContact, contact salesentity.Co
 	isIntegration := contact.IsCsIntegrationUser != nil && *contact.IsCsIntegrationUser
 	membershipType := strings.TrimSpace(derefString(pc.Type))
 
-	globalRoles, managed := mapGlobalRoles(membershipType, isCsAdmin, roles, isIntegration)
+	globalRoles, managed, adminRole := mapGlobalRoles(membershipType, isIntegration)
 	groups, ignored := mapProjectGroups(roles)
 
 	name := strings.TrimSpace(derefString(contact.Name))
@@ -312,6 +342,7 @@ func buildMembershipUpsert(pc salesentity.ProjectContact, contact salesentity.Co
 		ProjectKey:          strings.TrimSpace(derefString(pc.Subscription.Key)),
 		GlobalRoles:         globalRoles,
 		ManagedAdminRoles:   managed,
+		AdminRoleName:       adminRole,
 		ProjectGroups:       groups,
 	}, ignored, nil
 }

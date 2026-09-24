@@ -44,13 +44,8 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/oauthhttp"
 )
-
-// tokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
-// Overridden in tests to keep them fast.
-var tokenFetchTimeout = 10 * time.Second
 
 // EntityConfig holds the configuration for the entity-service client below.
 // BaseURL/Scopes are this client's own SLA_ENTITY_* env vars; TokenURL/
@@ -83,17 +78,12 @@ type EntityClient struct {
 // endpoint — a missing/invalid configuration only surfaces as an error the
 // first time a method below is called.
 func NewEntityClient(cfg EntityConfig) *EntityClient {
-	cc := clientcredentials.Config{
+	httpClient := oauthhttp.NewClient(oauthhttp.Config{
+		TokenURL:     cfg.TokenURL,
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
-	}
-
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: tokenFetchTimeout})
-	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 25 * time.Second
+	})
 
 	return &EntityClient{
 		http:    httpClient,

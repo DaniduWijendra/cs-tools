@@ -17,6 +17,7 @@
 import {
   Box,
   Button,
+  Chip,
   IconButton,
   InputAdornment,
   LinearProgress,
@@ -178,18 +179,23 @@ function renderRegistryCell(id: AnnouncementColumnId, row: AnnouncementRegistryR
       return row.kind === "case" ? row.wso2CaseId || "—" : "—";
     case "subject":
       return (
-        <Typography
-          variant="body2"
-          title={row.subject}
-          sx={{
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-          }}
-        >
-          {row.subject}
-        </Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+          <Typography
+            variant="body2"
+            title={row.subject}
+            sx={{
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {row.subject}
+          </Typography>
+          {row.isSecurityAnnouncement && (
+            <Chip size="small" color="warning" label="Security" sx={{ flexShrink: 0 }} />
+          )}
+        </Box>
       );
     case "project":
       return row.kind === "batch"
@@ -652,18 +658,23 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                         }}
                       >
                         <TableCell sx={{ maxWidth: 360 }}>
-                          <Typography
-                            variant="body2"
-                            title={r.subject}
-                            sx={{
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
-                            }}
-                          >
-                            {r.subject || "(no subject)"}
-                          </Typography>
+                          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                            <Typography
+                              variant="body2"
+                              title={r.subject}
+                              sx={{
+                                display: "-webkit-box",
+                                WebkitLineClamp: 2,
+                                WebkitBoxOrient: "vertical",
+                                overflow: "hidden",
+                              }}
+                            >
+                              {r.subject || "(no subject)"}
+                            </Typography>
+                            {r.isSecurityAnnouncement && (
+                              <Chip size="small" color="warning" label="Security" sx={{ flexShrink: 0 }} />
+                            )}
+                          </Box>
                         </TableCell>
                         <TableCell>{r.kind === "eol" ? "EOL" : "Customer"}</TableCell>
                         <TableCell>{r.createdByEmail || r.createdBy || "—"}</TableCell>

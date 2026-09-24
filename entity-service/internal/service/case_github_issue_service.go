@@ -93,7 +93,7 @@ func (s *caseGithubIssueService) CreateCaseGithubIssue(ctx context.Context, req 
 		return domain.CreateCaseGithubIssueResponse{}, err
 	}
 
-	issue, err := s.gh.CreateIssue(ctx, owner, repoName, req.Title, req.Description, s.labelsFor(req))
+	issue, err := s.gh.CreateIssue(ctx, owner, repoName, titleFor(req.Title), req.Description, s.labelsFor(req))
 	if err != nil {
 		return domain.CreateCaseGithubIssueResponse{}, err
 	}
@@ -169,14 +169,29 @@ func (s *caseGithubIssueService) resolveRepository(ctx context.Context, req doma
 	return mapping.Owner, mapping.Repository, nil
 }
 
-// labelsFor is the label set the new issue carries.
-//
-// The type label is what the inbound webhook keys on, so an issue filed here
-// and then edited on GitHub is recognised by the same gate that recognises one
-// a person labelled by hand. Without it the issue would be invisible to our own
-// sync.
+// titleFor prefixes the title so the issue is recognisable as a change
+// request. A change request carries no type label -- the prefix is the only
+// signal, per issue_servicenow.yml -- so an issue filed without it would be
+// invisible to our own inbound sync.
+func titleFor(title string) string {
+	if IsChangeRequestTitle(title) {
+		return title
+	}
+	return TitlePrefixChangeRequest + " " + title
+}
+
+// labelsFor is the label set the new issue carries. The class label is what
+// the inbound gate needs alongside the title prefix.
 func (s *caseGithubIssueService) labelsFor(req domain.CreateCaseGithubIssueRequest) []string {
-	labels := []string{s.labels.ChangeRequest}
+	var labels []string
+	for label := range s.labels.ClassByLabel {
+		// Default to a normal change: the caller files from a case, and the
+		// class is refined on the issue if it turns out to be anything else.
+		if s.labels.ClassByLabel[label] == "Normal Change" {
+			labels = append(labels, label)
+			break
+		}
+	}
 	if req.IssueTypeLabel != nil && strings.TrimSpace(*req.IssueTypeLabel) != "" {
 		labels = append(labels, strings.TrimSpace(*req.IssueTypeLabel))
 	}

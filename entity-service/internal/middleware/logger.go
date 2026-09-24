@@ -48,7 +48,7 @@ var sanitizePath = strings.NewReplacer("\n", `\n`, "\r", `\r`).Replace
 // backend-v2 already log for the request that reached them, when auth.
 // Middleware (further inside this chain) validated an x-user-id-token --
 // letting a request be traced across services by that one value. For a pure
-// machine-to-machine caller (only a client-credentials Authorization: Bearer
+// machine-to-machine caller (only a client-credentials x-jwt-assertion
 // token, no end user in the loop) it falls back to that token's client id
 // instead; "-" when neither validated (no tokens presented, or a token that
 // failed validation, whose claims are unproven and never logged as if they

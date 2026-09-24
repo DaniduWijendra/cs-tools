@@ -125,13 +125,21 @@ func TestSNCaseService_CreateCase_PublishesCaseCreated(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(publisher.calls) != 1 {
-		t.Fatalf("expected 1 publish call, got %d", len(publisher.calls))
+	// Exactly one case.created, however many other event types accompany it.
+	// Counting rather than stopping at the first match keeps the guarantee that
+	// matters — a duplicate case.created would notify every subscriber twice —
+	// while tolerating the other events this path now publishes.
+	var matches []mockPublishCall
+	for _, c := range publisher.calls {
+		if c.eventType == events.TypeCaseCreated {
+			matches = append(matches, c)
+		}
 	}
-	call := publisher.calls[0]
-	if call.eventType != events.TypeCaseCreated {
-		t.Errorf("eventType = %q, want %q", call.eventType, events.TypeCaseCreated)
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 %s publish call, got %d (of %d calls in total)",
+			events.TypeCaseCreated, len(matches), len(publisher.calls))
 	}
+	call := matches[0]
 	if call.entityID != resp.Case.ID {
 		t.Errorf("entityID = %q, want the new case's id %q", call.entityID, resp.Case.ID)
 	}
@@ -606,6 +614,69 @@ func TestSNCaseService_CreateCaseComment_SkipsPublishWhenNoWatchers(t *testing.T
 	}
 	if len(publisher.calls) != 0 {
 		t.Fatalf("expected no publish call for a case with no watchers, got %d", len(publisher.calls))
+	}
+}
+
+// TestSNCaseService_CreateCaseComment_NoWatchersSkipsAuthorLookup is the
+// regression guard for a CodeRabbit finding on PR #1964: publishCommentAdded
+// used to resolve the comment author (a SearchCaseComments round trip)
+// before checking whether the case has anyone to notify at all, wasting that
+// call -- and burning part of the shared publishCommentAddedTimeout -- on a
+// comment nobody will ever be emailed about. The case here has no watchers,
+// so /comments/search must never be requested.
+func TestSNCaseService_CreateCaseComment_NoWatchersSkipsAuthorLookup(t *testing.T) {
+	caseSysid := sysid32('a')
+	projectSysid := sysid32('b')
+	commentSysid := sysid32('d')
+	caseID := sysidToUUID(caseSysid)
+
+	getCaseBody := `{
+		"id": "` + caseSysid + `",
+		"internalId": "WSO2-023",
+		"number": "CS0023001",
+		"title": "No watchers, no author lookup",
+		"description": "d",
+		"createdOn": "2026-01-02 10:00:00",
+		"createdBy": "jane.doe@example.com",
+		"createdByFullName": "Jane Doe",
+		"project": {"id": "` + projectSysid + `", "name": "Project Zeta"},
+		"deployment": {"id": "", "name": ""},
+		"deployedProduct": {"id": "", "name": "", "version": ""},
+		"state": {"id": 1, "label": "Open"}
+	}`
+	createCommentBody := `{
+		"message": "Comment created successfully",
+		"comment": {"id": "` + commentSysid + `", "createdOn": "2026-01-02 11:00:00", "createdBy": "agent.smith"}
+	}`
+
+	searchCommentsCalled := false
+	client := newTestCaseClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/comments":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(createCommentBody))
+		case r.Method == http.MethodPost && r.URL.Path == "/comments/search":
+			searchCommentsCalled = true
+			_, _ = w.Write([]byte(`{"comments":[],"offset":0,"limit":20,"totalRecords":0}`))
+		case strings.HasSuffix(r.URL.Path, "/tags"):
+			_, _ = w.Write([]byte(`{"tags":[]}`))
+		default:
+			_, _ = w.Write([]byte(getCaseBody))
+		}
+	})
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowCaseService(client, nil, publisher, nil, nil)
+
+	req := domain.CreateCaseCommentRequest{CaseID: caseID, Type: domain.CommentTypeComment, Content: "hi"}
+	if _, err := svc.CreateCaseComment(contextWithUserIDToken("token"), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.calls) != 0 {
+		t.Fatalf("expected no publish call for a case with no watchers, got %d", len(publisher.calls))
+	}
+	if searchCommentsCalled {
+		t.Error("resolveCommentAuthor's SearchCaseComments lookup ran even though the case has no watchers to notify")
 	}
 }
 

@@ -302,4 +302,21 @@ type ProjectContactInvitedPayload struct {
 	Roles             []string `json:"roles"`
 	IsIntegrationUser bool     `json:"isIntegrationUser"`
 	Type              string   `json:"type"`
+	// EventModifiedOn is the Salesforce LastModifiedDate of the membership
+	// version this event describes, RFC 3339 UTC. The consumer stamps its
+	// onboarding-step writes with it so a delayed older invitation cannot
+	// overwrite a newer one's outcome (the step upsert only applies writes
+	// whose eventModifiedOn is not older than the stored one). Empty only
+	// when Salesforce returned no parseable date.
+	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
+	// Resend marks a deliberate re-send of an invitation that was already
+	// sent once (POST /projects/{id}/contacts/{email}/resend-invitation).
+	// csm-notification-service refuses to send a second invitation for a
+	// membership it has already recorded an EMAIL step for -- that guard is
+	// what stops a duplicate Salesforce event turning into a duplicate
+	// email -- and this field is the one thing that tells it a second send
+	// is what was actually asked for. Omitted on every ordinary invitation,
+	// so the wire shape is unchanged for them. Mirror any change here in
+	// csm-notification-service's own copy of this struct.
+	Resend bool `json:"resend,omitempty"`
 }

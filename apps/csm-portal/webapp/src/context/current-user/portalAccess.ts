@@ -49,6 +49,13 @@ export interface PortalAccess {
   canUseTimeCardsAndUpdates: boolean;
   /** Every other state-changing action (create/update cases, tasks, ...). */
   canWrite: boolean;
+  /**
+   * Creating a new platform user. Unlike every other flag here, this is
+   * `admin` only — `support_engineer` does not hold it, mirroring the
+   * backend's `PermAdmin` (the one permission `support_engineer` does not
+   * share with `admin`).
+   */
+  canCreateUser: boolean;
 }
 
 /**
@@ -72,5 +79,6 @@ export function getPortalAccess(roles: string[] | undefined): PortalAccess {
     canUseOperations: full,
     canUseTimeCardsAndUpdates: full || has(PORTAL_ROLE.timecardApprover),
     canWrite: full,
+    canCreateUser: has(PORTAL_ROLE.admin),
   };
 }

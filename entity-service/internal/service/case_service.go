@@ -492,6 +492,14 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 		return domain.CreateCaseResponse{}, err
 	}
 
+	// Only now — Postgres has confirmed the row this mode's reads actually
+	// depend on — is it safe to publish. See publishCaseCreatedEvent's doc
+	// comment for why this can't just be snCaseService's own automatic
+	// publish (that fires right after the ServiceNow POST, before this
+	// Postgres insert was even attempted) — same reasoning
+	// incidentService.createIncidentSNFirst already established.
+	publishCaseCreatedEvent(ctx, s.publisher, s.GetCaseByID, req, c.ID)
+
 	responseState := ""
 	if c.State != nil {
 		responseState = string(*c.State)
@@ -555,6 +563,24 @@ func (s *caseService) CreateCaseComment(ctx context.Context, req domain.CreateCa
 		return domain.CreateCaseCommentResponse{}, err
 	}
 
+	// Event publishing follows the write, not DATA_SOURCE -- see
+	// publishCaseCreatedEvent's own doc comment for why. authorName reuses
+	// the actor already resolved above (user) -- unlike snCaseService's own
+	// version, this data source never needs publishCommentAdded's
+	// SearchCaseComments re-fetch trick, since the create response never
+	// loses the author's identity here in the first place.
+	if s.publisher != nil {
+		if cv, err := s.GetCaseByID(ctx, req.CaseID); err != nil {
+			slog.ErrorContext(ctx, "create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
+		} else {
+			authorName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			if authorName == "" {
+				authorName = user.Email
+			}
+			publishCommentAddedEvent(ctx, s.publisher, cv, req, c.ID, authorName)
+		}
+	}
+
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
 	// only (snWriteback/snMirror are both nil otherwise — see
 	// NewCaseServiceWithSNWriteback's own doc comment). Postgres has already
@@ -562,11 +588,10 @@ func (s *caseService) CreateCaseComment(ctx context.Context, req domain.CreateCa
 	// this mirror's ONLY job is making sure ServiceNow's copy of the comment
 	// text exists too. It deliberately does NOT replicate
 	// snCaseService.CreateCaseComment's auto state-transition-on-reply
-	// (applyCustomerReplyStateTransition) or event publishing
-	// (publishCommentAdded) — Postgres already owns the real outcome for
-	// both (note: this Postgres-native CreateCaseComment does not currently
-	// implement state-transition-on-reply at all; that is a separate,
-	// larger feature-parity gap, out of scope here — see
+	// (applyCustomerReplyStateTransition) — Postgres already owns the real
+	// outcome (note: this Postgres-native CreateCaseComment does not
+	// currently implement state-transition-on-reply at all; that is a
+	// separate, larger feature-parity gap, out of scope here — see
 	// CreateBareCaseComment's own doc comment). Uses CreateBareCaseComment
 	// specifically (not the full CreateCaseComment) so neither side effect
 	// ever fires twice, or fires against ServiceNow for an outcome only
@@ -680,6 +705,26 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 		return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(*req.WorkState)}
 	}
 
+	// before is the case's full view immediately prior to this update — used
+	// only to detect a genuine state change (a caller re-PATCHing the case's
+	// current state must not send every watcher a false "status changed"
+	// notification, the same guard snCaseService.UpdateCase already applies)
+	// and, on a genuine change, to build case.status_changed's payload
+	// (Recipients/ProjectID/etc. — see publishStatusChangedEvent). Skipped
+	// entirely when nothing could possibly publish (s.publisher nil) or
+	// this request can't produce a status change (req.State nil) — no need
+	// to pay for an extra read otherwise. A fetch failure here is logged and
+	// treated as "skip the publish", not a failed update: the case update
+	// itself does not depend on this.
+	var before *domain.CaseView
+	if s.publisher != nil && req.State != nil {
+		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
+			slog.ErrorContext(ctx, "update case: enrich case for case.status_changed publish failed", "caseId", req.ID)
+		} else {
+			before = &cv
+		}
+	}
+
 	// oldSeverity is the case's severity immediately before this update —
 	// accurate even under a concurrent update to the same case, since the
 	// repository locks the row before reading it whenever req.Severity is
@@ -692,6 +737,25 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 
 	if req.Severity != nil {
 		s.detectBillableStatusChange(ctx, req.ID, oldSeverity, c.Severity)
+	}
+
+	// Event publishing follows the write, not DATA_SOURCE -- see
+	// publishCaseCreatedEvent's own doc comment for why: whatever mode
+	// actually recorded this change in Postgres is the one that should
+	// notify about it, so a future data-source change doesn't silently stop
+	// notifications from firing. State/Severity are mutually exclusive on
+	// this request (fieldCount above), so at most one of these two fires.
+	if req.State != nil && before != nil && derefState(before.State) != *req.State {
+		if label, ok := caseStateDisplayLabel[*req.State]; ok {
+			publishStatusChangedEvent(ctx, s.publisher, req.ID, label, *before)
+		}
+	}
+	if req.Severity != nil && c.Severity != nil && derefSeverity(oldSeverity) != *c.Severity {
+		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
+			slog.ErrorContext(ctx, "update case: enrich case for case.severity_changed publish failed", "caseId", req.ID)
+		} else {
+			publishSeverityChangedEvent(ctx, s.publisher, req.ID, string(derefSeverity(oldSeverity)), string(*c.Severity), cv)
+		}
 	}
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
@@ -1290,6 +1354,24 @@ func (s *caseService) GetAttachment(_ context.Context, _ string) (domain.Attachm
 // flipping every time card's IsBillable for caseId), so the actual publish
 // stays commented out in detectPatchTagBillableOverride until that exists.
 func (s *caseService) AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error) {
+	actor, err := s.resolveActor(ctx)
+	if err != nil {
+		return domain.Tag{}, err
+	}
+	return s.addCaseTagAs(ctx, caseID, label, actor.Email)
+}
+
+// AddCaseTagAs implements CaseService for a caller that already knows the
+// acting email and has no x-user-id-token to resolve one from -- see the
+// CaseService interface's own doc comment on this method.
+func (s *caseService) AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+	return s.addCaseTagAs(ctx, caseID, label, actorEmail)
+}
+
+// addCaseTagAs is the shared validation/attach logic behind both
+// AddCaseTag (token-resolved actor) and AddCaseTagAs (caller-supplied
+// actor) -- everything past actor resolution is identical between the two.
+func (s *caseService) addCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
 	if err := validateUUIDs("caseId", []string{caseID}); err != nil {
 		return domain.Tag{}, err
 	}
@@ -1301,14 +1383,9 @@ func (s *caseService) AddCaseTag(ctx context.Context, caseID, label string) (dom
 		return domain.Tag{}, &apierror.ValidationError{Msg: "label must not exceed 255 characters"}
 	}
 
-	actor, err := s.resolveActor(ctx)
-	if err != nil {
-		return domain.Tag{}, err
-	}
-
 	s.detectPatchTagBillableOverride(ctx, caseID, label)
 
-	return s.repo.AddCaseTag(ctx, caseID, label, actor.Email)
+	return s.repo.AddCaseTag(ctx, caseID, label, actorEmail)
 }
 
 // detectPatchTagBillableOverride DETECTS AND LOGS ONLY — it does not

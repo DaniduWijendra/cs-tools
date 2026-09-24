@@ -63,7 +63,7 @@ func main() {
 	}
 
 	addr := ":" + cfg.ServerPort
-	srv, eventPublisher := server.New(addr, pool, cfg)
+	srv, closePublishers := server.New(addr, pool, cfg)
 
 	// The outbound GitHub worker: drains github_outbound_queue and pushes
 	// change-request activity to the linked issue. Same gate as the webhook --
@@ -167,9 +167,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("graceful shutdown failed: %v", err)
 	}
-	if eventPublisher != nil {
-		eventPublisher.Close()
-	}
+	// Closes both of the router's producers -- the shared event topic and
+	// the onboarding one.
+	closePublishers()
 	// Stop the drainer before closing its producer, so a notice in flight is
 	// not handed a writer that has already gone away.
 	stopCRNotices()

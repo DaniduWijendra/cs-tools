@@ -39,13 +39,13 @@ type DeployedProductRepository interface {
 	SearchDeployedProducts(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error)
 
 	// SearchDeployedProductMetrics returns per-day CORES readings (from
-	// usage_count, migration 000054) for every deployment_node resolved to
+	// hourly_usage_summary, migration 000054) for every deployment_node resolved to
 	// the given deployed product and deployment. A NotFoundError is returned
 	// if the deployed product doesn't exist or isn't linked to deploymentID.
 	SearchDeployedProductMetrics(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductMetricsResponse, error)
 
 	// SearchDeployedProductUsageCounts is the same resolution as
-	// SearchDeployedProductMetrics, but returns every usage_count.count_type
+	// SearchDeployedProductMetrics, but returns every hourly_usage_summary.count_type
 	// found for the resolved instances, not just CORES.
 	SearchDeployedProductUsageCounts(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductUsageCountsResponse, error)
 
@@ -152,7 +152,7 @@ func (r *deployedProductRepo) SearchDeployedProductMetrics(ctx context.Context, 
 
 	rows, err := r.db.Query(ctx, `
 		SELECT uc.counted_on::date, uc.deployment_node_id, uc.count
-		FROM usage_count uc
+		FROM hourly_usage_summary uc
 		WHERE uc.deployment_node_id = ANY($1::uuid[])
 		AND uc.count_type = 'CORES'
 		AND uc.counted_on::date BETWEEN $2::date AND $3::date
@@ -260,7 +260,7 @@ func (r *deployedProductRepo) SearchDeployedProductUsageCounts(ctx context.Conte
 
 	rows, err := r.db.Query(ctx, `
 		SELECT uc.counted_on::date, uc.count_type, uc.deployment_node_id, uc.count
-		FROM usage_count uc
+		FROM hourly_usage_summary uc
 		WHERE uc.deployment_node_id = ANY($1::uuid[])
 		AND uc.counted_on::date BETWEEN $2::date AND $3::date
 		ORDER BY uc.counted_on::date, uc.count_type`,

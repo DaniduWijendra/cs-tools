@@ -251,6 +251,7 @@ func main() {
 	route("POST /users/me/saved-filter-views/reorder", handler.PermAuthenticated, usersHandler.ReorderSavedFilterView)
 	route("POST /users/search", handler.PermView, usersHandler.SearchUsers)
 	route("GET /users/{id}", handler.PermView, usersHandler.GetUser)
+	route("POST /users", handler.PermAdmin, usersHandler.CreateUser)
 	route("POST /roles/search", handler.PermView, referenceHandler.SearchRoles)
 	route("POST /teams/search", handler.PermView, referenceHandler.SearchTeams)
 	route("GET /accounts/{id}", handler.PermView, accountHandler.GetAccount)

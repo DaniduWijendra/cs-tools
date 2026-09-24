@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/github"
@@ -37,6 +40,11 @@ type GithubSyncService interface {
 	// an error -- most webhooks from a watched repository are not about a
 	// change request at all.
 	HandleWebhook(ctx context.Context, d Delivery) (Outcome, error)
+	// CreateServiceRequestFromIssue is the same work HandleWebhook does for an
+	// issues event, reachable directly. A repository that would rather call us
+	// than wait for a webhook -- as servicenow_create_case.yml calls
+	// ServiceNow today -- uses this.
+	CreateServiceRequestFromIssue(ctx context.Context, req domain.CreateServiceRequestFromIssueRequest) (domain.CreateServiceRequestFromIssueResponse, error)
 }
 
 // Delivery is one webhook, already authenticated.
@@ -50,6 +58,9 @@ type Delivery struct {
 type Outcome struct {
 	Action          string
 	ChangeRequestID string
+	// Number is the created record's human-readable number, empty unless this
+	// outcome created one.
+	Number string
 	// Skipped is why nothing happened, empty when something did.
 	Skipped string
 }
@@ -176,7 +187,7 @@ type githubSyncService struct {
 	// integrationLogin is our own GitHub account. Events it sent are our own
 	// writes coming back and are dropped -- identity, not string-matching the
 	// comment body the way the case webhook does.
-	integrationLogin string
+	integrationLogins []string
 }
 
 // githubIssueClient is the slice of *github.Client this service needs.
@@ -196,7 +207,7 @@ func NewGithubSyncService(repo repository.GithubSyncRepository, gh githubIssueCl
 // NewGithubSyncServiceWithLabels is NewGithubSyncService with an explicit
 // label vocabulary.
 func NewGithubSyncServiceWithLabels(repo repository.GithubSyncRepository, gh githubIssueClient, integrationLogin string, labels GithubLabels) GithubSyncService {
-	return &githubSyncService{repo: repo, gh: gh, integrationLogin: integrationLogin, labels: labels}
+	return &githubSyncService{repo: repo, gh: gh, integrationLogins: integrationLoginSet(integrationLogin), labels: labels}
 }
 
 // WithMutations returns the service able to write change requests. Without it
@@ -209,7 +220,7 @@ func (s *githubSyncService) WithMutations(m repository.GithubMutationRepository)
 // NewGithubSyncServiceWriting is the full service: recognises, writes, and
 // pushes the resulting label changes back to the issue.
 func NewGithubSyncServiceWriting(repo repository.GithubSyncRepository, mutate repository.GithubMutationRepository, gh githubIssueClient, integrationLogin string, labels GithubLabels) GithubSyncService {
-	return &githubSyncService{repo: repo, gh: gh, integrationLogin: integrationLogin, labels: labels, mutate: mutate}
+	return &githubSyncService{repo: repo, gh: gh, integrationLogins: integrationLoginSet(integrationLogin), labels: labels, mutate: mutate}
 }
 
 func skip(reason string) (Outcome, error) { return Outcome{Skipped: reason}, nil }
@@ -217,25 +228,28 @@ func skip(reason string) (Outcome, error) { return Outcome{Skipped: reason}, nil
 // HandleWebhook implements GithubSyncService.
 //
 // THE DELIVERY CLAIM WRAPS EVERY WRITE. GitHub retries any delivery it did not
-// get a 2xx for, and an issue labelled once must not become two change
-// requests -- the spec calls idempotency mandatory here, unlike the CR
-// notification flows where a duplicate is only a duplicate email.
-//
-// The claim is taken before any write and released if the work fails, so a
-// retry after a genuine failure still runs. ClaimDelivery, ReleaseDelivery and
-// LinkDelivery were all implemented and none of them were called; a replayed
-// delivery was reprocessed in full, and the handler's ErrDeliverySeen branch
-// was unreachable.
+// get a 2xx for, and an issue must not become two change requests.
 func (s *githubSyncService) HandleWebhook(ctx context.Context, d Delivery) (Outcome, error) {
 	p := d.Payload
 
-	// The cheap guards come first, deliberately outside the claim: they touch
-	// nothing, so recording a delivery we are going to ignore would fill the
-	// log with rows that protect nothing.
+	// The cheap guards first, outside the claim: they touch nothing, so
+	// recording a delivery we are going to ignore protects nothing.
 	//
-	// Our own writes come back as webhooks. Dropping them by sender identity
-	// is what stops a comment we posted from being synced back as a new one.
-	if s.integrationLogin != "" && strings.EqualFold(p.Sender.Login, s.integrationLogin) {
+	// Our own writes come back as webhooks. Dropping them by sender identity is
+	// what stops a comment we posted being synced back as a new one.
+	//
+	// THE IDENTITY IS THE WORKFLOW'S, NOT OURS. We dispatch; a GitHub Actions
+	// workflow does the posting, so the sender on the way back is
+	// github-actions[bot] and never the integration account. Before the
+	// dispatch rewrite this service posted directly and the two were the same,
+	// which is why the default outlived its meaning: a CSM comment went out,
+	// came back as a bot comment, and was written onto the case as a new one.
+	//
+	// The text marker below is the second line of defence, matching
+	// sn_comment_to_github.yml's own guard. Identity alone should be enough;
+	// the marker catches a repository whose workflow posts under some other
+	// account.
+	if s.isOwnEvent(p) {
 		return skip("event was sent by the integration account")
 	}
 	if d.Event != "issues" && d.Event != "issue_comment" {
@@ -250,9 +264,6 @@ func (s *githubSyncService) HandleWebhook(ctx context.Context, d Delivery) (Outc
 
 	out, err := s.handleClaimed(ctx, d)
 	if err != nil {
-		// Release so GitHub's retry can run. A failed release is logged, not
-		// returned: the original error is the one worth surfacing, and a
-		// stuck claim blocks one delivery rather than corrupting anything.
 		if rerr := s.repo.ReleaseDelivery(ctx, d.ID); rerr != nil {
 			slog.ErrorContext(ctx, "github: could not release delivery claim",
 				"delivery", d.ID, "err", rerr)
@@ -262,8 +273,6 @@ func (s *githubSyncService) HandleWebhook(ctx context.Context, d Delivery) (Outc
 
 	if out.ChangeRequestID != "" {
 		if lerr := s.repo.LinkDelivery(ctx, d.ID, out.ChangeRequestID); lerr != nil {
-			// The work is committed. Failing now would re-run it on GitHub's
-			// retry, so losing the audit link is the smaller loss.
 			slog.WarnContext(ctx, "github: could not link delivery to change request",
 				"delivery", d.ID, "err", lerr)
 		}
@@ -275,374 +284,281 @@ func (s *githubSyncService) HandleWebhook(ctx context.Context, d Delivery) (Outc
 func (s *githubSyncService) handleClaimed(ctx context.Context, d Delivery) (Outcome, error) {
 	p := d.Payload
 
-	// An unmapped repository is one we do not handle. This replaces
-	// ServiceNow's separate git.valid.org.list -- the mapping table IS the
-	// allow-list, so the two cannot drift apart.
+	// An unmapped repository is not ours. The mapping table IS the allow-list,
+	// so routing and permission cannot drift apart.
 	mapping, err := s.repo.RepoMapping(ctx, p.Repository.Owner.Login, p.Repository.Name)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if mapping == nil {
-		return skip(fmt.Sprintf("repository %s/%s is not mapped to a product",
+		return skip(fmt.Sprintf("repository %s/%s is not mapped to an account",
 			p.Repository.Owner.Login, p.Repository.Name))
 	}
 
-	issue, err := github.ParseIssueURL(p.Issue.HTMLURL)
-	if err != nil {
-		return Outcome{}, err
-	}
-
-	cr, err := s.repo.ChangeRequestByGitReference(ctx, p.Issue.HTMLURL)
+	// What this issue already produced, if anything. Looked up by issue number
+	// within the account rather than by git_reference: the record is a service
+	// request now, and service_request has no git_reference column.
+	existing, err := s.repo.CaseByIssueNumber(ctx, mapping.AccountID, p.Issue.Number)
 	if err != nil {
 		return Outcome{}, err
 	}
 
 	if d.Event == "issue_comment" {
-		return s.handleComment(ctx, p, cr)
+		return s.handleComment(ctx, p, mapping, existing)
 	}
-	return s.handleIssue(ctx, p, issue, cr)
+	return s.handleIssue(ctx, p, mapping, existing)
 }
 
-// handleComment mirrors a GitHub comment onto the change request.
-func (s *githubSyncService) handleComment(ctx context.Context, p IssuePayload, cr *repository.GithubChangeRequest) (Outcome, error) {
-	if p.Action != "created" {
-		// Edits and deletions do not propagate, matching the original. A
-		// comment history that rewrites itself is worse than one that only
-		// grows.
-		return skip("comment action " + p.Action + " is not mirrored")
-	}
-	if cr == nil {
-		return skip("issue is not linked to a change request")
-	}
-	if p.Comment == nil {
-		return skip("comment payload is absent")
-	}
-	// The CMD:: protocol ServiceNow defined is deliberately not carried over:
-	// its handler was commented out, so no command ever executed, and the
-	// comment was swallowed rather than mirrored. Mirroring it is strictly
-	// better than the behaviour being replaced.
-	if s.mutate == nil {
-		return Outcome{Action: "comment_pending_write", ChangeRequestID: cr.ID}, nil
-	}
-	// Attributed to the GitHub author, so a reader of the change request can
-	// see who said it rather than finding it under a service account.
-	body := fmt.Sprintf("%s (on GitHub):\n\n%s", p.Comment.User.Login, p.Comment.Body)
-	if err := s.mutate.AddComment(ctx, cr.ID, body, p.Comment.User.Login); err != nil {
-		return Outcome{}, err
-	}
-	return Outcome{Action: "comment_relayed", ChangeRequestID: cr.ID}, nil
-}
-
-// handleIssue applies an issues event.
-func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, issue github.Issue, cr *repository.GithubChangeRequest) (Outcome, error) {
-	labels := p.LabelNames()
-
-	switch p.Action {
-	case "closed":
-		if cr == nil {
-			return skip("issue is not linked to a change request")
-		}
-		// The guard worth keeping: a change request may only be closed from
-		// Review. Anything else reopens the issue and says why, rather than
-		// letting GitHub drive the record into a state the process forbids.
-		if cr.State != stateReview {
-			if err := s.gh.SetState(ctx, issue, github.StateOpen); err != nil {
-				return Outcome{}, err
-			}
-			msg := fmt.Sprintf(
-				"This change request is in **%s**. It can only be closed from **Review**, so the issue has been reopened.",
-				cr.State)
-			if err := s.comment(ctx, issue, msg); err != nil {
-				return Outcome{}, err
-			}
-			return Outcome{Action: "close_refused", ChangeRequestID: cr.ID}, nil
-		}
-		if s.mutate == nil {
-			return Outcome{Action: "close_allowed_pending_write", ChangeRequestID: cr.ID}, nil
-		}
-		if _, err := s.mutate.SetState(ctx, cr.ID, stateClosed); err != nil {
-			return Outcome{}, err
-		}
-		return Outcome{Action: "closed", ChangeRequestID: cr.ID}, nil
-
-	case "labeled", "unlabeled":
-		// Guards run before anything else: on a closed change request a label
-		// change is refused and put back, which must happen whether or not the
-		// issue still satisfies the label gate.
-		if cr != nil {
-			if done, out, err := s.guardLabelChange(ctx, p, issue, cr, labels); done {
-				return out, err
-			}
-		}
-		if !s.labels.Valid(labels) {
-			return skip("issue does not carry the change-request label set")
-		}
-		// A state label moves the change request.
-		if cr != nil && p.Action == "labeled" && p.Label != nil {
-			if state, ok := s.labels.StateFor(p.Label.Name); ok {
-				if s.mutate == nil {
-					return Outcome{Action: "state_pending_write", ChangeRequestID: cr.ID}, nil
-				}
-				changed, err := s.mutate.SetState(ctx, cr.ID, state)
-				if err != nil {
-					return Outcome{}, err
-				}
-				if changed {
-					return Outcome{Action: "state_changed", ChangeRequestID: cr.ID}, nil
-				}
-				return skip("already in " + state)
-			}
-		}
-		if cr == nil {
-			// Creation is gated on the label set, not on the issue being
-			// opened -- opening an issue does not create a change request.
-			// ServiceNow reached the same design by commenting out its
-			// create-on-open branch; this states it directly.
-			if p.Action != "labeled" {
-				return skip("a change request is created by labelling, not by " + p.Action)
-			}
-			return s.prepareCreation(ctx, p, issue, labels)
-		}
-		return s.applyUpdate(ctx, p, cr, labels)
-
-	case "edited", "opened":
-		if !s.labels.Valid(labels) {
-			return skip("issue does not carry the change-request label set")
-		}
-		if cr == nil {
-			return skip("a change request is created by labelling, not by " + p.Action)
-		}
-		return s.applyUpdate(ctx, p, cr, labels)
-	}
-	return skip("issue action " + p.Action + " is not handled")
-}
-
-func (s *githubSyncService) comment(ctx context.Context, issue github.Issue, body string) error {
-	if _, err := s.gh.CreateComment(ctx, issue, body); err != nil {
-		var apiErr *github.Error
-		if errors.As(err, &apiErr) && apiErr.RateLimited() {
-			slog.Warn("github: rate limited posting a comment", "status", apiErr.StatusCode)
-		}
-		return err
-	}
-	return nil
-}
-
-// githubStateLabels are the labels that drive state. They are stripped when a
-// change request is created: the record starts at its own initial state, and a
-// leftover "Implemented" on the issue would claim otherwise.
+// handleIssue creates or updates the record an issue represents.
 //
-// Matches ServiceNow's issueStates exactly, including the quirk that
-// "Canceled" is NOT in it -- that list stripped Closed but not Canceled, and
-// reproducing it keeps a migrated repository looking the same either side.
-var githubStateLabels = map[string]bool{
-	"Assessed":    true,
-	"Authorized":  true,
-	"Scheduled":   true,
-	"Implemented": true,
-	"Reviewed":    true,
-	"Closed":      true,
-}
-
-// prepareCreation normalises the issue's labels and acknowledges on the issue.
+// A GITHUB ISSUE BECOMES A SERVICE REQUEST, NOT A CHANGE REQUEST.
+// issue_servicenow.yml maps a [CR]:/[ECR]: title onto case_type
+// "Service Request" with catalog "Generic Requests", carrying the CR/*Change
+// label as sr_type; a Type/ServiceRequest label onto "General Requests". The
+// change request proper is raised later, by a person, with the approval path
+// and planned window an issue cannot supply -- which is why 759 change
+// requests hang off a service request in the data and only 301 off a case.
 //
-// The change request itself is not written yet -- that needs work_item number
-// generation and lands with the mutation layer. What IS done here is the part
-// that is purely about the issue: reduce the labels to the set the record will
-// own, and tell the author their issue has been picked up. Both are idempotent,
-// so running this again before the record exists changes nothing.
-func (s *githubSyncService) prepareCreation(ctx context.Context, p IssuePayload, issue github.Issue, labels []string) (Outcome, error) {
-	resolved := s.labels.ResolveOnCreate(labels)
-
-	// Writing labels is safe here and not on the outbound path: GitHub will
-	// send a "labeled" webhook for our own write, and that arrives with the
-	// integration account as sender, which HandleWebhook drops.
-	if !sameLabels(labels, resolved) {
-		if err := s.gh.SetLabels(ctx, issue, resolved); err != nil {
-			return Outcome{}, err
-		}
+// An earlier version of this created a change request directly. Those records
+// had no parent and no account, because there was nothing to parent them to.
+func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, mapping *repository.RepoMapping, existing string) (Outcome, error) {
+	if !s.validated(p) {
+		return skip("issue has not passed template validation yet")
 	}
 
-	impact, likelihood, crType := s.labels.Attributes(labels)
+	catalog, srType, ok := s.classify(p)
+	if !ok {
+		return skip("issue is neither a [CR]: change request nor labelled as a service request")
+	}
 
 	if s.mutate == nil {
-		msg := fmt.Sprintf(
-			"Picked up as a change request.\n\n- **Type**: %s\n- **Impact**: %s\n- **Likelihood**: %s",
-			orDash(crType), orDash(impact), orDash(likelihood))
-		if err := s.comment(ctx, issue, msg); err != nil {
-			return Outcome{}, err
-		}
 		return Outcome{Action: "creation_prepared"}, nil
 	}
+	if existing != "" {
+		// The issue already produced a record. Its text is the source of
+		// truth, so an edit overwrites -- servicenow_update_case.yml re-sends
+		// the whole body rather than a diff for the same reason.
+		if err := s.mutate.UpdateFromIssue(ctx, existing, repository.NewChangeRequestFromIssue{
+			Subject:      p.Issue.Title,
+			Description:  p.Issue.Body,
+			GitReference: p.Issue.HTMLURL,
+			Catalog:      catalog,
+			SRType:       srType,
+			Fields:       ExtractTemplateFields(p.Issue.Body),
+		}); err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{Action: "updated", ChangeRequestID: existing}, nil
+	}
 
-	id, number, err := s.mutate.CreateFromIssue(ctx, repository.NewChangeRequestFromIssue{
+	id, number, err := s.mutate.CreateServiceRequestFromIssue(ctx, repository.NewServiceRequestFromIssue{
 		Subject:      p.Issue.Title,
 		Description:  p.Issue.Body,
 		GitReference: p.Issue.HTMLURL,
-		Impact:       impact,
-		Likelihood:   likelihood,
-		Type:         crType,
-		CreatedBy:    p.Sender.Login,
+		IssueNumber:  p.Issue.Number,
+		AccountID:    mapping.AccountID,
+		Catalog:      catalog,
+		SRType:       srType,
+		Fields:       ExtractTemplateFields(p.Issue.Body),
+		CreatedBy:    p.Issue.User.Login,
 	})
 	if err != nil {
-		// Two deliveries for the same issue can race. The unique reference
-		// means the loser finds the record already there, which is the correct
-		// end state rather than an error.
-		if errors.Is(err, repository.ErrChangeRequestExists) {
-			return skip("a change request already exists for this issue")
+		// A concurrent delivery for the same issue won the insert. Nothing to
+		// do, and not a failure -- the record the caller wanted exists.
+		if errors.Is(err, repository.ErrAlreadyExists()) {
+			slog.InfoContext(ctx, "github: issue already had a service request",
+				"serviceRequestId", id, "issue", p.Issue.Number)
+			return Outcome{Action: "exists", ChangeRequestID: id}, nil
 		}
 		return Outcome{}, err
 	}
-
-	msg := fmt.Sprintf(
-		"Change request **%s** raised.\n\n- **Type**: %s\n- **Impact**: %s\n- **Likelihood**: %s",
-		number, orDash(crType), orDash(impact), orDash(likelihood))
-	if err := s.comment(ctx, issue, msg); err != nil {
-		return Outcome{}, err
-	}
-	return Outcome{Action: "created", ChangeRequestID: id}, nil
+	slog.InfoContext(ctx, "github: service request created from issue",
+		"serviceRequestId", id, "number", number, "issue", p.Issue.Number, "catalog", catalog)
+	return Outcome{Action: "created", ChangeRequestID: id, Number: number}, nil
 }
 
-func orDash(v string) string {
-	if v == "" {
-		return "_not set_"
+// classify decides what an issue is, in the order issue_servicenow.yml does.
+// The title is checked first because a change request carries no type label.
+// validated reports whether the repository's own validation workflow has
+// passed this issue. Nothing is created before it has: the template decides
+// which catalog and fields a record gets, and an unchecked template produces a
+// record nobody can act on. The workflow applies the label on open and on every
+// edit, so an issue fixed after a failure arrives here as a labeled event.
+func (s *githubSyncService) validated(p IssuePayload) bool {
+	for _, l := range p.LabelNames() {
+		if l == s.labels.ValidationPassed {
+			return true
+		}
 	}
-	return v
+	return false
 }
 
-// sameLabels reports whether two label sets are identical as sets, so an
-// unchanged set is not written back -- a pointless write would produce a
-// webhook we then have to drop.
-func sameLabels(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := make(map[string]int, len(a))
-	for _, s := range a {
-		seen[s]++
-	}
-	for _, s := range b {
-		seen[s]--
-		if seen[s] < 0 {
-			return false
+func (s *githubSyncService) classify(p IssuePayload) (catalog, srType string, ok bool) {
+	labels := p.LabelNames()
+	if IsChangeRequestTitle(p.Issue.Title) {
+		class, found := s.labels.ClassOf(labels)
+		if !found {
+			// The class label is applied by the repository's validation
+			// workflow. Acting before it lands would make a record from a
+			// template nobody has checked.
+			return "", "", false
 		}
+		return CatalogGenericRequests, class, true
 	}
-	return true
-}
-
-// applyUpdate writes an edited issue onto its change request.
-func (s *githubSyncService) applyUpdate(ctx context.Context, p IssuePayload, cr *repository.GithubChangeRequest, labels []string) (Outcome, error) {
-	if s.mutate == nil {
-		return Outcome{Action: "update_pending_write", ChangeRequestID: cr.ID}, nil
-	}
-	impact, likelihood, crType := s.labels.Attributes(labels)
-	in := repository.NewChangeRequestFromIssue{
-		Subject:     p.Issue.Title,
-		Description: p.Issue.Body,
-		Impact:      impact,
-		Likelihood:  likelihood,
-		Type:        crType,
-		CreatedBy:   p.Sender.Login,
-	}
-	if err := s.mutate.UpdateFromIssue(ctx, cr.ID, in); err != nil {
-		return Outcome{}, err
-	}
-	return Outcome{Action: "updated", ChangeRequestID: cr.ID}, nil
-}
-
-// guardLabelChange enforces what may be changed on an issue whose change
-// request is closed, and which labels the record owns rather than the author.
-//
-// Returns done=true when it handled the event, so the caller stops.
-func (s *githubSyncService) guardLabelChange(ctx context.Context, p IssuePayload, issue github.Issue, cr *repository.GithubChangeRequest, labels []string) (bool, Outcome, error) {
-	if p.Label == nil {
-		return false, Outcome{}, nil
-	}
-	changed := p.Label.Name
-
-	// A closed change request is a finished record. Label edits are put back
-	// and answered, rather than silently ignored -- someone made a change and
-	// deserves to know it did not take.
-	if cr.State == stateClosed {
-		restored := labels
-		if p.Action == "labeled" {
-			restored = withoutLabel(labels, changed)
-		} else {
-			restored = append(append([]string{}, labels...), changed)
-		}
-		if err := s.gh.SetLabels(ctx, issue, restored); err != nil {
-			return true, Outcome{}, err
-		}
-		verb := "added to"
-		if p.Action == "unlabeled" {
-			verb = "removed from"
-		}
-		msg := fmt.Sprintf("Labels cannot be %s a **closed** change request, so `%s` has been put back.", verb, changed)
-		if err := s.comment(ctx, issue, msg); err != nil {
-			return true, Outcome{}, err
-		}
-		return true, Outcome{Action: "label_change_refused", ChangeRequestID: cr.ID}, nil
-	}
-
-	// The type is fixed at creation: a CRType label added afterwards is
-	// removed again rather than quietly changing what the record is.
-	if p.Action == "labeled" && strings.HasPrefix(changed, s.labels.TypePrefix) {
-		if err := s.gh.RemoveLabel(ctx, issue, changed); err != nil {
-			return true, Outcome{}, err
-		}
-		msg := fmt.Sprintf("The change request type is fixed at creation, so `%s` has been removed.", changed)
-		if err := s.comment(ctx, issue, msg); err != nil {
-			return true, Outcome{}, err
-		}
-		return true, Outcome{Action: "type_label_reverted", ChangeRequestID: cr.ID}, nil
-	}
-
-	// Removing a label the record owns -- its type, or a state -- puts it
-	// back: those describe the change request, not the issue.
-	if p.Action == "unlabeled" {
-		_, isState := s.labels.StateFor(changed)
-		if isState || strings.HasPrefix(changed, s.labels.TypePrefix) {
-			if err := s.gh.SetLabels(ctx, issue, append(append([]string{}, labels...), changed)); err != nil {
-				return true, Outcome{}, err
-			}
-			return true, Outcome{Action: "protected_label_restored", ChangeRequestID: cr.ID}, nil
-		}
-	}
-
-	// A new scope label replaces the old one: exactly one scope is allowed,
-	// and two would leave change_request_type ambiguous.
-	if p.Action == "labeled" && strings.HasPrefix(changed, s.labels.ScopePrefix) {
-		reduced := []string{changed}
-		for _, l := range labels {
-			if l != changed && !strings.HasPrefix(l, s.labels.ScopePrefix) {
-				reduced = append(reduced, l)
-			}
-		}
-		if !sameLabels(labels, reduced) {
-			if err := s.gh.SetLabels(ctx, issue, reduced); err != nil {
-				return true, Outcome{}, err
-			}
-		}
-		if s.mutate != nil {
-			if t, ok := s.labels.ScopeToType[changed]; ok {
-				if err := s.mutate.UpdateFromIssue(ctx, cr.ID, repository.NewChangeRequestFromIssue{
-					Subject: p.Issue.Title, Type: t, CreatedBy: p.Sender.Login,
-				}); err != nil {
-					return true, Outcome{}, err
-				}
-			}
-		}
-		return true, Outcome{Action: "scope_replaced", ChangeRequestID: cr.ID}, nil
-	}
-	return false, Outcome{}, nil
-}
-
-func withoutLabel(labels []string, drop string) []string {
-	out := make([]string, 0, len(labels))
 	for _, l := range labels {
-		if l != drop {
-			out = append(out, l)
+		if l == s.labels.TypeServiceRequest {
+			return CatalogGeneralRequests, "", true
 		}
+	}
+	return "", "", false
+}
+
+// handleComment mirrors a GitHub comment onto the change request.
+func (s *githubSyncService) handleComment(ctx context.Context, p IssuePayload, mapping *repository.RepoMapping, caseID string) (Outcome, error) {
+	// CREATED ONLY. AddComment always inserts, and nothing links a CSM comment
+	// back to the GitHub comment it came from, so treating an edit as new
+	// content appends a second copy to the case every time someone fixes a
+	// typo. Relaying the first version and ignoring later edits loses less
+	// than duplicating the thread does.
+	if p.Action != "created" {
+		return skip("comment action " + p.Action + " is not handled")
+	}
+	// Comment is a pointer: an issue_comment delivery that carries no comment
+	// object is malformed, and dereferencing it would panic the handler rather
+	// than answer GitHub.
+	if p.Comment == nil {
+		return skip("issue_comment delivery carried no comment")
+	}
+	// THE COMMENT GOES ON THE CASE, NOT THE CHANGE REQUEST.
+	//
+	// github_comment_to_sn.yml PATCHes sn_customerservice_case, and the
+	// outbound trigger only watches case comments. Attaching a relayed comment
+	// to the change request instead produced a conversation that could not be
+	// answered: a reply on the change request synced nowhere, and a reply on
+	// the case reached GitHub detached from the thread that started it.
+	if caseID == "" {
+		return skip("no case is linked to this issue")
+	}
+	body := strings.TrimSpace(p.Comment.Body)
+	if body == "" {
+		return skip("comment is empty")
+	}
+	// A command, not a note. The repository's own workflows own these.
+	if strings.HasPrefix(body, "/") {
+		return skip("comment is a slash command")
+	}
+	if s.mutate == nil {
+		return Outcome{Action: "comment_pending_write"}, nil
+	}
+
+	// The "(GitHub Comment)" marker is what github_comment_to_sn.yml stamps on
+	// what it relays, and what sn_comment_to_github.yml checks for before
+	// posting back. Keeping the same marker keeps the same loop closed.
+	author := p.Comment.User.Login
+	if author == "" {
+		author = "a GitHub user"
+	}
+	text := fmt.Sprintf("@%s (GitHub Comment) %s\n\n%s", author, p.Issue.HTMLURL, body)
+
+	if err := s.mutate.AddComment(ctx, caseID, text, author); err != nil {
+		return Outcome{}, err
+	}
+	return Outcome{Action: "comment_relayed", ChangeRequestID: caseID}, nil
+}
+
+// isOwnEvent reports whether this delivery is an echo of something we caused.
+func (s *githubSyncService) isOwnEvent(p IssuePayload) bool {
+	for _, login := range s.integrationLogins {
+		if login != "" && strings.EqualFold(p.Sender.Login, login) {
+			return true
+		}
+	}
+	// A comment we relayed carries this marker, and so does one the workflow
+	// posted on our behalf. Either way it originated here.
+	if p.Comment != nil && strings.Contains(p.Comment.Body, "(GitHub Comment)") {
+		return true
+	}
+	return false
+}
+
+// integrationLoginSet is every account whose events are our own coming back.
+//
+// github-actions[bot] is always included: with the dispatch architecture it is
+// the account that actually posts, whatever the configured integration login
+// is. Leaving it to configuration would make a loop the default.
+func integrationLoginSet(configured string) []string {
+	out := []string{"github-actions[bot]"}
+	if c := strings.TrimSpace(configured); c != "" {
+		out = append(out, c)
 	}
 	return out
+}
+
+// CreateServiceRequestFromIssue implements GithubSyncService.
+//
+// Built on the same handleIssue the webhook uses, so the two entry points
+// cannot drift: one recognition rule, one catalog mapping, one field parser.
+// The only difference is what carries the issue in.
+func (s *githubSyncService) CreateServiceRequestFromIssue(ctx context.Context, req domain.CreateServiceRequestFromIssueRequest) (domain.CreateServiceRequestFromIssueResponse, error) {
+	if strings.TrimSpace(req.Owner) == "" || strings.TrimSpace(req.Repository) == "" {
+		return domain.CreateServiceRequestFromIssueResponse{}, &apierror.ValidationError{Msg: "owner and repository are required"}
+	}
+	if req.IssueNumber <= 0 {
+		return domain.CreateServiceRequestFromIssueResponse{}, &apierror.ValidationError{Msg: "issueNumber is required"}
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return domain.CreateServiceRequestFromIssueResponse{}, &apierror.ValidationError{Msg: "title is required"}
+	}
+
+	mapping, err := s.repo.RepoMapping(ctx, req.Owner, req.Repository)
+	if err != nil {
+		return domain.CreateServiceRequestFromIssueResponse{}, err
+	}
+	if mapping == nil {
+		return domain.CreateServiceRequestFromIssueResponse{}, &apierror.ConflictError{
+			Msg: "repository " + req.Owner + "/" + req.Repository + " is not mapped to an account",
+		}
+	}
+
+	// Already created is success, not a conflict: the caller's retry after a
+	// timeout must not produce a second record, and servicenow_create_case.yml
+	// answers its own repeat with "Case Already Exists" for the same reason.
+	existing, err := s.repo.CaseByIssueNumber(ctx, mapping.AccountID, req.IssueNumber)
+	if err != nil {
+		return domain.CreateServiceRequestFromIssueResponse{}, err
+	}
+	if existing != "" {
+		return domain.CreateServiceRequestFromIssueResponse{
+			Message: "a service request already exists for this issue", ID: existing,
+		}, nil
+	}
+
+	p := IssuePayload{}
+	p.Issue.Number = req.IssueNumber
+	p.Issue.Title = req.Title
+	p.Issue.Body = req.Body
+	p.Issue.HTMLURL = "https://github.com/" + req.Owner + "/" + req.Repository + "/issues/" + strconv.Itoa(req.IssueNumber)
+	p.Issue.User.Login = req.Author
+	for _, l := range req.Labels {
+		p.Issue.Labels = append(p.Issue.Labels, struct {
+			Name string `json:"name"`
+		}{Name: l})
+	}
+
+	out, err := s.handleIssue(ctx, p, mapping, "")
+	if err != nil {
+		return domain.CreateServiceRequestFromIssueResponse{}, err
+	}
+	if out.Skipped != "" {
+		return domain.CreateServiceRequestFromIssueResponse{}, &apierror.ValidationError{Msg: out.Skipped}
+	}
+	if out.Action == "exists" {
+		return domain.CreateServiceRequestFromIssueResponse{
+			Message: "a service request already exists for this issue", ID: out.ChangeRequestID,
+		}, nil
+	}
+	return domain.CreateServiceRequestFromIssueResponse{
+		Message: "service request created", ID: out.ChangeRequestID,
+		Number: out.Number, Created: true,
+	}, nil
 }

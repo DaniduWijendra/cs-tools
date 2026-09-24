@@ -120,6 +120,20 @@ type UserSortBy struct {
 	Order UserSortOrder `json:"order"`
 }
 
+// CreateUserRequest is the input for creating a new "user" row on the
+// Postgres data source. userType is never accepted here -- it is derived by
+// a database trigger from is_system_user and role membership (migration
+// 000007), never set directly by a caller. roles is optional; each name is
+// resolved against the role table (migration 000004) and rejected with a
+// ServiceUnavailableError if any is not seeded there -- the same posture
+// syncGlobalRoles uses for the Salesforce membership ingest.
+type CreateUserRequest struct {
+	FirstName string     `json:"firstName"`
+	LastName  string     `json:"lastName"`
+	Email     string     `json:"email"`
+	Roles     []UserRole `json:"roles"`
+}
+
 // SearchUsersRequest is the input for a user search operation.
 type SearchUsersRequest struct {
 	Pagination Pagination         `json:"pagination"`
@@ -175,7 +189,7 @@ type SavedFilterViewList struct {
 	Views []SavedFilterView `json:"views"`
 }
 
-// SaveSavedFilterViewRequest is PUT /users/me/saved-filter-views. Same-name
+// SaveSavedFilterViewRequest is PATCH /users/me/saved-filter-views. Same-name
 // overwrite is case-insensitive; a new name is inserted at the front.
 type SaveSavedFilterViewRequest struct {
 	ListKey SavedFilterListKey `json:"listKey"`
@@ -386,11 +400,13 @@ type AccountView struct {
 	TechnicalOwner        *PersonRef `json:"technicalOwner"`
 	AccountManager        *PersonRef `json:"accountManager"`
 	RenewalAccountManager *PersonRef `json:"renewalAccountManager"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only). Mirrors AccountRef.CreTeam.
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source. Mirrors AccountRef.CreTeam.
 	CreTeam *EntityRef `json:"creTeam"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only). Mirrors AccountRef.SreTeam.
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source. Mirrors AccountRef.SreTeam.
 	SreTeam          *EntityRef `json:"sreTeam"`
 	ActivationDate   *string    `json:"activationDate"`
 	DeactivationDate *string    `json:"deactivationDate"`
@@ -441,11 +457,13 @@ type AccountDetail struct {
 	TechnicalOwner        *PersonRef        `json:"technicalOwner"`
 	AccountManager        *PersonRef        `json:"accountManager"`
 	RenewalAccountManager *PersonRef        `json:"renewalAccountManager"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only). Mirrors AccountRef.CreTeam.
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source. Mirrors AccountRef.CreTeam.
 	CreTeam *EntityRef `json:"creTeam"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only). Mirrors AccountRef.SreTeam.
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source. Mirrors AccountRef.SreTeam.
 	SreTeam          *EntityRef `json:"sreTeam"`
 	ActivationDate   *string    `json:"activationDate"`
 	DeactivationDate *string    `json:"deactivationDate"`
@@ -476,6 +494,17 @@ const (
 	SalesforceEntityProjectContactAlt = "Project_Contact"
 	SalesforceEntityContact           = "Contact"
 	SalesforceSyncActor               = "salesforce-sync"
+	// PortalMembershipWriteActor is created_by/updated_by for a membership
+	// written by a portal rather than by the Salesforce ingest, so the two
+	// origins stay distinguishable in the audit columns even though they
+	// share the same write path.
+	PortalMembershipWriteActor = "portal-membership-write"
+	// PortalMembershipWriteEventType is the onboarding_step.event_type a
+	// portal write records. It is deliberately not one of the Salesforce
+	// event types: the step's duplicate guard only ever special-cases
+	// DELETED, and this value makes a portal-originated write visible in the
+	// ledger for what it is.
+	PortalMembershipWriteEventType = "PORTAL_WRITE"
 )
 
 // SalesforceEventRequest is the ASB envelope POSTed to /salesforce/events.
@@ -537,6 +566,17 @@ type SalesforceMembershipUpsert struct {
 	// Email is the invited address stored on project_contact.email.
 	Email string
 
+	// Actor is created_by/updated_by for every row this write touches.
+	// Empty defaults to SalesforceSyncActor, which is what the ingest wants;
+	// the portal writes set PortalMembershipWriteActor.
+	Actor string
+
+	// ProjectID short-circuits the repository's project resolution when the
+	// caller already holds the CSM project id (the portal writes address a
+	// project by its UUID, not by its Salesforce key). Empty falls back to
+	// the ingest's own natural-key resolution, ProjectKey then ProjectSfID.
+	ProjectID string
+
 	ContactSfID         string
 	ContactEmail        string
 	ContactName         string
@@ -554,9 +594,25 @@ type SalesforceMembershipUpsert struct {
 	// in ManagedAdminRoles are left untouched.
 	GlobalRoles []string
 	// ManagedAdminRoles are the role.name values the ingest owns exclusively
-	// (customer_admin, partner_admin): any of these the user holds but which
-	// are absent from GlobalRoles are revoked.
+	// (customer_admin, partner_admin). Exactly one of them is granted when
+	// the user turns out to be an admin, and every one of them that is not
+	// AdminRoleName is revoked. Every other role the user holds is left
+	// alone.
 	ManagedAdminRoles []string
+	// AdminRoleName is which of ManagedAdminRoles this contact would hold if
+	// they are an admin: partner_admin for a PARTNER CONTACT, customer_admin
+	// otherwise, and empty for an integration user (which gets no global
+	// roles at all).
+	//
+	// WHETHER they hold it is NOT decided from the membership being written.
+	// Admin is a project role now, and the account-level role is derived: the
+	// repository re-reads every membership this user has, after this one has
+	// been written, and grants the role when ANY of them carries the project
+	// ADMIN role (or the contact's own Salesforce isCsAdmin flag is set).
+	// Deciding it from the one membership in hand is what used to strip a
+	// user's admin everywhere the moment a single non-admin membership was
+	// processed.
+	AdminRoleName string
 	// ProjectGroups are the project_group."group" names the membership must be
 	// in after the upsert; every other group membership of this project
 	// contact is removed.
@@ -573,6 +629,108 @@ type SalesforceMembershipUpsertResult struct {
 	CreatedUser           bool
 	CreatedAccountContact bool
 	CreatedProjectContact bool
+	// PreviousState is the project_contact.state the row carried BEFORE this
+	// upsert overwrote it, empty when the row was created here. It is the
+	// echo-suppression signal the Salesforce ingest gates on: a portal write
+	// has already stored the new state by the time its own echo arrives, so
+	// PreviousState then equals the incoming state and the ingest stays
+	// silent, while a state Salesforce itself moved (DEACTIVATED to
+	// RE-INVITED, say) differs and is published.
+	PreviousState string
+	// IsAccountAdmin is the derived account-level admin decision the upsert
+	// just applied: true when at least one of this user's live memberships
+	// carries the project ADMIN role (or the contact's Salesforce isCsAdmin
+	// flag is set), which is exactly when AdminRoleName is held.
+	IsAccountAdmin bool
+}
+
+// MembershipWriteTarget is the project (and its account) a portal membership
+// write lands on, read inside the write's own transaction before the
+// Salesforce half runs. The Salesforce ids are what the Salesforce calls need;
+// the UUIDs are what the rows need.
+type MembershipWriteTarget struct {
+	ProjectID   string
+	ProjectKey  string
+	ProjectName string
+	ProjectSfID string
+	AccountID   string
+	AccountSfID string
+}
+
+// ProjectMembership is one customer's membership of one project, as returned
+// by the portal write endpoints. It is deliberately a different shape from
+// ProjectContact (the read model the contacts search returns): this one is
+// about the write that just happened, and carries the Salesforce ids the
+// caller needs to correlate the onboarding ledger.
+type ProjectMembership struct {
+	ProjectID        string `json:"projectId"`
+	ProjectContactID string `json:"projectContactId"`
+	MembershipSfID   string `json:"membershipSfId"`
+	ContactSfID      string `json:"contactSfId"`
+	// UserID is the "user" row the membership resolved to. Always set: the
+	// write creates the user row when no match exists.
+	UserID string `json:"userId"`
+	Email  string `json:"email"`
+	// State is a project_contact_state_enum value (INVITED / REGISTERED /
+	// RE-INVITED / DEACTIVATED).
+	State string `json:"state"`
+	// Roles are the raw Salesforce Role__c labels the membership now carries
+	// ("Portal user", "Admin", ...), exactly as they were written to
+	// Salesforce — not the derived project_role/project_group values.
+	Roles []string `json:"roles"`
+}
+
+// CreateProjectMembershipRequest is the body of POST /projects/{id}/contacts:
+// invite someone to a project. FirstName/LastName are used only when the
+// Salesforce contact has to be created; an existing contact keeps its own
+// name. Roles are raw Salesforce Role__c labels.
+type CreateProjectMembershipRequest struct {
+	Email     string   `json:"email"`
+	FirstName string   `json:"firstName"`
+	LastName  string   `json:"lastName"`
+	Roles     []string `json:"roles"`
+	// IsCsIntegrationUser marks a machine account: it gets its database row
+	// and its Salesforce records like anyone else, but no Asgardeo identity
+	// and no invitation e-mail, because nobody ever signs in as it. Only
+	// honoured when the Salesforce contact is created by this request; an
+	// existing contact keeps whatever Salesforce already says, which is the
+	// authority on what kind of contact it is.
+	IsCsIntegrationUser bool `json:"isCsIntegrationUser,omitempty"`
+}
+
+// UpdateProjectMembershipRolesRequest is the body of
+// PATCH /projects/{id}/contacts/{email}: replace the membership's Salesforce
+// roles. An empty list is allowed and means "no roles" — it removes every
+// project group, it does not leave the current set alone.
+type UpdateProjectMembershipRolesRequest struct {
+	Roles []string `json:"roles"`
+}
+
+// ProjectMembershipRow is an existing membership as read back by the write
+// path, keyed by (project, email). Roles are the raw Salesforce labels
+// reconstructed from the membership's project groups, so a role change can be
+// expressed as a replacement of the whole picklist.
+type ProjectMembershipRow struct {
+	ProjectContactID string
+	MembershipSfID   string
+	ContactSfID      string
+	UserID           string
+	Email            string
+	State            string
+	ProjectGroups    []string
+	// The rest is what re-publishing an invitation needs without a second
+	// query or a Salesforce round trip: csm-notification-service addresses
+	// the person and names the project from the event payload alone.
+	FirstName   string
+	LastName    string
+	ProjectKey  string
+	ProjectName string
+	// Type is the Salesforce Contact_Type__c equivalent, derived rather than
+	// stored: project_contact carries no type column, so a contact whose
+	// account_contact hangs off a different account than the project's is a
+	// PARTNER CONTACT and anything else an OWN CONTACT.
+	Type              string
+	IsIntegrationUser bool
 }
 
 // OnboardingStepName is the onboarding_step.step enum: one row per membership
@@ -987,6 +1145,9 @@ type Opportunity struct {
 	Account            *EntityRef `json:"account"`
 	EulaVersion        *string    `json:"eulaVersion"`
 	EulaVersionDecimal *string    `json:"eulaVersionDecimal"`
+	// Stage is the opportunity's sales stage (e.g. "50 - Closed Won"), nil when absent
+	// (ServiceNow data source only).
+	Stage *string `json:"stage"`
 }
 
 // SearchOpportunitiesRequest is the input for searching opportunities (ServiceNow data
@@ -1905,11 +2066,13 @@ type AccountRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Type string `json:"type"`
-	// CreTeam is the account's CRE (customer relationship engineering) team, resolved to a
-	// named group reference (ServiceNow data source only).
+	// CreTeam is the account's CRE (customer relationship engineering) team,
+	// resolved to a named group reference -- account.cre_team_id (migration
+	// 000074) on the Postgres data source, see CaseRepository.GetCaseByID.
 	CreTeam *EntityRef `json:"creTeam,omitempty"`
-	// SreTeam is the account's SRE team, resolved to a named group reference (ServiceNow
-	// data source only).
+	// SreTeam is the account's SRE team, resolved to a named group reference
+	// -- account.sre_team_id (migration 000074) on the Postgres data
+	// source, see CaseRepository.GetCaseByID.
 	SreTeam *EntityRef `json:"sreTeam,omitempty"`
 }
 
@@ -3619,6 +3782,20 @@ type ProjectContact struct {
 	RegistrationState    string   `json:"registrationState"`
 	NotificationsEnabled bool     `json:"notificationsEnabled"`
 	Roles                []string `json:"roles"`
+	// AccountRoles are this person's account-level roles (role.name), a
+	// SEPARATE list from Roles and never merged into it: Roles is what they
+	// may do on THIS project, AccountRoles what they are across the account
+	// they belong to. It holds only the five roles the membership write owns
+	// -- external, customer/partner, and the derived customer_admin/
+	// partner_admin -- so an internal role a staff account happens to hold
+	// never leaks into a customer-facing contact list. Empty for a row with
+	// no linked "user" row, since account roles live on the user.
+	//
+	// The admin entry is the point: admin is stored per project now, and a
+	// user is an account admin when ANY of their memberships carries the
+	// project ADMIN role. Returning it here is what lets both portals render
+	// an "Admin" badge on a contact list without a second call per row.
+	AccountRoles []string `json:"accountRoles"`
 	// CustomerContactPresent and GrantsCaseAccess answer "can this person actually see
 	// this project's cases" per row, not just "are they listed". CustomerContactPresent
 	// is whether a contact record is linked at all (false is the same fault ID==nil
@@ -4726,6 +4903,14 @@ type SearchIncidentsFilters struct {
 	//     unless dashboard parity is the explicit goal.
 	//   - "productName" (op in): one or more product names, matched as a
 	//     union against the incident's backing business_service name.
+	//   - "incidentStateKeys" (op in): one or more raw ServiceNow
+	//     `incident_state` numeric keys, passed through unmapped (unlike
+	//     "state" above, which translates the domain IncidentState enum to
+	//     SN's raw `state` numeric key). Deliberately separate from "state":
+	//     `incident_state` is a distinct field that exists independently on
+	//     the same incident row. Kept only for exact parity with SN's native
+	//     incident dashboards; prefer "state" for general-purpose state
+	//     filtering.
 	// See service.ParseIncidentFieldFilters.
 	Filters []IncidentFieldFilter `json:"filters,omitempty"`
 }
@@ -5371,15 +5556,19 @@ type IncidentTaskDetail struct {
 	ClosedOn        *string        `json:"closedOn"`
 }
 
-// ConversationState represents the state of a conversation. Only ACTIVE and
-// RESOLVED are accepted as SearchConversationsFilters.States values (the
-// search endpoint's own filter allow-list); all five values are accepted as
-// UpdateConversationRequest.State (the transition allow-list PATCH
-// /conversations/{id} enforces), matching the Ballerina reference's SN state
-// keys 2-6 respectively.
+// ConversationState represents the state of a conversation. All six values are
+// accepted as SearchConversationsFilters.States values — every state the SN
+// choice list offers must be filterable, or a state present in the dropdown
+// silently returns an unfiltered search. Writes are narrower: the five
+// transition states (excluding OPEN) are accepted as
+// UpdateConversationRequest.State, the allow-list PATCH /conversations/{id}
+// enforces, matching the Ballerina reference's SN state keys 2-6 respectively.
+// OPEN (SN state key 1) is a read-only state a conversation starts in and is
+// never PATCHed back to.
 type ConversationState string
 
 const (
+	ConversationStateOpen      ConversationState = "OPEN"
 	ConversationStateActive    ConversationState = "ACTIVE"
 	ConversationStateResolved  ConversationState = "RESOLVED"
 	ConversationStateConverted ConversationState = "CONVERTED"
@@ -7194,4 +7383,34 @@ type LookupAlertIncidentMappingsRequest struct {
 // absence is a valid result for a lookup, not a 404.
 type LookupAlertIncidentMappingsResponse struct {
 	Mappings []AlertIncidentMappingView `json:"mappings"`
+}
+
+// CreateServiceRequestFromIssueRequest is the body of
+// POST /github/service-requests.
+//
+// The same information servicenow_create_case.yml puts in its payload, minus
+// everything the server can work out for itself: the account comes from the
+// repository mapping, the catalog and sr_type from the title and labels. A
+// caller sends what only it knows -- which issue, in which repository.
+type CreateServiceRequestFromIssueRequest struct {
+	Owner       string   `json:"owner"`
+	Repository  string   `json:"repository"`
+	IssueNumber int      `json:"issueNumber"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	Labels      []string `json:"labels,omitempty"`
+	// Author is the GitHub login that raised it, recorded as created_by.
+	Author string `json:"author,omitempty"`
+}
+
+// CreateServiceRequestFromIssueResponse names the record that was created.
+type CreateServiceRequestFromIssueResponse struct {
+	Message string `json:"message"`
+	ID      string `json:"id"`
+	// Number is absent when the request matched a record that already existed:
+	// this endpoint looks that up by issue number, which does not read it.
+	Number string `json:"number,omitempty"`
+	// Created distinguishes a new record from one that already existed, so a
+	// caller retrying after a timeout can tell without parsing Message.
+	Created bool `json:"created"`
 }
