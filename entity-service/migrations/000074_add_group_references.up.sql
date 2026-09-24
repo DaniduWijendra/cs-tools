@@ -41,9 +41,9 @@ CREATE INDEX IF NOT EXISTS idx_service_approval_group_id ON service (approval_gr
 CREATE INDEX IF NOT EXISTS idx_service_user_group_id ON service (user_group_id);
 ALTER TABLE communication_plan ADD COLUMN IF NOT EXISTS assignment_group_id UUID REFERENCES "group"(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_communication_plan_assignment_group_id ON communication_plan (assignment_group_id);
-ALTER TABLE account ADD COLUMN IF NOT EXISTS integration_cs_team_id UUID REFERENCES "group"(id) ON DELETE SET NULL;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS cre_team_id UUID REFERENCES "group"(id) ON DELETE SET NULL;
 ALTER TABLE account ADD COLUMN IF NOT EXISTS sre_team_id UUID REFERENCES "group"(id) ON DELETE SET NULL;
-CREATE INDEX IF NOT EXISTS idx_account_integration_cs_team_id ON account (integration_cs_team_id);
+CREATE INDEX IF NOT EXISTS idx_account_cre_team_id ON account (cre_team_id);
 CREATE INDEX IF NOT EXISTS idx_account_sre_team_id ON account (sre_team_id);
 ALTER TABLE project ADD COLUMN IF NOT EXISTS assignment_group_id UUID REFERENCES "group"(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_project_assignment_group_id ON project (assignment_group_id);

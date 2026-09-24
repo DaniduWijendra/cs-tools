@@ -34,25 +34,28 @@ import (
 // with the joined technical-owner/account-manager person refs. It is mapped to
 // domain.AccountView / domain.AccountDetail by the service layer.
 type AccountRow struct {
-	ID                  string
-	Name                string
-	Classification      *string
-	Pod                 *string
-	SfID                *string
-	Region              *string
-	ActivationDate      *time.Time
-	DeactivationDate    *time.Time
-	TechnicalOwnerID    *string
-	TechnicalOwnerName  *string
-	TechnicalOwnerEmail *string
-	AccountManagerID    *string
-	AccountManagerName  *string
-	AccountManagerEmail *string
-	HasAgent            *bool
-	HasKbReferences     *bool
-	CreatedOn           time.Time
-	CreatedBy           string
-	UpdatedOn           time.Time
+	ID                         string
+	Name                       string
+	Classification             *string
+	Pod                        *string
+	SfID                       *string
+	Region                     *string
+	ActivationDate             *time.Time
+	DeactivationDate           *time.Time
+	TechnicalOwnerID           *string
+	TechnicalOwnerName         *string
+	TechnicalOwnerEmail        *string
+	AccountManagerID           *string
+	AccountManagerName         *string
+	AccountManagerEmail        *string
+	RenewalAccountManagerID    *string
+	RenewalAccountManagerName  *string
+	RenewalAccountManagerEmail *string
+	HasAgent                   *bool
+	HasKbReferences            *bool
+	CreatedOn                  time.Time
+	CreatedBy                  string
+	UpdatedOn                  time.Time
 }
 
 // AccountRepository defines the persistence operations for the account table.
@@ -83,13 +86,15 @@ const accountSelectColumns = `
 	a.activation_date, a.deactivation_date,
 	tow.id, COALESCE(tow.name, NULLIF(TRIM(CONCAT_WS(' ', tow.first_name, tow.last_name)), '')), tow.email,
 	mgr.id, COALESCE(mgr.name, NULLIF(TRIM(CONCAT_WS(' ', mgr.first_name, mgr.last_name)), '')), mgr.email,
+	ram.id, COALESCE(ram.name, NULLIF(TRIM(CONCAT_WS(' ', ram.first_name, ram.last_name)), '')), ram.email,
 	a.ai_gen_response_enabled, a.smart_knowledge_base_suggestions_enabled,
 	a.created_on, a.created_by, a.updated_on`
 
 const accountFromJoins = `
 	FROM account a
 	LEFT JOIN "user" tow ON tow.id = a.technical_owner_id
-	LEFT JOIN "user" mgr ON mgr.id = a.account_manager_id`
+	LEFT JOIN "user" mgr ON mgr.id = a.account_manager_id
+	LEFT JOIN "user" ram ON ram.id = a.renewal_account_manager_id`
 
 func scanAccountRow(row interface{ Scan(...any) error }) (AccountRow, error) {
 	var a AccountRow
@@ -98,6 +103,7 @@ func scanAccountRow(row interface{ Scan(...any) error }) (AccountRow, error) {
 		&a.ActivationDate, &a.DeactivationDate,
 		&a.TechnicalOwnerID, &a.TechnicalOwnerName, &a.TechnicalOwnerEmail,
 		&a.AccountManagerID, &a.AccountManagerName, &a.AccountManagerEmail,
+		&a.RenewalAccountManagerID, &a.RenewalAccountManagerName, &a.RenewalAccountManagerEmail,
 		&a.HasAgent, &a.HasKbReferences,
 		&a.CreatedOn, &a.CreatedBy, &a.UpdatedOn,
 	)
