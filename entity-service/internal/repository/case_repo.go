@@ -597,15 +597,25 @@ const createSecurityReportAnalysisFromServiceNowQuery = `
 	JOIN inserted_security_report_analysis isra ON isra.id = iwi.id`
 
 // CreateCaseFromServiceNow implements CaseRepository.
+//
+// The "announcement" branch is split out into its own method
+// (createAnnouncementFromServiceNow) because, unlike the other four
+// case-like types, announcement is RLS-protected (migration 000085):
+// createAnnouncementFromServiceNowQuery's INSERT...RETURNING reads back the
+// row it just wrote, and that read-back is itself subject to the SELECT
+// policy. Postgres does not silently return zero rows for a failed
+// INSERT...RETURNING the way it does for UPDATE/DELETE -- it rejects the
+// INSERT outright ("new row violates row-level security policy"), so every
+// announcement created by the ServiceNow sync job would fail unless the
+// caller's identity is set first, in the same transaction. Confirmed both
+// failure and fix empirically against a local Postgres instance.
 func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+	if req.Type == "announcement" {
+		return r.createAnnouncementFromServiceNow(ctx, req, id, number, wso2ID, createdBy, state)
+	}
+
 	var row pgx.Row
 	switch req.Type {
-	case "announcement":
-		row = r.db.QueryRow(ctx, createAnnouncementFromServiceNowQuery,
-			id, createdBy,
-			number, wso2ID, req.Subject, req.Description,
-			req.ProjectID, state,
-		)
 	case "service_request":
 		row = r.db.QueryRow(ctx, createServiceRequestFromServiceNowQuery,
 			id, createdBy,
@@ -637,21 +647,56 @@ func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.Crea
 	}
 	c, err := scanUpdatedCase(row)
 	if err != nil {
-		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case "23505": // unique_violation on id/number/wso2_id — see this method's own doc comment for why this "shouldn't" happen
-				return domain.Case{}, &apierror.ConflictError{Msg: "a case already exists for this ServiceNow id/number/internalId: " + pgErr.Detail}
-			case "22P02": // invalid_text_representation — id was not a valid UUID
-				return domain.Case{}, &apierror.ValidationError{Msg: "id is not a valid UUID: " + id}
-			case "23503": // foreign_key_violation — one of the referenced IDs does not exist
-				return domain.Case{}, &apierror.ValidationError{Msg: "one or more referenced IDs do not exist: " + pgErr.Detail}
-			case "P0001": // raise_exception from integrity triggers (deployment/project, deployed_product/deployment, catastrophic priority)
-				return domain.Case{}, &apierror.ValidationError{Msg: pgErr.Message}
-			}
-		}
-		return domain.Case{}, fmt.Errorf("create case from servicenow: %w", err)
+		return domain.Case{}, mapCreateCaseFromServiceNowError(err, id)
 	}
 	return c, nil
+}
+
+// createAnnouncementFromServiceNow implements CreateCaseFromServiceNow's
+// "announcement" branch. This is a system write on behalf of the ServiceNow
+// sync job, not a specific customer's request -- there is no viewer to scope
+// to -- so Unrestricted is the correct identity here, the same choice
+// already made for SearchActiveSLAStatuses/SearchAllCallRequests's own
+// internal-only contexts. See CreateCaseFromServiceNow's own doc comment for
+// why this branch alone needs the identity set at all.
+//
+// The scan happens inside the transaction, before it commits: the pgx.Row
+// returned by tx.QueryRow cannot be read once its transaction has been
+// committed or rolled back.
+func (r *caseRepo) createAnnouncementFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+	var c domain.Case
+	err := runWithCallerIdentity(ctx, r.db, SearchScope{Unrestricted: true}, func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, createAnnouncementFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, state,
+		)
+		var scanErr error
+		c, scanErr = scanUpdatedCase(row)
+		return scanErr
+	})
+	if err != nil {
+		return domain.Case{}, mapCreateCaseFromServiceNowError(err, id)
+	}
+	return c, nil
+}
+
+// mapCreateCaseFromServiceNowError translates a low-level error from any
+// CreateCaseFromServiceNow branch into the apierror the handler expects.
+func mapCreateCaseFromServiceNowError(err error, id string) error {
+	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505": // unique_violation on id/number/wso2_id — see CreateCaseFromServiceNow's own doc comment for why this "shouldn't" happen
+			return &apierror.ConflictError{Msg: "a case already exists for this ServiceNow id/number/internalId: " + pgErr.Detail}
+		case "22P02": // invalid_text_representation — id was not a valid UUID
+			return &apierror.ValidationError{Msg: "id is not a valid UUID: " + id}
+		case "23503": // foreign_key_violation — one of the referenced IDs does not exist
+			return &apierror.ValidationError{Msg: "one or more referenced IDs do not exist: " + pgErr.Detail}
+		case "P0001": // raise_exception from integrity triggers (deployment/project, deployed_product/deployment, catastrophic priority)
+			return &apierror.ValidationError{Msg: pgErr.Message}
+		}
+	}
+	return fmt.Errorf("create case from servicenow: %w", err)
 }
 
 // GetCaseByID implements CaseRepository.
