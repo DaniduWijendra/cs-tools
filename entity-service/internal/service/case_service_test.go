@@ -803,6 +803,47 @@ func TestCaseService_UpdateCase_PublishesSeverityChanged(t *testing.T) {
 	}
 }
 
+// TestCaseService_UpdateCase_PublishesSeverityChangedOnFirstSet is the
+// regression guard for a real gap: domain.Case's own doc comment says
+// Severity is nil for the large majority of real Postgres cases (see
+// domain.go), so the very first severity ever set on such a case must still
+// publish case.severity_changed with an empty OldSeverity -- exactly what
+// snCaseService.UpdateCase already does via derefSeverity. A prior revision
+// of this guard required oldSeverity != nil, which silently skipped every
+// one of these first-time sets.
+func TestCaseService_UpdateCase_PublishesSeverityChangedOnFirstSet(t *testing.T) {
+	newSeverity := domain.CaseSeverityCritical
+	repo := &stubCaseRepo{
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{
+				ID: testDeploymentUUID, Number: "CS0001",
+				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
+				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+			}, nil
+		},
+		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
+			return domain.Case{ID: req.ID, Severity: req.Severity}, nil, nil
+		},
+	}
+	publisher := &mockEventPublisher{}
+	svc := NewCaseService(repo, stubUserRepo{}, publisher, alwaysUnrestrictedAccess{})
+
+	if _, err := svc.UpdateCase(context.Background(), domain.UpdateCaseRequest{ID: testDeploymentUUID, Severity: &newSeverity}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(publisher.calls) != 1 {
+		t.Fatalf("expected exactly 1 publish call, got %d", len(publisher.calls))
+	}
+	var payload events.SeverityChangedPayload
+	if err := json.Unmarshal(publisher.calls[0].payload, &payload); err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
+	if payload.OldSeverity != "" || payload.NewSeverity != "CRITICAL" {
+		t.Errorf("payload severities = %q -> %q, want \"\" -> CRITICAL", payload.OldSeverity, payload.NewSeverity)
+	}
+}
+
 // TestCaseService_UpdateCase_DoesNotPublishSeverityChangedOnNoOp mirrors
 // TestCaseService_UpdateCase_DoesNotPublishStatusChangedOnNoOp for severity.
 func TestCaseService_UpdateCase_DoesNotPublishSeverityChangedOnNoOp(t *testing.T) {

@@ -570,11 +570,15 @@ func (s *caseService) CreateCaseComment(ctx context.Context, req domain.CreateCa
 	// SearchCaseComments re-fetch trick, since the create response never
 	// loses the author's identity here in the first place.
 	if s.publisher != nil {
-		authorName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-		if authorName == "" {
-			authorName = user.Email
+		if cv, err := s.GetCaseByID(ctx, req.CaseID); err != nil {
+			slog.ErrorContext(ctx, "create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
+		} else {
+			authorName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			if authorName == "" {
+				authorName = user.Email
+			}
+			publishCommentAddedEvent(ctx, s.publisher, cv, req, c.ID, authorName)
 		}
-		publishCommentAddedEvent(ctx, s.publisher, s.GetCaseByID, req, c.ID, authorName)
 	}
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
@@ -746,11 +750,11 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 			publishStatusChangedEvent(ctx, s.publisher, req.ID, label, *before)
 		}
 	}
-	if req.Severity != nil && oldSeverity != nil && c.Severity != nil && *oldSeverity != *c.Severity {
+	if req.Severity != nil && c.Severity != nil && derefSeverity(oldSeverity) != *c.Severity {
 		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
 			slog.ErrorContext(ctx, "update case: enrich case for case.severity_changed publish failed", "caseId", req.ID)
 		} else {
-			publishSeverityChangedEvent(ctx, s.publisher, req.ID, string(*oldSeverity), string(*c.Severity), cv)
+			publishSeverityChangedEvent(ctx, s.publisher, req.ID, string(derefSeverity(oldSeverity)), string(*c.Severity), cv)
 		}
 	}
 

@@ -1207,12 +1207,35 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 	if s.publisher == nil {
 		return
 	}
+	// One timeout for the whole helper — enrichment and the author lookup
+	// both count against it, not just the eventual Publish call — so this
+	// can never run longer than publishCommentAddedTimeout regardless of how
+	// slow ServiceNow is, matching this function's own documented bound.
+	ctx, cancel := context.WithTimeout(ctx, publishCommentAddedTimeout)
+	defer cancel()
+
+	cv, err := s.GetCaseByID(ctx, req.CaseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "sn create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
+		return
+	}
+	recipients := watchListUserEmails(cv.WatchList)
+	if req.Type == domain.CommentTypeWorkNote {
+		recipients = filterWso2Emails(recipients)
+	}
+	if len(recipients) == 0 {
+		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, case has no watchers to email", "caseId", req.CaseID)
+		return
+	}
+
+	// Recipients are checked above, before this SearchCaseComments round
+	// trip, so a comment with nobody to notify never pays for it.
 	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
 	if author == nil || author.Name == "" {
 		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, could not resolve comment author's display name", "caseId", req.CaseID)
 		return
 	}
-	publishCommentAddedEvent(ctx, s.publisher, s.GetCaseByID, req, commentID, author.Name)
+	publishCommentAddedEvent(ctx, s.publisher, cv, req, commentID, author.Name)
 }
 
 // publishCommentAddedEvent is publishCommentAdded's actual body, factored
@@ -1221,19 +1244,19 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 // publishCaseCreatedEvent's own doc comment. authorName is the comment
 // author's already-resolved display name — see publishCommentAdded's own
 // doc comment for why resolving it stays with each caller rather than
-// living here.
-func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, getCaseByID func(context.Context, string) (domain.CaseView, error), req domain.CreateCaseCommentRequest, commentID, authorName string) {
+// living here. cv is the case, already fetched by the caller — same
+// pre-fetched-CaseView shape as publishStatusChangedEvent/
+// publishSeverityChangedEvent's own "before" parameter, rather than a lazy
+// getCaseByID callback: every caller now needs the fetched case before this
+// function even runs (to decide whether there are recipients worth an
+// author lookup for — see publishCommentAdded's own doc comment), so a
+// callback here would only risk double-fetching.
+func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, cv domain.CaseView, req domain.CreateCaseCommentRequest, commentID, authorName string) {
 	if publisher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishCommentAddedTimeout)
 	defer cancel()
-
-	cv, err := getCaseByID(ctx, req.CaseID)
-	if err != nil {
-		slog.ErrorContext(ctx, "create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
-		return
-	}
 
 	recipients := watchListUserEmails(cv.WatchList)
 	if req.Type == domain.CommentTypeWorkNote {
