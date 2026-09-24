@@ -9056,6 +9056,14 @@ components:
             required: an invitation granting nothing would provision an identity that sees an
             empty portal. A label Salesforce would not accept is a 400 rather than a Salesforce
             error mid-transaction.
+        isCsIntegrationUser:
+          type: boolean
+          default: false
+          description: >-
+            Mark a machine account. It gets its database row and Salesforce
+            records like anyone else, but no Asgardeo identity and no
+            invitation email. Only honoured when this request creates the
+            Salesforce contact; an existing contact keeps its own flag.
 
     UpdateProjectMembershipRolesRequest:
       type: object

@@ -81,10 +81,15 @@ func (f *fakeWriteSalesEntity) CreateContact(_ context.Context, in salesentity.C
 	if f.createErr != nil {
 		return salesentity.Contact{}, f.createErr
 	}
+	// The real service echoes the created record back, including the
+	// integration-user flag, which everything downstream then reads off the
+	// contact rather than off the request.
+	isIntegration := in.IsCsIntegrationUser
 	c := salesentity.Contact{
 		ID: sampleStr(writeContactSfID), Email: sampleStr(in.Email),
 		FirstName: sampleStr(in.FirstName), LastName: sampleStr(in.LastName),
-		Account: &salesentity.ContactAccount{ID: sampleStr(in.AccountID)},
+		Account:             &salesentity.ContactAccount{ID: sampleStr(in.AccountID)},
+		IsCsIntegrationUser: &isIntegration,
 	}
 	f.contact = &c
 	return c, nil
@@ -808,5 +813,44 @@ func TestNormalizeMembershipEmail(t *testing.T) {
 		if _, err := normalizeMembershipEmail(bad); err == nil {
 			t.Errorf("normalizeMembershipEmail(%q) should be rejected", bad)
 		}
+	}
+}
+
+// TestInvite_IntegrationUserReachesSalesforceAndTheEvent pins the machine-account
+// path end to end through this service: the flag on the request reaches the
+// Salesforce contact create, and comes back out on the published invitation so
+// csm-notification-service knows to skip the identity and the e-mail. Without
+// it a machine account would be sent an invitation nobody reads and given an
+// Asgardeo login nobody uses.
+func TestInvite_IntegrationUserReachesSalesforceAndTheEvent(t *testing.T) {
+	for _, integration := range []bool{true, false} {
+		name := "regular contact"
+		if integration {
+			name = "integration user"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, alwaysUnrestrictedAccess{})
+			_, err := h.svc.Invite(context.Background(), writeProjectID, domain.CreateProjectMembershipRequest{
+				Email:               "svc-account@acme.com",
+				LastName:            "Service Account",
+				Roles:               []string{"Portal user"},
+				IsCsIntegrationUser: integration,
+			})
+			if err != nil {
+				t.Fatalf("Invite() error = %v", err)
+			}
+			if len(h.se.createdContact) != 1 {
+				t.Fatalf("created %d contacts, want 1", len(h.se.createdContact))
+			}
+			if got := h.se.createdContact[0].IsCsIntegrationUser; got != integration {
+				t.Errorf("contact create isCsIntegrationUser = %v, want %v", got, integration)
+			}
+			if len(h.repo.upserts) != 1 {
+				t.Fatalf("upserts = %d, want 1", len(h.repo.upserts))
+			}
+			if got := h.repo.upserts[0].IsCsIntegrationUser; got != integration {
+				t.Errorf("membership upsert isCsIntegrationUser = %v, want %v", got, integration)
+			}
+		})
 	}
 }

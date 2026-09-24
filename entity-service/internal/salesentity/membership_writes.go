@@ -59,6 +59,11 @@ type CreateContactInput struct {
 	Email     string `json:"email"`
 	// AccountID is the Salesforce Account Id the contact is created under.
 	AccountID string `json:"accountId"`
+	// IsCsIntegrationUser sets Is_Cs_Integration_User__c. A machine account
+	// gets no Asgardeo identity and no invitation e-mail downstream, and
+	// this is the only moment the caller can say so -- the flag is read back
+	// off the contact everywhere after this.
+	IsCsIntegrationUser bool `json:"isCsIntegrationUser,omitempty"`
 }
 
 // CreateProjectContactInput is the POST /project-contacts body. ProjectID is

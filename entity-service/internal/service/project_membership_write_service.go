@@ -158,13 +158,14 @@ func (s *projectMembershipWriteService) Invite(ctx context.Context, projectID st
 			state = domain.MembershipStateReInvited
 		}
 		in, rec, err := s.writeSalesforce(ctx, wc, salesforceWriteIntent{
-			Email:     email,
-			FirstName: strings.TrimSpace(req.FirstName),
-			LastName:  strings.TrimSpace(req.LastName),
-			Roles:     roles,
-			State:     state,
-			SetRoles:  true,
-			SetState:  true,
+			Email:               email,
+			FirstName:           strings.TrimSpace(req.FirstName),
+			LastName:            strings.TrimSpace(req.LastName),
+			IsCsIntegrationUser: req.IsCsIntegrationUser,
+			Roles:               roles,
+			State:               state,
+			SetRoles:            true,
+			SetState:            true,
 		})
 		if err != nil {
 			return domain.SalesforceMembershipUpsert{}, domain.UpsertOnboardingStepRequest{}, err
@@ -383,6 +384,9 @@ type salesforceWriteIntent struct {
 	Email     string
 	FirstName string
 	LastName  string
+	// IsCsIntegrationUser is only consulted when this write creates the
+	// Salesforce contact; an existing contact's own flag wins.
+	IsCsIntegrationUser bool
 	// Roles are canonical Salesforce Role__c labels.
 	Roles []string
 	// Groups overrides the project_group set derived from Roles. Only the
@@ -445,10 +449,11 @@ func (s *projectMembershipWriteService) writeSalesforce(ctx context.Context, wc 
 			}
 		}
 		contact, err = s.deps.SalesEntity.CreateContact(ctx, salesentity.CreateContactInput{
-			FirstName: first,
-			LastName:  last,
-			Email:     intent.Email,
-			AccountID: wc.Target.AccountSfID,
+			FirstName:           first,
+			LastName:            last,
+			Email:               intent.Email,
+			AccountID:           wc.Target.AccountSfID,
+			IsCsIntegrationUser: intent.IsCsIntegrationUser,
 		})
 		if err != nil {
 			return domain.SalesforceMembershipUpsert{}, rec, err

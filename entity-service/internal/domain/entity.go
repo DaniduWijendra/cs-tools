@@ -663,6 +663,13 @@ type CreateProjectMembershipRequest struct {
 	FirstName string   `json:"firstName"`
 	LastName  string   `json:"lastName"`
 	Roles     []string `json:"roles"`
+	// IsCsIntegrationUser marks a machine account: it gets its database row
+	// and its Salesforce records like anyone else, but no Asgardeo identity
+	// and no invitation e-mail, because nobody ever signs in as it. Only
+	// honoured when the Salesforce contact is created by this request; an
+	// existing contact keeps whatever Salesforce already says, which is the
+	// authority on what kind of contact it is.
+	IsCsIntegrationUser bool `json:"isCsIntegrationUser,omitempty"`
 }
 
 // UpdateProjectMembershipRolesRequest is the body of
