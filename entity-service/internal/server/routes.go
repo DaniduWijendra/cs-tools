@@ -411,6 +411,20 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		projectOpportunityLinkHandler = handler.NewProjectOpportunityLinkHandler(service.NewServiceNowProjectOpportunityLinkService(serviceNowIntegrationServiceClient))
 	}
 
+	// snWritebackDispatcher is the single shared SNWritebackDispatcher for
+	// every DATA_SOURCE=postgres-servicenow-dual-write best-effort mirror
+	// write (see SNWritebackDispatcher's own doc comment) -- one dispatcher,
+	// one small worker pool, reused by every entity's mirror rather than each
+	// constructing its own: project (immediately below), and case,
+	// call_request, time_card, comment, change_request, and case tags/watch
+	// list (all further below, riding on the case dispatch). nil in every
+	// other mode. Originally constructed only inline for the case pilot;
+	// hoisted here once a second entity (project) needed the same instance.
+	var snWritebackDispatcher *service.SNWritebackDispatcher
+	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
+		snWritebackDispatcher = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
+	}
+
 	projectRepo := repository.NewProjectRepository(db)
 	pgProjectSvc := service.NewProjectService(projectRepo, accessSvc)
 	var activeProjectSvc service.ProjectService
@@ -430,10 +444,28 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	}
 	projectContactHandler := handler.NewProjectContactHandler(activeProjectContactSvc)
 
-	var projectUpdateHandler *handler.ProjectUpdateHandler
-	if cfg.DataSource == config.DataSourceServiceNow {
-		projectUpdateHandler = handler.NewProjectUpdateHandler(service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient))
+	// activeProjectUpdateSvc backs PATCH /projects/{id} on every data source
+	// -- see pgProjectUpdateService's own doc comment for exactly which
+	// fields the Postgres data sources accept (a subset of the ServiceNow
+	// contract; unsupported fields are rejected with a ValidationError, not
+	// silently dropped). DATA_SOURCE=postgres-servicenow-dual-write also
+	// mirrors a successful write to ServiceNow, asynchronously, via
+	// snWritebackDispatcher -- plain DATA_SOURCE=postgres never touches
+	// ServiceNow at all (snWritebackDispatcher is nil in that mode, so the
+	// nil-check inside NewProjectUpdateServiceWithSNWriteback's caller here
+	// never fires for it). projectRepo/pgProjectSvc were already constructed
+	// above for GetProject/SearchProjects.
+	var activeProjectUpdateSvc service.ProjectUpdateService
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
+		activeProjectUpdateSvc = service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient)
+	case config.DataSourcePostgresServiceNowDualWrite:
+		snProjectMirrorSvc := service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient)
+		activeProjectUpdateSvc = service.NewProjectUpdateServiceWithSNWriteback(projectRepo, userRepo, snWritebackDispatcher, snProjectMirrorSvc)
+	default:
+		activeProjectUpdateSvc = service.NewProjectUpdateService(projectRepo, userRepo)
 	}
+	projectUpdateHandler := handler.NewProjectUpdateHandler(activeProjectUpdateSvc)
 
 	// referenceDataRepo backs GET /projects/{id}/metadata and GET /metadata's
 	// Postgres-mode choice lists (project_type rows, enum labels) -- see
@@ -523,19 +555,6 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		snUserService = service.NewServiceNowUserService(serviceNowIntegrationServiceClient)
 	}
 
-	// snWriteback is the single shared SNWritebackDispatcher instance for
-	// DATA_SOURCE=postgres-servicenow-dual-write, backing every entity below
-	// that mirrors a Postgres write to ServiceNow asynchronously (case,
-	// call_request, time_card, comment, change_request, case tags/watch
-	// list). Constructed once here rather than once per entity so they all
-	// share one bounded worker pool and one sn_writeback_failures repository
-	// -- see SNWritebackDispatcher's own doc comment. nil in every other
-	// DataSource mode.
-	var snWriteback *service.SNWritebackDispatcher
-	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
-		snWriteback = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
-	}
-
 	caseRepo := repository.NewCaseRepository(db)
 	var activeCaseSvc service.CaseService
 	// caseAttachmentOverrideSvc, when non-nil, is the CaseService case
@@ -596,7 +615,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// and it is caseAttachmentOverrideSvc below, for case attachments
 		// specifically.
 		snCaseMirrorSvc := service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, nil, nil, snUserService, cfg.CustomerRoles)
-		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, snWriteback, snCaseMirrorSvc)
+		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, snWritebackDispatcher, snCaseMirrorSvc)
 		// Case ATTACHMENTS are ServiceNow-only in this mode, permanently —
 		// unlike case metadata (CREATE/UPDATE above), not a pilot scope
 		// decision but a hard requirement: the sftpgo-backed Postgres
@@ -650,7 +669,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// UpdateCallRequest does not (Postgres-first CREATE means
 		// customer_call.id has no ServiceNow counterpart to target).
 		snCallRequestMirrorSvc := service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
-		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, snWriteback, snCallRequestMirrorSvc)
+		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, snWritebackDispatcher, snCallRequestMirrorSvc)
 	default:
 		activeCallRequestSvc = service.NewCallRequestService(callRequestRepo, userRepo)
 	}
@@ -699,7 +718,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// CreateChangeRequest/PatchChangeRequest are the only methods of it
 		// this mode ever calls.
 		snChangeRequestMirrorSvc := service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
-		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNWriteback(changeRequestRepo, snChangeRequestMirrorSvc, snWriteback)
+		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNWriteback(changeRequestRepo, snChangeRequestMirrorSvc, snWritebackDispatcher)
 	default:
 		activeChangeRequestSvc = service.NewChangeRequestService(changeRequestRepo)
 	}
@@ -716,7 +735,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// Update/DeleteTimeCard do not (Postgres-first CREATE means
 		// time_card.id has no ServiceNow counterpart to target).
 		snTimeCardMirrorSvc := service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
-		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, snWriteback, snTimeCardMirrorSvc)
+		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, snWritebackDispatcher, snTimeCardMirrorSvc)
 	default:
 		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
 	}
@@ -916,7 +935,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// from case's own comment mirror (CreateCaseComment/CreateBareCaseComment),
 		// which backs the case-scoped comment routes, not these generic ones.
 		snCommentMirrorSvc := service.NewServiceNowCommentService(serviceNowIntegrationServiceClient)
-		activeCommentSvc = service.NewCommentServiceWithSNWriteback(commentRepo, userRepo, snWriteback, snCommentMirrorSvc)
+		activeCommentSvc = service.NewCommentServiceWithSNWriteback(commentRepo, userRepo, snWritebackDispatcher, snCommentMirrorSvc)
 	default:
 		activeCommentSvc = service.NewCommentService(commentRepo, userRepo)
 	}
@@ -1070,9 +1089,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", projectMembershipHandler.DeactivateProjectContact)
 		mux.HandleFunc("POST /projects/{id}/contacts/{email}/resend-invitation", projectMembershipHandler.ResendProjectContactInvitation)
 	}
-	if projectUpdateHandler != nil {
-		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
-	}
+	mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	mux.HandleFunc("GET /projects/{id}/metadata", projectMetadataHandler.GetProjectMetadata)
 	mux.HandleFunc("GET /projects/{id}/cases/stats", projectCaseStatsHandler.GetProjectCaseStats)
 	mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectStats)

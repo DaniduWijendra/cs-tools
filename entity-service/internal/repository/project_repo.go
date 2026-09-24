@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -54,6 +56,16 @@ type ProjectRepository interface {
 	// or a NotFoundError if no such project exists OR it exists but scope
 	// excludes it (existence is never revealed to a caller who can't see it).
 	GetProjectByID(ctx context.Context, id string, scope SearchScope) (domain.ProjectDetailsView, error)
+	// UpdateProject applies the subset of domain.ProjectUpdateRequest that has
+	// a real Postgres column -- see service.pgProjectUpdateService's own doc
+	// comment for exactly which fields and why. updatedBy is the caller's
+	// resolved email, always written to project.updated_by (and, when
+	// HasAgent/HasKbReferences is set, account.updated_by too). Returns a
+	// NotFoundError if no such project exists, a ConflictError if
+	// HasAgent/HasKbReferences is requested on a project with no linked
+	// account (project.account_id IS NULL), or a ValidationError if a closure
+	// sub-state value isn't a valid Postgres enum label for that column.
+	UpdateProject(ctx context.Context, id string, req domain.ProjectUpdateRequest, updatedBy string) (domain.ProjectUpdateResult, error)
 }
 
 type projectRepo struct {
@@ -286,6 +298,115 @@ func (r *projectRepo) GetProjectByID(ctx context.Context, id string, scope Searc
 		v.SubscriptionType = projectTypeNameToSubscriptionType(*projectTypeName)
 	}
 	return v, nil
+}
+
+// UpdateProject implements ProjectRepository.
+func (r *projectRepo) UpdateProject(ctx context.Context, id string, req domain.ProjectUpdateRequest, updatedBy string) (domain.ProjectUpdateResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.ProjectUpdateResult{}, fmt.Errorf("update project: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the row first (mirrors CaseRepository.UpdateCase's own
+	// lock-before-read reasoning) so the account_id this reads is accurate
+	// even under a concurrent update to the same project, and so a
+	// nonexistent id is caught as NotFoundError before either UPDATE below
+	// runs.
+	var accountID *string
+	err = tx.QueryRow(ctx, `SELECT account_id FROM project WHERE id = $1 FOR UPDATE`, id).Scan(&accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ProjectUpdateResult{}, &apierror.NotFoundError{Msg: "project not found"}
+	}
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			return domain.ProjectUpdateResult{}, &apierror.ValidationError{Msg: "id is not a valid UUID: " + id}
+		}
+		return domain.ProjectUpdateResult{}, fmt.Errorf("update project: lock row: %w", err)
+	}
+
+	// HasAgent/HasKbReferences map onto the linked account's
+	// ai_gen_response_enabled/smart_knowledge_base_suggestions_enabled
+	// columns (migration 000008), the same mapping GetProjectByID already
+	// reads from -- see this file's own doc comment. project.account_id is
+	// nullable (14 of 1956 rows on live data, per GetProjectByID's own doc
+	// comment), so a project with no linked account can't take these fields.
+	if (req.HasAgent != nil || req.HasKbReferences != nil) && accountID == nil {
+		return domain.ProjectUpdateResult{}, &apierror.ConflictError{Msg: "project has no linked account; hasAgent/hasKbReferences cannot be set"}
+	}
+
+	// project.updated_on/updated_by is bumped unconditionally on every
+	// successful call (even one that only touches the linked account below)
+	// so the response's UpdatedOn/UpdatedBy always reflects when this PATCH
+	// happened, matching the ServiceNow-mode contract's own always-present
+	// UpdatedOn/UpdatedBy. ClosureState is deliberately never selected or
+	// returned here -- see pgProjectUpdateService.UpdateProject's own doc
+	// comment for why this mode leaves wso2_closure_state alone rather than
+	// reimplementing the ServiceNow business rule that derives it.
+	var res domain.ProjectUpdateResult
+	var endDateState, invoiceState, complianceState *string
+	err = tx.QueryRow(ctx, `
+		UPDATE project
+		SET end_date_closure_state = COALESCE($2::end_date_closure_state_enum, end_date_closure_state),
+		    invoice_due_date_closure_state = COALESCE($3::invoice_due_date_closure_state_enum, invoice_due_date_closure_state),
+		    compliance_violation_closure_state = COALESCE($4::compliance_violation_closure_state_enum, compliance_violation_closure_state),
+		    updated_on = NOW(),
+		    updated_by = $5
+		WHERE id = $1
+		RETURNING id, updated_on, updated_by,
+		          end_date_closure_state::TEXT, invoice_due_date_closure_state::TEXT, compliance_violation_closure_state::TEXT`,
+		id, req.EndDateClosureState, req.InvoiceDueDateClosureState, req.ComplianceViolationClosureState, updatedBy,
+	).Scan(&res.ID, &res.UpdatedOn, &res.UpdatedBy, &endDateState, &invoiceState, &complianceState)
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			// pgErr.Message (e.g. `invalid input value for enum
+			// end_date_closure_state_enum: "Pending Notified"`) is logged in
+			// full for debugging but never returned to the caller verbatim --
+			// it embeds the internal enum type name, a schema implementation
+			// detail this API's response shouldn't leak. The caller only
+			// needs to know which of the three fields it sent was bad.
+			slog.WarnContext(ctx, "update project: invalid enum value", "projectId", id, "error", pgErr.Message)
+			return domain.ProjectUpdateResult{}, &apierror.ValidationError{Msg: "endDateClosureState, invoiceDueDateClosureState, or complianceViolationClosureState contains an unrecognized value"}
+		}
+		return domain.ProjectUpdateResult{}, fmt.Errorf("update project: %w", err)
+	}
+	res.EndDateClosureState = endDateState
+	res.InvoiceDueDateClosureState = invoiceState
+	res.ComplianceViolationClosureState = complianceState
+
+	if req.HasAgent != nil || req.HasKbReferences != nil {
+		// RowsAffected is checked, not just the error, because the account
+		// row itself (not just the project row locked above) could be
+		// deleted by a concurrent transaction between the project SELECT ...
+		// FOR UPDATE and this UPDATE -- accountID is a stale reference at
+		// that point, tx.Exec returns no error, and without this check the
+		// transaction would commit as a silent partial success: caller gets
+		// 200, hasAgent/hasKbReferences never actually changed.
+		tag, err := tx.Exec(ctx, `
+			UPDATE account
+			SET ai_gen_response_enabled = COALESCE($2, ai_gen_response_enabled),
+			    smart_knowledge_base_suggestions_enabled = COALESCE($3, smart_knowledge_base_suggestions_enabled),
+			    updated_on = NOW(),
+			    updated_by = $4
+			WHERE id = $1`,
+			*accountID, req.HasAgent, req.HasKbReferences, updatedBy,
+		)
+		if err != nil {
+			return domain.ProjectUpdateResult{}, fmt.Errorf("update project: update linked account: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.ProjectUpdateResult{}, fmt.Errorf("update project: linked account %s disappeared under transaction", *accountID)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ProjectUpdateResult{}, fmt.Errorf("update project: commit tx: %w", err)
+	}
+
+	// ClosureState/SuspensionProcessState stay nil -- see this method's own
+	// doc comment (ClosureState) and pgProjectUpdateService.UpdateProject's
+	// (SuspensionProcessState is rejected before this method is ever called).
+	return res, nil
 }
 
 // projectTypeNameToSubscriptionType converts a project_type.name label (e.g.

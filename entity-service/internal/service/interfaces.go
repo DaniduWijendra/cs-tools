@@ -380,12 +380,19 @@ type ProjectService interface {
 }
 
 // ProjectUpdateService defines the write operations available on a project.
-// All methods require the ServiceNow data source; there is no Postgres fallback.
+// Implemented by snProjectUpdateService (DataSourceServiceNow, the full
+// domain.ProjectUpdateRequest contract) and pgProjectUpdateService
+// (DataSourcePostgres/DataSourcePostgresServiceNowDualWrite -- only the
+// fields with a real Postgres column; see that type's own doc comment for
+// exactly which, and why the rest are rejected rather than silently
+// dropped).
 type ProjectUpdateService interface {
 	// UpdateProject applies the given field changes to the project identified by
-	// id. A ValidationError is returned for a malformed UUID or an empty request;
-	// a NotFoundError if no project matches; an UnauthorizedError if the caller
-	// lacks the required SN role.
+	// id. A ValidationError is returned for a malformed UUID, an empty request,
+	// or (Postgres data sources only) a field with no Postgres column; a
+	// NotFoundError if no project matches; an UnauthorizedError if the caller
+	// lacks the required SN role (ServiceNow data source) or has no resolvable
+	// identity (Postgres data sources).
 	UpdateProject(ctx context.Context, id string, req domain.ProjectUpdateRequest) (domain.ProjectUpdateResponse, error)
 }
 
