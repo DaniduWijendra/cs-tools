@@ -113,3 +113,16 @@ func daysAgo(n int) time.Time {
 func randRecentTime(minDaysAgo, maxDaysAgo int) time.Time {
 	return daysAgo(randRange(minDaysAgo, maxDaysAgo))
 }
+
+// notAfterNow clamps t to now when a randomized offset from an already-past
+// timestamp (e.g. createdOn + a random hour delta) pushes it into the
+// future. The schema doesn't constrain these columns, and dashboard
+// consumers format/sort them directly, so a future-dated updated_on (or
+// anything derived from it, like a CLOSED case's closed_on/resolved_on)
+// would distort relative-time display and recency ordering.
+func notAfterNow(t time.Time) time.Time {
+	if now := time.Now(); t.After(now) {
+		return now
+	}
+	return t
+}

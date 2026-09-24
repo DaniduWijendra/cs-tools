@@ -108,7 +108,7 @@ func genWorkItems(
 			number := fmt.Sprintf("%s-%04d", spec.prefix, 1000+counter)
 			id := newUUID()
 			createdOn := randRecentTime(1, 120)
-			updatedOn := createdOn.Add(time.Duration(randRange(1, 72)) * time.Hour)
+			updatedOn := notAfterNow(createdOn.Add(time.Duration(randRange(1, 72)) * time.Hour))
 			subject := subjectForType(spec.wtype)
 			description := descriptionForType(spec.wtype)
 
@@ -324,7 +324,7 @@ func genComments(ctx context.Context, tx pgx.Tx, workItems []genWorkItem, intern
 		cursor := wi.createdOn
 		n := randRange(1, 3)
 		for i := 0; i < n; i++ {
-			cursor = cursor.Add(time.Duration(randRange(1, 48)) * time.Hour)
+			cursor = notAfterNow(cursor.Add(time.Duration(randRange(1, 48)) * time.Hour))
 			authorEmail := "seed-generator"
 			switch {
 			case wi.assignedToID != nil && randBool(0.6):
@@ -363,7 +363,7 @@ func genTimeCards(ctx context.Context, tx pgx.Tx, workItems []genWorkItem, proje
 			user := pick(internalUsers)
 			state := pick(states)
 			id := newUUID()
-			createdOn := wi.createdOn.Add(time.Duration(randRange(1, 72)) * time.Hour)
+			createdOn := notAfterNow(wi.createdOn.Add(time.Duration(randRange(1, 72)) * time.Hour))
 			var approvedBy *string
 			if state == "APPROVED" || state == "PROCESSED" {
 				ap := pick(internalUsers).id
