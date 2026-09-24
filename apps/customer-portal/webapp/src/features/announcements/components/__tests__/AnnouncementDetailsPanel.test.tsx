@@ -129,6 +129,27 @@ describe("AnnouncementDetailsPanel", () => {
     expect(screen.queryByText("Security")).not.toBeInTheDocument();
   });
 
+  it("shows a Security chip via the Security Announcement tag when announcementType predates the column (historical data)", () => {
+    render(
+      <AnnouncementDetailsPanel
+        data={{
+          title: "Critical vulnerability notice",
+          number: "ANN-090",
+          description: "<p>Details</p>",
+          status: { id: "1", label: "Open" },
+          createdOn: "2023-06-01T10:00:00Z",
+          tags: [{ id: "tag-1", label: "Security Announcement" }],
+        } as never}
+        isLoading={false}
+        isError={false}
+        caseId="case-1"
+        projectId="proj-1"
+        onBack={() => {}}
+      />,
+    );
+    expect(screen.getByText("Security")).toBeInTheDocument();
+  });
+
   it("renders back button while loading", () => {
     render(
       <AnnouncementDetailsPanel

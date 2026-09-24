@@ -116,11 +116,18 @@ export default function AnnouncementDetailsPanel({
   const statusColorPath = getStatusColor(statusLabel ?? undefined);
   const resolvedStatusColor = resolveColorFromTheme(statusColorPath, theme);
   const updatedOnLabel = formatAnnouncementDateDisplay(data.updatedOn);
-  // Reads the case's own announcement_type classification directly (the
-  // real ServiceNow field migrated into Postgres) rather than scanning tags
-  // for the "Security Announcement" label -- the source of truth for
-  // general vs. security is this column, not the mandatory tag.
-  const isSecurityAnnouncement = data.announcementType === "SECURITY";
+  // announcementType is the source of truth going forward, but a case
+  // created before that column existed always reads back "GENERAL" (its
+  // default -- see migration 000084_announcement_add_type, which added no
+  // backfill for pre-existing rows) even though it still carries the
+  // mandatory "Security Announcement" tag. Checking both keeps the chip
+  // showing for that historical data without giving the tag priority over
+  // the real column for anything created after this switch.
+  const isSecurityAnnouncement =
+    data.announcementType === "SECURITY" ||
+    (data.tags ?? []).some(
+      (t) => t.label.toLowerCase() === "security announcement",
+    );
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
