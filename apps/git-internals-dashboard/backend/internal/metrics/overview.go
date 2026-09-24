@@ -443,9 +443,10 @@ func BuildOverview(ctx context.Context, pool *pgxpool.Pool, cfg *config.AppConfi
 	sort.SliceStable(priorities, func(i, j int) bool { return rankOf(priorities[i].Code) < rankOf(priorities[j].Code) })
 
 	// ── 6. Matrix (honors repo + abtTeam; every tier, independent cells) ────
-	// The four cells are mutually exclusive and sum to each row's total: a
-	// CS-side issue always lands in Cs, never also in Violated/AtRisk/
-	// OnTrack, regardless of its own SLA state.
+	// The four cells are mutually exclusive: a CS-side issue always lands in
+	// Cs, never also in Violated/AtRisk/OnTrack, regardless of its own SLA
+	// state. Non-terminal issues in any other SLA state, including NO_SLA,
+	// count toward the row total but land in no cell.
 	matrixRows := make([]MatrixRow, 0, len(priorities))
 	for _, p := range priorities {
 		var violated, atRisk, onTrack, cs, total int

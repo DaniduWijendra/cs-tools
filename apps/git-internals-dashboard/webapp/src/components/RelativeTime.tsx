@@ -31,6 +31,11 @@ let intervalId: ReturnType<typeof setInterval> | null = null;
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   if (intervalId === null) {
+    const fresh = Date.now();
+    if (fresh - now >= TICK_MS) {
+      now = fresh;
+      listener();
+    }
     intervalId = setInterval(() => {
       now = Date.now();
       listeners.forEach((l) => l());

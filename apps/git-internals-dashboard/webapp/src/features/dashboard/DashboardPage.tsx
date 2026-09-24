@@ -44,18 +44,18 @@ import { acrylicSurfaceSx } from "@lib/surfaces";
 // at_risk become an slaState tick, cs/product_side become one status= tick
 // per matching taxonomy status (falling back to `bucket` when taxonomy
 // hasn't loaded yet), untracked becomes the priority sentinel, and tracked
-// (with or without a specific priority override) becomes one priority= tick
-// per matching canonical priority tier — every tier when there's no
-// override, since "has a priority" and "priority is one of the configured
-// tiers" are the same set of issues. A bucket with no such exact equivalent
-// (on_track is the only one left) is carried across as `bucket`, which
-// /issues then shows as a removable scope chip.
+// with a specific priority override becomes a single priority= tick. An
+// unqualified tracked drill is carried across as `bucket=tracked` instead of
+// enumerating the configured priority tiers, since ingest accepts priority
+// labels outside those tiers and "has a priority" must match the dashboard's
+// own tracked count. A bucket with no exact dropdown equivalent (on_track,
+// tracked) is carried across as `bucket`, which /issues then shows as a
+// removable scope chip.
 function buildDrillUrl(
   bucket: string,
   opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null },
   currentSearch: string,
   taxonomy: Taxonomy | undefined,
-  priorityKeys: string[],
 ): string {
   const base = new URLSearchParams(currentSearch);
   const next = new URLSearchParams();
@@ -72,7 +72,7 @@ function buildDrillUrl(
     if (opts.priority) {
       next.set("priority", opts.priority);
     } else {
-      for (const key of priorityKeys) next.append("priority", key);
+      next.set("bucket", "tracked");
     }
     return `/issues?${next.toString()}`;
   }
@@ -139,8 +139,7 @@ export default function DashboardPage() {
     bucket: string,
     opts: { repo?: string | null; priority?: string | null; abtTeam?: string | null; status?: string | null } = {},
   ) => {
-    const priorityKeys = overview?.priorities.map((p) => p.key) ?? [];
-    void navigate(buildDrillUrl(bucket, opts, params.toString(), taxonomy, priorityKeys));
+    void navigate(buildDrillUrl(bucket, opts, params.toString(), taxonomy));
   };
 
   if (isError && !overview) {

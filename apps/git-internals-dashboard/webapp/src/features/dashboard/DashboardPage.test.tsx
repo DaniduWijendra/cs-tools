@@ -187,7 +187,7 @@ describe("DashboardPage", () => {
     expect(router.state.location.search).toContain("slaState=VIOLATED");
   });
 
-  it("ticks every configured priority tier instead of a bucket=tracked scope chip when drilling 'Open tracked'", async () => {
+  it("carries bucket=tracked with no priority ticks when drilling 'Open tracked'", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/metrics/overview")) return Promise.resolve(jsonResponse(OVERVIEW));
@@ -206,7 +206,7 @@ describe("DashboardPage", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/issues"));
     const search = new URLSearchParams(router.state.location.search);
-    expect(search.getAll("priority")).toEqual(["Critical(P1)", "High(P2)", "Medium(P3)"]);
-    expect(search.get("bucket")).toBeNull();
+    expect(search.getAll("priority")).toEqual([]);
+    expect(search.get("bucket")).toBe("tracked");
   });
 });

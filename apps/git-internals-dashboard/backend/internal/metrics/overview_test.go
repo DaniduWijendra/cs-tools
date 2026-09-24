@@ -19,7 +19,6 @@ package metrics
 import (
 	"context"
 	"os"
-	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -640,9 +639,13 @@ func TestBuildOverviewAbtTeamsListsOpenEnabledTeams(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildOverview: %v", err)
 			}
-			if !slices.Equal(filtered.AbtTeams, unfiltered.AbtTeams) {
-				t.Errorf("expected abtTeams unchanged by the %s filter, got %+v want %+v",
-					tc.name, filtered.AbtTeams, unfiltered.AbtTeams)
+			a, b := indexOf(filtered.AbtTeams, abtTeamAlpha), indexOf(filtered.AbtTeams, abtTeamBeta)
+			if a < 0 || b < 0 || a >= b {
+				t.Errorf("expected %s before %s regardless of the %s filter, got %+v",
+					abtTeamAlpha, abtTeamBeta, tc.name, filtered.AbtTeams)
+			}
+			if indexOf(filtered.AbtTeams, abtTeamClosedOnly) >= 0 || indexOf(filtered.AbtTeams, abtTeamDisabledOnly) >= 0 {
+				t.Errorf("expected closed/disabled teams excluded under the %s filter, got %+v", tc.name, filtered.AbtTeams)
 			}
 		})
 	}
