@@ -175,7 +175,7 @@ type SavedFilterViewList struct {
 	Views []SavedFilterView `json:"views"`
 }
 
-// SaveSavedFilterViewRequest is PUT /users/me/saved-filter-views. Same-name
+// SaveSavedFilterViewRequest is PATCH /users/me/saved-filter-views. Same-name
 // overwrite is case-insensitive; a new name is inserted at the front.
 type SaveSavedFilterViewRequest struct {
 	ListKey SavedFilterListKey `json:"listKey"`

@@ -101,13 +101,45 @@ func TestSavedFilterViewHandler_Save_Success(t *testing.T) {
 		saveResp: domain.SavedFilterViewList{Views: []domain.SavedFilterView{{Name: "Mine", Qs: "q=1"}}},
 	})
 	body, _ := json.Marshal(domain.SaveSavedFilterViewRequest{ListKey: domain.SavedFilterListKeyCases, Name: "Mine", Qs: "q=1"})
-	req := httptest.NewRequest(http.MethodPut, "/users/me/saved-filter-views", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	h.Save(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// savedFilterViewMux uses the same method patterns as routes.go when
+// savedFilterViewHandler is registered. Go's ServeMux then answers PUT with
+// 405. The published contract does not require 404 for that method.
+func savedFilterViewMux(h *SavedFilterViewHandler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/me/saved-filter-views", h.List)
+	mux.HandleFunc("PATCH /users/me/saved-filter-views", h.Save)
+	mux.HandleFunc("DELETE /users/me/saved-filter-views", h.Delete)
+	mux.HandleFunc("POST /users/me/saved-filter-views/reorder", h.Reorder)
+	return mux
+}
+
+func TestSavedFilterViewRoutes_PatchReachesSaveAndPutIsMethodNotAllowed(t *testing.T) {
+	h := NewSavedFilterViewHandler(&stubSavedFilterViewService{
+		saveResp: domain.SavedFilterViewList{Views: []domain.SavedFilterView{{Name: "Mine", Qs: "q=1"}}},
+	})
+	mux := savedFilterViewMux(h)
+	body, _ := json.Marshal(domain.SaveSavedFilterViewRequest{ListKey: domain.SavedFilterListKeyCases, Name: "Mine", Qs: "q=1"})
+
+	patchRec := httptest.NewRecorder()
+	mux.ServeHTTP(patchRec, httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", bytes.NewReader(body)))
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d, want 200: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	putRec := httptest.NewRecorder()
+	mux.ServeHTTP(putRec, httptest.NewRequest(http.MethodPut, "/users/me/saved-filter-views", bytes.NewReader(body)))
+	if putRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT = %d, want 405", putRec.Code)
 	}
 }
 

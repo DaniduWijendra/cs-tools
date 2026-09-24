@@ -86,6 +86,10 @@ func TestPostgresOnlyRoutesAreUnregisteredWithoutADatabase(t *testing.T) {
 		{"update scheduled task attempt", http.MethodPatch, "/scheduled-tasks/attempts/some-id", `{}`},
 		{"list scheduled task runs", http.MethodGet, "/scheduled-tasks/attempts", ""},
 		{"delete scheduled task runs", http.MethodDelete, "/scheduled-tasks/attempts?resolvedBefore=2026-01-01T00:00:00Z", ""},
+		{"list saved filter views", http.MethodGet, "/users/me/saved-filter-views?listKey=cases", ""},
+		{"save saved filter views", http.MethodPatch, "/users/me/saved-filter-views", `{}`},
+		{"unsupported put saved filter views", http.MethodPut, "/users/me/saved-filter-views", `{}`},
+		{"delete saved filter views", http.MethodDelete, "/users/me/saved-filter-views?listKey=cases&name=Mine", ""},
 	}
 
 	for _, tt := range tests {

@@ -2005,20 +2005,34 @@ validator (`golang-jwt/jwt/v5` + `keyfunc/v3`, same versions), against
 **Asgardeo** (not Choreo). Two tokens can arrive on the same request:
 - `x-user-id-token`: the end user's ID token. Checked for signature, issuer,
   expiry, an `aud` among `AUTH_USER_TOKEN_AUDIENCES`, and an `email` claim.
-- `x-jwt-assertion`: the calling application's client-credentials access
-  token (every backend, including csm-integration-service, sends one -- it's
-  the only token a pure machine-to-machine caller ever sends). Checked for
-  signature/issuer/expiry; its `client_id` (else `azp`) claim is the client id.
-  No audience check -- the client id is what gets authorized.
+- `x-jwt-assertion`: the calling application's client-credentials assertion
+  (every backend, including csm-integration-service, sends one -- it's the
+  only token a pure machine-to-machine caller ever sends). **Decoded only,
+  never signature/issuer/expiry-verified** (`Validator.ExtractClientID`) --
+  its `client_id` (else `azp`) claim is trusted at face value as the client
+  id. This mirrors `apps/csm-portal/backend`'s own `x-jwt-assertion` handling,
+  which runs with signature verification off in every Choreo deployment, not
+  just locally: this token is minted by the gateway in front of the service
+  after it already authenticated the caller by its own means, over a path
+  this service already trusts. Re-verifying it against Asgardeo's JWKS was
+  tried first and caused a real outage -- a JWKS refresh rate-limit/lookup
+  failure rejected every internal caller -- and added no real security either,
+  since the client id is only ever checked against the deployment-controlled
+  `AUTH_INTERNAL_CLIENT_IDS` allow-list, never used as a capability grant
+  derived from an unproven claim. No audience check either way.
 
 **Always on -- there is no config flag to disable it.** `AUTH_ISSUER`/
 `AUTH_JWKS_URL`/`AUTH_USER_TOKEN_AUDIENCES` are required (`config.Validate`
-rejects startup without them). Only asymmetric algorithms are accepted (an
+rejects startup without them) and govern `x-user-id-token` validation; they
+play no part in reading `x-jwt-assertion`, which is never checked against
+them. Only asymmetric algorithms are accepted for `x-user-id-token` (an
 HS256 token "signed" with the public key is rejected -- there is a test). A
-token that is **present but invalid is always a 401 on every route**, never
-downgraded to "no token": that would turn a forged user token into an
-anonymous request. A request with no tokens at all passes through the
-middleware; whether that's acceptable is decided per endpoint (see below).
+`x-user-id-token` that is **present but invalid is always a 401 on every
+route**, never downgraded to "no token": that would turn a forged user token
+into an anonymous request. `x-jwt-assertion` is rejected only when it can't
+even be decoded, or carries neither a `client_id` nor an `azp` claim. A
+request with no tokens at all passes through the middleware; whether that's
+acceptable is decided per endpoint (see below).
 
 Two things learned the hard way, both mirrored from/corrected against the CSM
 backend: Asgardeo publishes JWKS `x5c` certs Go 1.23+ refuses to parse, so the

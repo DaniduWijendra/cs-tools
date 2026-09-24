@@ -45,7 +45,8 @@ type Identity struct {
 	UserEmail   string
 	UserSubject string
 	UserID      string
-	// ClientID comes from a validated x-jwt-assertion token; empty when the
+	// ClientID comes from a decoded (not signature-verified -- see
+	// Validator.ExtractClientID) x-jwt-assertion token; empty when the
 	// request carried none.
 	ClientID string
 }
@@ -112,11 +113,14 @@ func identityHolderFromContext(ctx context.Context) *IdentityHolder {
 // fallback (attaches an unvalidated Identity and never rejects); it should
 // only ever happen if a caller wires this middleware without one, a bug.
 //
-// A token that is PRESENT but invalid is always rejected with 401 -- never
-// downgraded to "no token", which would turn a forged user token into an
-// anonymous (and, for a system client, less restricted) request. A request
+// A user token that is PRESENT but invalid is always rejected with 401 --
+// never downgraded to "no token", which would turn a forged user token into
+// an anonymous (and, for a system client, less restricted) request. A request
 // with no tokens at all passes through: whether that is acceptable is decided
-// per endpoint by the service that scopes by caller.
+// per endpoint by the service that scopes by caller. x-jwt-assertion is only
+// decoded, never signature-verified (see ExtractClientID's own doc comment),
+// so it is rejected only when it can't even be decoded, or carries neither a
+// client_id nor an azp claim.
 func Middleware(v *Validator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +132,7 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 			id := Identity{Validated: true}
 
 			if raw := strings.TrimSpace(r.Header.Get(clientAssertionHeader)); raw != "" {
-				cc, err := v.ValidateClientToken(raw)
+				cc, err := v.ExtractClientID(raw)
 				if err != nil {
 					reject(w, r, clientAssertionHeader, err)
 					return
@@ -144,11 +148,12 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 				id.UserEmail, id.UserSubject, id.UserID = uc.Email, uc.Subject, uc.UserID
 			}
 
-			// Only reached once every token presented actually validated --
+			// Only reached once every token presented actually parsed --
 			// never on a reject() path above, so an access log reading this
 			// holder never attributes a request to a caller id parsed from a
-			// token that failed validation (e.g. a bad signature, where any
-			// claim value is attacker-controlled and unproven).
+			// token that failed even to decode. UserID here is still backed
+			// by a cryptographically verified x-user-id-token; ClientID is
+			// trusted at face value, by design -- see ExtractClientID.
 			if h := identityHolderFromContext(r.Context()); h != nil {
 				h.UserID, h.ClientID = id.UserID, id.ClientID
 			}

@@ -120,27 +120,40 @@ func TestValidateUserToken_RejectsAlgorithmConfusion(t *testing.T) {
 	_ = key
 }
 
-func TestValidateClientToken(t *testing.T) {
+func TestExtractClientID(t *testing.T) {
 	key, other := newKey(t), newKey(t)
 	v := staticValidator(key)
 
-	cc, err := v.ValidateClientToken(sign(t, key, clientClaims(nil)))
+	cc, err := v.ExtractClientID(sign(t, key, clientClaims(nil)))
 	if err != nil || cc.ClientID != testM2M {
 		t.Fatalf("client_id claim: %+v, %v", cc, err)
 	}
-	cc, err = v.ValidateClientToken(sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id"); c["azp"] = "from-azp" })))
+	cc, err = v.ExtractClientID(sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id"); c["azp"] = "from-azp" })))
 	if err != nil || cc.ClientID != "from-azp" {
 		t.Fatalf("azp fallback: %+v, %v", cc, err)
 	}
 
-	bad := map[string]string{
-		"no client id":        sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id") })),
+	// Deliberately unverified -- see ExtractClientID's own doc comment for
+	// why: the client id is still read out of a wrong-issuer, expired, or
+	// wrong-key-signed token, since none of that is checked.
+	unverified := map[string]string{
 		"wrong issuer":        sign(t, key, clientClaims(func(c jwt.MapClaims) { c["iss"] = "https://evil.example/token" })),
 		"expired":             sign(t, key, clientClaims(func(c jwt.MapClaims) { c["exp"] = time.Now().Add(-time.Hour).Unix() })),
+		"no exp claim at all": sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "exp") })),
 		"signed by other key": sign(t, other, clientClaims(nil)),
 	}
+	for name, tok := range unverified {
+		if cc, err := v.ExtractClientID(tok); err != nil || cc.ClientID != testM2M {
+			t.Errorf("%s: expected the client id to still be extracted, got %+v, %v", name, cc, err)
+		}
+	}
+
+	bad := map[string]string{
+		"no client id, no azp": sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id") })),
+		"not a jwt":            "garbage",
+	}
 	for name, tok := range bad {
-		if _, err := v.ValidateClientToken(tok); err == nil {
+		if _, err := v.ExtractClientID(tok); err == nil {
 			t.Errorf("%s: token was accepted", name)
 		}
 	}
@@ -203,6 +216,17 @@ func TestMiddleware_Enabled(t *testing.T) {
 		_, id, _ := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion})
 		if !id.Validated || id.ClientID != testM2M || id.UserEmail != "" {
 			t.Fatalf("got %+v", id)
+		}
+	})
+	t.Run("an expired or wrong-key-signed client assertion still resolves the client id", func(t *testing.T) {
+		other := newKey(t)
+		expired := sign(t, key, clientClaims(func(c jwt.MapClaims) { c["exp"] = time.Now().Add(-time.Hour).Unix() }))
+		wrongKey := sign(t, other, clientClaims(nil))
+		for _, tok := range []string{expired, wrongKey} {
+			code, id, _ := run(t, v, map[string]string{"x-jwt-assertion": tok})
+			if code != http.StatusOK || id.ClientID != testM2M {
+				t.Fatalf("x-jwt-assertion is decoded, not verified -- got %d %+v", code, id)
+			}
 		}
 	})
 	t.Run("on behalf of a user: client assertion + user token", func(t *testing.T) {

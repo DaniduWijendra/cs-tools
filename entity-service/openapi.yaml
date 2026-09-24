@@ -1520,7 +1520,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-    put:
+    patch:
       summary: Save or overwrite a saved filter view.
       description: >
         Inserts a new named view at the front of the list, or overwrites an
