@@ -38,9 +38,15 @@ func registerPLGRoutes(mux *http.ServeMux, db *pgxpool.Pool) {
 
 	// The shared "user" table. Search only: PLG reads the CS team, it does not
 	// administer it, so there is no insert, update or delete path anywhere in
-	// the slice. Every query is restricted to active INTERNAL staff — see
-	// plg_users_repo.go, where the restriction is prepended rather than left to
+	// the slice. Every query is restricted to INTERNAL staff — see
+	// plg_users_repo.go, where that condition is prepended rather than left to
 	// the caller.
+	//
+	// Being ACTIVE is a separate filter and the caller chooses it: an owner
+	// picker asks for active engineers only, while an attribution lookup does
+	// not, because a note written by someone who has since left must still
+	// render their name. The BFF's identity middleware — the gate on every PLG
+	// route — asks for both.
 	userRepo := repository.NewPlgUserRepository(db)
 	usersHandler := handler.NewPlgUsersHandler(service.NewPlgUserService(userRepo))
 
