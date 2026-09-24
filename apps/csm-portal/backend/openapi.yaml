@@ -10504,6 +10504,17 @@ components:
           type: string
           nullable: true
           description: References an existing team by ID. Omit to leave the account's SRE team unchanged.
+      anyOf:
+        - required:
+            - creTeamId
+          properties:
+            creTeamId:
+              type: string
+        - required:
+            - sreTeamId
+          properties:
+            sreTeamId:
+              type: string
 
     AccountSearchResponse:
       type: object

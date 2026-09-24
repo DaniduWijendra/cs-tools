@@ -10142,6 +10142,17 @@ components:
           type: string
           format: uuid
           description: References an existing team. Omit to leave the account's SRE team unchanged.
+      anyOf:
+        - required:
+            - creTeamId
+          properties:
+            creTeamId:
+              type: string
+        - required:
+            - sreTeamId
+          properties:
+            sreTeamId:
+              type: string
 
     UpdateCaseRequest:
       type: object

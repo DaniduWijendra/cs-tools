@@ -25,10 +25,11 @@ import type { Account } from "@features/csm-accounts/types/csmAccounts";
 
 /**
  * `PATCH /accounts/{id}` request body. Both fields are independently
- * optional: omit a field entirely to leave that team unchanged, or send
- * `null` to clear it. Never invent a combined-required shape here — the two
- * teams are unrelated account attributes and must stay independently
- * editable.
+ * optional, but at least one must be provided. Omitting a field (or sending
+ * `null`) leaves that team's assignment unchanged — the backend has no way
+ * to clear a team back to "no team" yet, so a caller must never send `null`
+ * expecting it to clear anything. The two teams are unrelated account
+ * attributes and must stay independently editable.
  */
 export interface AccountTeamsPatch {
   creTeamId?: string | null;

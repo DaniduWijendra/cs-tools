@@ -24,7 +24,7 @@ import type { Account } from "@features/csm-accounts/types/csmAccounts";
 
 const useGetAccountMock = vi.fn();
 const patchMutateMock = vi.fn();
-const showErrorMock = vi.fn();
+const patchResetMock = vi.fn();
 const editAccountTeamsDialogMock = vi.fn();
 const useGetUsersMeMock = vi.fn(() => ({ data: { roles: ["admin"] } }));
 let patchIsPending = false;
@@ -52,10 +52,6 @@ vi.mock("@api/backend/client", () => ({
   },
 }));
 
-vi.mock("@context/error-banner/ErrorBannerContext", () => ({
-  useErrorBanner: () => ({ showError: showErrorMock }),
-}));
-
 vi.mock("@features/csm-accounts/api/useGetAccount", () => ({
   useGetAccount: () => useGetAccountMock(),
 }));
@@ -70,17 +66,20 @@ vi.mock("@features/csm-accounts/api/useAccountProjects", () => ({
 vi.mock("@features/csm-accounts/api/usePatchAccountTeams", () => ({
   usePatchAccountTeams: () => ({
     mutate: patchMutateMock,
+    reset: patchResetMock,
     isPending: patchIsPending,
     isError: patchIsError,
     error: patchError,
   }),
 }));
 // Exercised in isolation by its own test file; here we only assert this page
-// opens it and wires the expected props/callbacks.
+// opens it and wires the expected props/callbacks. Renders a real, findable
+// element (rather than null) so a test can assert the dialog actually
+// unmounts on close/success, not just that a callback fired.
 vi.mock("@features/csm-accounts/components/EditAccountTeamsDialog", () => ({
   default: (props: unknown) => {
     editAccountTeamsDialogMock(props);
-    return null;
+    return <div data-testid="edit-account-teams-dialog" />;
   },
 }));
 // Defaults to an admin caller so existing tests (written before the admin
@@ -92,6 +91,7 @@ vi.mock("@features/settings/api/useGetUsersMe", () => ({
 
 // Imported after the mocks above so the module picks them up.
 import CsmAccountDetailPage from "@features/csm-accounts/pages/CsmAccountDetailPage";
+import { BackendApiError } from "@api/backend/client";
 
 const BASE_ACCOUNT: Account = {
   id: "acct-1",
@@ -142,7 +142,7 @@ function renderPage(ui: ReactElement, extraRoutes: string[] = []): ReturnType<ty
 describe("CsmAccountDetailPage", () => {
   beforeEach(() => {
     patchMutateMock.mockReset();
-    showErrorMock.mockReset();
+    patchResetMock.mockReset();
     editAccountTeamsDialogMock.mockReset();
     useGetUsersMeMock.mockReset();
     useGetUsersMeMock.mockReturnValue({ data: { roles: ["admin"] } });
@@ -233,25 +233,45 @@ describe("CsmAccountDetailPage", () => {
 
     expect(patchMutateMock).toHaveBeenCalledWith(
       { creTeamId: "team-cre-2" },
-      expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
-    // The dialog's onSuccess callback set `editTeamsOpen` back to false, so it
-    // is no longer mounted — the mock component doesn't receive another call.
-    editAccountTeamsDialogMock.mockClear();
-    expect(editAccountTeamsDialogMock).not.toHaveBeenCalled();
+    // The dialog's onSuccess callback set `editTeamsOpen` back to false, so
+    // it actually unmounts — assert the rendered element is gone, not just
+    // that a call count reset to zero.
+    expect(screen.queryByTestId("edit-account-teams-dialog")).not.toBeInTheDocument();
   });
 
-  it("shows an error banner message when the save fails", () => {
+  it("shows the upstream message inline for a client (<500) error", () => {
     mockAccount({ data: BASE_ACCOUNT });
-    patchMutateMock.mockImplementation((_patch, opts) => {
-      opts?.onError?.(new Error("Team not found"));
-    });
+    patchIsError = true;
+    patchError = new BackendApiError(400, "Team not found");
     renderPage(<CsmAccountDetailPage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
-    const { onSave } = editAccountTeamsDialogMock.mock.calls[0][0];
-    onSave({ creTeamId: "team-cre-2" });
+    expect(editAccountTeamsDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ saveError: "Team not found" }),
+    );
+  });
 
-    expect(showErrorMock).toHaveBeenCalled();
+  it("shows a generic fallback inline for a server (5xx) error, not the raw message", () => {
+    mockAccount({ data: BASE_ACCOUNT });
+    patchIsError = true;
+    patchError = new BackendApiError(500, "internal: nil pointer at x.go:42");
+    renderPage(<CsmAccountDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
+    expect(editAccountTeamsDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        saveError: "Could not update the account's teams. Please try again.",
+      }),
+    );
+  });
+
+  it("resets the mutation before reopening, so a stale error doesn't reappear", () => {
+    mockAccount({ data: BASE_ACCOUNT });
+    renderPage(<CsmAccountDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit CRE / SRE team" }));
+    expect(patchResetMock).toHaveBeenCalled();
   });
 });

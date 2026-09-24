@@ -83,7 +83,7 @@ describe("usePatchAccountTeams", () => {
     expect(patchMock).toHaveBeenCalledWith("/accounts/acct-1", { creTeamId: "team-cre-2" });
   });
 
-  it("sends null to clear a team", async () => {
+  it("forwards an explicit null verbatim (the hook does not interpret the payload)", async () => {
     patchMock.mockResolvedValue({ ...UPDATED_ACCOUNT, creTeam: null });
 
     const { result } = renderHook(() => usePatchAccountTeams("acct-1"), { wrapper });

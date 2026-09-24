@@ -91,7 +91,7 @@ describe("EditAccountTeamsDialog", () => {
     expect(onSave).toHaveBeenCalledWith({ creTeamId: "team-cre-1" });
   });
 
-  it("submits null for a cleared, previously-set team", () => {
+  it("never submits a cleared team as a change (the backend can't clear yet)", () => {
     mockTeams();
     const onSave = vi.fn();
     render(
@@ -106,10 +106,38 @@ describe("EditAccountTeamsDialog", () => {
     // MUI Autocomplete's clear ("x") button, present once a value is set.
     fireEvent.click(screen.getByLabelText("Clear", { exact: false }));
 
+    // Clearing alone is not a submittable change: it would send null, which
+    // the backend treats as "leave unchanged," not "clear" — so Save must
+    // stay disabled rather than let the user believe it saved.
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("drops a cleared field from the payload even when another field changed", async () => {
+    mockTeams();
+    const onSave = vi.fn();
+    render(
+      <EditAccountTeamsDialog
+        currentCreTeam={{ id: "team-cre-1", name: "CRE Alpha" }}
+        isSaving={false}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Clear", { exact: false }));
+
+    const sreInput = screen.getByLabelText("SRE team");
+    fireEvent.focus(sreInput);
+    fireEvent.change(sreInput, { target: { value: "SRE" } });
+    await screen.findByRole("option", { name: "SRE Gamma" });
+    fireEvent.click(screen.getByRole("option", { name: "SRE Gamma" }));
+
     const saveBtn = screen.getByRole("button", { name: "Save" });
     expect(saveBtn).not.toBeDisabled();
     fireEvent.click(saveBtn);
-    expect(onSave).toHaveBeenCalledWith({ creTeamId: null });
+    // creTeamId must be absent, not null — the cleared CRE field never
+    // reaches the payload, even though the SRE change makes Save clickable.
+    expect(onSave).toHaveBeenCalledWith({ sreTeamId: "team-sre-1" });
   });
 
   it("shows the passed-in save error", () => {

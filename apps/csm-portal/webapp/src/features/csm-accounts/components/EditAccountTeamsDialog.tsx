@@ -84,9 +84,13 @@ function useTeamsSearch(
 
 /**
  * Edit an account's CRE team / SRE team assignment independently — either
- * field may be set, cleared, or left alone. Mirrors `EditProblemDialog`'s
- * shape (a plain controlled dialog; the caller owns the mutation and passes
- * `isSaving`/`saveError` down) rather than driving its own PATCH call.
+ * field may be set or left alone. There is currently no way to clear an
+ * assignment back to "no team": the backend treats a nil field as "leave
+ * unchanged," not "clear," so this dialog never submits a cleared selection
+ * (see `usePatchAccountTeams`'s `AccountTeamsPatch` doc comment). Mirrors
+ * `EditProblemDialog`'s shape (a plain controlled dialog; the caller owns
+ * the mutation and passes `isSaving`/`saveError` down) rather than driving
+ * its own PATCH call.
  */
 export default function EditAccountTeamsDialog({
   currentCreTeam,
@@ -103,8 +107,12 @@ export default function EditAccountTeamsDialog({
 
   const patch = useMemo<AccountTeamsPatch>(() => {
     const next: AccountTeamsPatch = {};
-    if (creTeamId !== initialCreTeamId) next.creTeamId = creTeamId || null;
-    if (sreTeamId !== initialSreTeamId) next.sreTeamId = sreTeamId || null;
+    // Only a non-empty, changed selection is submitted — sending an explicit
+    // null does not clear the assignment server-side (it means "leave
+    // unchanged," identically to omitting the field), so a cleared picker
+    // must never reach the payload as a no-op that looks like a real edit.
+    if (creTeamId && creTeamId !== initialCreTeamId) next.creTeamId = creTeamId;
+    if (sreTeamId && sreTeamId !== initialSreTeamId) next.sreTeamId = sreTeamId;
     return next;
   }, [creTeamId, initialCreTeamId, sreTeamId, initialSreTeamId]);
 
@@ -146,8 +154,9 @@ export default function EditAccountTeamsDialog({
           />
 
           <Typography variant="caption" color="text.secondary">
-            Each team can be set or cleared independently — use a field's
-            clear (×) button to unset it.
+            Each team can be set or changed independently. Clearing a field
+            back to "no team" isn't supported yet — an emptied field won't be
+            saved.
           </Typography>
         </Box>
       </DialogContent>
