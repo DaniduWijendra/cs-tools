@@ -2804,3 +2804,76 @@ func TestSNCaseService_AggregateCases_StateGroupByRemapsKeyToDomainEnum(t *testi
 		t.Errorf("groups[2].Key: got %q, want %q (unrecognized label falls back to raw key)", got, want)
 	}
 }
+
+// --- patchCaseFields (DATA_SOURCE=postgres-servicenow-dual-write mirror only) ---
+
+// TestSNCaseService_PatchCaseFields_NoGetCaseByIDOrEventPublish is the
+// regression guard patchCaseFields exists for: unlike UpdateCase, it must
+// never issue a GetCaseByID read (this mode must never read from
+// ServiceNow) and must never publish an event, for any of the three fields
+// it can PATCH. The fake server fails the test outright on any request
+// other than the single expected PATCH, which is what proves no read ever
+// happens — not just that the response looked right.
+func TestSNCaseService_PatchCaseFields_NoGetCaseByIDOrEventPublish(t *testing.T) {
+	state := domain.CaseStateOpen
+	severity := domain.CaseSeverityHigh
+	workState := domain.CaseWorkStateOngoing
+
+	tests := []struct {
+		name        string
+		state       *domain.CaseState
+		severity    *domain.CaseSeverity
+		workState   *domain.CaseWorkState
+		wantPayload map[string]any
+	}{
+		{name: "state", state: &state, wantPayload: map[string]any{"stateKey": float64(snStateIDMap[state])}},
+		{name: "severity", severity: &severity, wantPayload: map[string]any{"severityKey": float64(snSeverityIDMap[severity])}},
+		{name: "workState", workState: &workState, wantPayload: map[string]any{"workStateKey": float64(snWorkStateIDMap[workState])}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			requestCount := 0
+			client := newTestCaseClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				if r.Method != http.MethodPatch {
+					t.Fatalf("patchCaseFields must never issue anything but a single PATCH — got %s %s (a GET here would mean it read from ServiceNow, which this mode must never do)", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{
+					"message": "Case updated successfully.",
+					"case": {"id": "` + testWLCaseSysid + `", "updatedOn": "2026-01-02 10:00:00", "updatedBy": "engineer@example.com"}
+				}`))
+			})
+			publisher := &mockEventPublisher{}
+			svc := NewServiceNowCaseService(client, nil, publisher, nil, nil).(*snCaseService)
+
+			result, err := svc.patchCaseFields(contextWithUserIDToken("token"), testDeploymentUUID, tt.state, tt.severity, tt.workState)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.ID != sysidToUUID(testWLCaseSysid) {
+				t.Errorf("result.ID = %q, want %q", result.ID, sysidToUUID(testWLCaseSysid))
+			}
+			if requestCount != 1 {
+				t.Errorf("expected exactly 1 HTTP request (the PATCH), got %d", requestCount)
+			}
+			for field, want := range tt.wantPayload {
+				got, ok := gotBody[field]
+				if !ok {
+					t.Fatalf("expected payload field %q to be present in %+v", field, gotBody)
+				}
+				if got != want {
+					t.Errorf("payload field %q: got %v, want %v", field, got, want)
+				}
+			}
+			if len(publisher.calls) != 0 {
+				t.Errorf("expected 0 publish calls, got %d", len(publisher.calls))
+			}
+		})
+	}
+}

@@ -1817,15 +1817,29 @@ export default function CsmCaseDetailPage(): JSX.Element {
 
   const onSetFixEta = useCallback(
     (patch: FixEtaSavePayload) => {
+      // Same stale-response guard as onRequestUpdate below: the page stays
+      // mounted when caseId changes and usePatchCsmCase doesn't cancel an
+      // in-flight PATCH, so this case's response can arrive while another
+      // case is on screen. Closing the dialog on a stale success would shut
+      // the *new* case's dialog and throw away whatever was typed into it.
+      const submittedViewToken = caseViewTokenRef.current;
       patchCase.mutate(patch as BeCaseUpdatePayload, {
         onSuccess: () => {
+          if (caseViewTokenRef.current !== submittedViewToken) return;
+          // Close on success, same as every other dialog on this page. The
+          // PATCH lands either way, so leaving it open reads as a failed save
+          // and invites a second submit of an estimate that's already stored.
+          setFixEtaOpen(false);
           setFeedback({
             message: "Fix ETA updated.",
             severity: "success",
             sticky: false,
           });
         },
-        onError: (err) => showError("Could not set the fix ETA.", err),
+        onError: (err) => {
+          if (caseViewTokenRef.current !== submittedViewToken) return;
+          showError("Could not set the fix ETA.", err);
+        },
       });
     },
     [patchCase, showError],
@@ -2217,21 +2231,23 @@ export default function CsmCaseDetailPage(): JSX.Element {
         >
           Back
         </Button>
-        <ExportPdfButton
-          onExport={handleExportCasePdf}
-          disabled={
-            isCommentsLoading ||
-            isActivityLoading ||
-            isAttachmentsLoading ||
-            isFeedbackLoading ||
-            isChatLoading ||
-            isCommentsError ||
-            isActivityError ||
-            isAttachmentsError ||
-            isFeedbackError ||
-            isChatError
-          }
-        />
+        {canWrite && (
+          <ExportPdfButton
+            onExport={handleExportCasePdf}
+            disabled={
+              isCommentsLoading ||
+              isActivityLoading ||
+              isAttachmentsLoading ||
+              isFeedbackLoading ||
+              isChatLoading ||
+              isCommentsError ||
+              isActivityError ||
+              isAttachmentsError ||
+              isFeedbackError ||
+              isChatError
+            }
+          />
+        )}
       </Box>
 
       <Box
@@ -2826,7 +2842,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
                   variant="outlined"
                   startIcon={<LinkIcon size={14} />}
                   onClick={() => setLinkCaseOpen(true)}
-                  disabled={isClosed}
+                  disabled={isClosed || !canWrite}
                 >
                   Link to another case
                 </Button>
@@ -2870,7 +2886,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
             <LinkedServiceRequestsWidget
               caseId={c.id}
               linkedServiceRequests={c.linkedServiceRequests}
-              createDisabled={isClosed}
+              createDisabled={isClosed || !canWrite}
               onCreateServiceRequest={() => {
                 const navState: CreateServiceRequestFromCaseNavState = {
                   projectId: c.projectId,
@@ -2896,7 +2912,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
           <WatchersWidget
             entityKind="case"
             watchers={c.watchers}
-            onReplace={onReplaceWatchers}
+            onReplace={canWrite ? onReplaceWatchers : undefined}
             isSaving={patchCase.isPending}
             onRefresh={() => void refetchCaseDetail()}
             isRefreshing={isFetchingCaseDetail}

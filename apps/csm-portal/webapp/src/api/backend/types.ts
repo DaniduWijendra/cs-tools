@@ -37,6 +37,31 @@ export interface BeErrorPayload {
   message?: string;
 }
 
+/** CSM list that owns a saved filter view. Isolated so views never leak across lists. */
+export type BeSavedFilterListKey = "cases" | "incidents" | "change_requests" | "problems";
+
+/** Named bookmark of a list URL query string. `qs` is opaque. */
+export interface BeSavedFilterView {
+  name: string;
+  qs: string;
+}
+
+export interface BeSavedFilterViewList {
+  views: BeSavedFilterView[];
+}
+
+export interface BeSaveSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  qs: string;
+}
+
+export interface BeReorderSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  direction: "up" | "down";
+}
+
 export interface BeSearchResponseBase {
   total: number;
   limit: number;
@@ -1328,6 +1353,7 @@ export interface BeCaseUpdateRequestTemplates {
 // ---------------------------------------------------------------------------
 
 export type BeConversationState =
+  | "OPEN"
   | "ACTIVE"
   | "RESOLVED"
   | "CONVERTED"

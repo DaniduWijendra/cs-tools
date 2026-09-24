@@ -119,6 +119,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// it authenticates by HMAC rather than by bearer token, and an endpoint
 	// that mutates change requests should appear only when asked for.
 	var githubWebhookHandler *handler.GithubWebhookHandler
+	var githubServiceRequestHandler *handler.GithubServiceRequestHandler
 
 	// Assigned inside the GitHub-integration block below and read further down,
 	// where activeCaseSvc finally exists, to build the native issue-filing
@@ -134,14 +135,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		scheduledTaskRunHandler = handler.NewScheduledTaskRunHandler(service.NewScheduledTaskRunService(repository.NewScheduledTaskRunRepository(db)))
 		if cfg.HasGithubIntegration() {
 			githubLabels, labelErr := service.NewGithubLabels(service.GithubLabelOverrides{
-				ChangeRequest:    cfg.GithubLabelChangeRequest,
-				TypePrefix:       cfg.GithubLabelTypePrefix,
-				ScopePrefix:      cfg.GithubLabelScopePrefix,
-				ScopeToType:      cfg.GithubLabelsScope,
-				Impact:           cfg.GithubLabelsImpact,
-				Likelihood:       cfg.GithubLabelsLikelihood,
-				State:            cfg.GithubLabelsState,
-				StrippedOnCreate: cfg.GithubLabelsStrippedOnCreate,
+				TypeIncident:       cfg.GithubLabelTypeIncident,
+				TypeServiceRequest: cfg.GithubLabelTypeServiceRequest,
+				Class:              cfg.GithubLabelsClass,
+				StatusAssigned:     cfg.GithubLabelStatusAssigned,
 			})
 			if labelErr != nil {
 				// A label override that does not parse would leave the sync
@@ -157,16 +154,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 				Token:   cfg.GithubToken,
 			})
 			githubLabelSet = githubLabels
-			githubWebhookHandler = handler.NewGithubWebhookHandler(
-				service.NewGithubSyncServiceWriting(
-					githubSyncRepo,
-					repository.NewGithubMutationRepository(db),
-					githubClient,
-					cfg.GithubIntegrationLogin,
-					githubLabels,
-				),
-				cfg.GithubWebhookSecret,
+			githubSyncSvc := service.NewGithubSyncServiceWriting(
+				githubSyncRepo,
+				repository.NewGithubMutationRepository(db),
+				githubClient,
+				cfg.GithubIntegrationLogin,
+				githubLabels,
 			)
+			githubWebhookHandler = handler.NewGithubWebhookHandler(githubSyncSvc, cfg.GithubWebhookSecret)
+			githubServiceRequestHandler = handler.NewGithubServiceRequestHandler(githubSyncSvc, cfg.AuthInternalClientIDs)
 		}
 	}
 
@@ -184,10 +180,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// reasoning as sla_clocks/scheduled_task_run/alert_incident_mapping
 	// above, gated the same way: nil db means nil handler means the routes
 	// below are never registered, rather than panicking on a nil pool.
+	// Constructed further below (once activeCaseSvc exists), not here —
+	// AutoPublish needs it for its own in-process case-creation fan-out.
 	var announcementRequestHandler *handler.AnnouncementRequestHandler
-	if db != nil {
-		announcementRequestHandler = handler.NewAnnouncementRequestHandler(service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db)))
-	}
 
 	accountRepo := repository.NewAccountRepository(db)
 	accountHandler := handler.NewAccountHandler(service.NewAccountService(accountRepo))
@@ -224,12 +219,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		onboardingStepHandler = handler.NewOnboardingStepHandler(service.NewOnboardingStepService(repository.NewOnboardingStepRepository(db), accessSvc))
 	}
 
-	// Also constructed for DataSourcePostgresPrimarySNFallback: that mode's
+	// Also constructed for DataSourcePostgresServiceNowDualWrite: that mode's
 	// active services stay Postgres-backed (see the case wiring below), but
 	// its best-effort ServiceNow mirror writes still need this client.
 	// config.Validate requires the same four credentials for both modes.
 	var serviceNowIntegrationServiceClient *integrationservice.Client
-	if cfg.DataSource == config.DataSourceServiceNow || cfg.DataSource == config.DataSourcePostgresPrimarySNFallback {
+	if cfg.DataSource == config.DataSourceServiceNow || cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
 		serviceNowIntegrationServiceClient = integrationservice.New(cfg.ServiceNowIntegrationServiceBaseURL, integrationservice.ClientCredentialsConfig{
 			TokenURL:     cfg.ServiceNowIntegrationServiceTokenURL,
 			ClientID:     cfg.ServiceNowIntegrationServiceClientID,
@@ -296,27 +291,39 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// ReferenceDataRepository's own doc comment.
 	referenceDataRepo := repository.NewReferenceDataRepository(db)
 
-	var projectStatsHandler *handler.ProjectStatsHandler
-	var snProjectStatsSvc service.ProjectStatsService
+	// Every project-stats route is available on both data sources. In
+	// ServiceNow mode one client-backed value satisfies all three interfaces
+	// structurally, so it is built once and shared; in Postgres mode the
+	// narrower metadata and case-stats services are built first and composed
+	// into the full ProjectStatsService, which delegates those two methods to
+	// them rather than reimplementing either.
+	//
+	// ProjectMetadataService and ProjectCaseStatsService remain separate
+	// interfaces, and keep their own handlers, because each was portable to
+	// Postgres before the rest of the bundle was.
+	var (
+		projectMetadataSvc  service.ProjectMetadataService
+		projectCaseStatsSvc service.ProjectCaseStatsService
+		projectStatsSvc     service.ProjectStatsService
+	)
 	if cfg.DataSource == config.DataSourceServiceNow {
-		snProjectStatsSvc = service.NewServiceNowProjectStatsService(serviceNowIntegrationServiceClient)
-		projectStatsHandler = handler.NewProjectStatsHandler(snProjectStatsSvc)
-	}
-
-	// GET /projects/{id}/metadata is wired independently of projectStatsHandler
-	// above: it's the one ProjectStatsService method with a Postgres-backed
-	// implementation, so it's available regardless of cfg.DataSource, while
-	// the remaining project-stats routes stay ServiceNow-only. In ServiceNow
-	// mode, snProjectStatsSvc already satisfies ProjectMetadataService
-	// structurally, so the same client-backed value is reused rather than
-	// built twice.
-	var projectMetadataSvc service.ProjectMetadataService
-	if cfg.DataSource == config.DataSourceServiceNow {
-		projectMetadataSvc = snProjectStatsSvc
+		snProjectStatsSvc := service.NewServiceNowProjectStatsService(serviceNowIntegrationServiceClient)
+		projectMetadataSvc, projectCaseStatsSvc, projectStatsSvc = snProjectStatsSvc, snProjectStatsSvc, snProjectStatsSvc
 	} else {
 		projectMetadataSvc = service.NewProjectMetadataService(referenceDataRepo)
+		// accessSvc is passed in so a by-id stats read is scoped to what the
+		// caller may see. Unlike the scoped list endpoints, which fold the
+		// scope into their WHERE clause, the project id here comes from the
+		// path and needs an explicit check.
+		projectCaseStatsSvc = service.NewProjectCaseStatsService(
+			repository.NewProjectCaseStatsRepository(db), referenceDataRepo, accessSvc)
+		projectStatsSvc = service.NewProjectStatsService(
+			repository.NewProjectStatsRepository(db), referenceDataRepo, accessSvc,
+			projectMetadataSvc, projectCaseStatsSvc)
 	}
 	projectMetadataHandler := handler.NewProjectMetadataHandler(projectMetadataSvc)
+	projectCaseStatsHandler := handler.NewProjectCaseStatsHandler(projectCaseStatsSvc)
+	projectStatsHandler := handler.NewProjectStatsHandler(projectStatsSvc)
 
 	productRepo := repository.NewProductRepository(db)
 	productSvc := service.NewProductService(productRepo)
@@ -359,11 +366,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// NewServiceNowCaseService can also take it — see that constructor's
 	// own doc comment for what it uses it for (a direct, in-process role
 	// lookup backing applyResponseSLAOnComment, not routed through HTTP).
-	// Also constructed for DataSourcePostgresPrimarySNFallback, for the same
+	// Also constructed for DataSourcePostgresServiceNowDualWrite, for the same
 	// reason serviceNowIntegrationServiceClient above is: the case pilot's
 	// SN-mirror snCaseService instance below needs it too.
 	var snUserService service.SNUserService
-	if cfg.DataSource == config.DataSourceServiceNow || cfg.DataSource == config.DataSourcePostgresPrimarySNFallback {
+	if cfg.DataSource == config.DataSourceServiceNow || cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
 		snUserService = service.NewServiceNowUserService(serviceNowIntegrationServiceClient)
 	}
 
@@ -371,7 +378,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	var activeCaseSvc service.CaseService
 	// caseAttachmentOverrideSvc, when non-nil, is the CaseService case
 	// attachment routes (registered further below) use INSTEAD of
-	// activeCaseSvc -- see its assignment in the DataSourcePostgresPrimarySNFallback
+	// activeCaseSvc -- see its assignment in the DataSourcePostgresServiceNowDualWrite
 	// case for why. nil in every other mode: attachments follow activeCaseSvc
 	// exactly as before this override existed.
 	var caseAttachmentOverrideSvc service.CaseService
@@ -379,7 +386,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	case config.DataSourceServiceNow:
 		pgCaseFallbackSvc := service.NewCaseService(caseRepo, userRepo, eventPublisher, accessSvc)
 		activeCaseSvc = service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, pgCaseFallbackSvc, eventPublisher, snUserService, cfg.CustomerRoles)
-	case config.DataSourcePostgresPrimarySNFallback:
+	case config.DataSourcePostgresServiceNowDualWrite:
 		// Pilot: case CREATE, and UPDATE's WorkState field only.
 		//
 		// CREATE is ServiceNow-first and synchronous — see
@@ -398,20 +405,34 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		// deliberately non-functional — this only unblocks the fallback
 		// mode's own path.
 		//
-		// UPDATE mirrors WorkState only, asynchronously, after Postgres —
-		// see caseService.UpdateCase's own doc comment for exactly what
-		// this mirrors and why (State/Severity mirroring needs
-		// snCaseService.UpdateCase refactored into a read-free PATCH-only
-		// helper first; deferred as separate, reviewed work against that
-		// live ServiceNow-mode-serving code).
+		// UPDATE mirrors State/Severity/WorkState, asynchronously, after
+		// Postgres — see caseService.UpdateCase's own doc comment for
+		// exactly what this mirrors and why. State/Severity joined the
+		// mirror later than WorkState did, once patchCaseFields
+		// (sn_case_service.go) existed: a bare PATCH with none of
+		// snCaseService.UpdateCase's own read-before-write behavior (that
+		// method still does a live GetCaseByID before PATCHing State/
+		// Severity, which this mode must never do — patchCaseFields is a
+		// separate, additional method precisely so UpdateCase itself stays
+		// unchanged for live DataSource=servicenow traffic).
+		//
+		// CreateCaseComment mirrors the comment's content, asynchronously,
+		// after Postgres — see that method's own doc comment. It uses
+		// CreateBareCaseComment (sn_case_service.go), not the full
+		// CreateCaseComment, for the same reason patchCaseFields exists:
+		// Postgres already decided the real outcome, so ServiceNow's own
+		// state-transition/event side effects must not re-run.
 		//
 		// snCaseMirrorSvc is a full snCaseService, exactly as constructed
 		// for DataSourceServiceNow above, but it is never made the active
 		// CaseService — reads always stay on Postgres in this mode. It
-		// serves three purposes: CreateCase calls its CreateCase directly and
-		// synchronously; UpdateCase dispatches to its UpdateCase via
-		// caseWriteback, asynchronously; and it is caseAttachmentOverrideSvc
-		// below, for case attachments specifically.
+		// serves four purposes: CreateCase calls its CreateCase directly and
+		// synchronously; UpdateCase dispatches to its patchCaseFields (via
+		// the snFieldPatcher interface) through caseWriteback, asynchronously;
+		// CreateCaseComment dispatches to its CreateBareCaseComment (via the
+		// snCommentMirror interface) through caseWriteback, asynchronously;
+		// and it is caseAttachmentOverrideSvc below, for case attachments
+		// specifically.
 		snCaseMirrorSvc := service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, nil, nil, snUserService, cfg.CustomerRoles)
 		caseWriteback := service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
 		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, caseWriteback, snCaseMirrorSvc)
@@ -441,6 +462,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		activeCaseSvc = service.NewCaseService(caseRepo, userRepo, eventPublisher, accessSvc)
 	}
 	caseHandler := handler.NewCaseHandler(activeCaseSvc)
+	if db != nil {
+		announcementRequestHandler = handler.NewAnnouncementRequestHandler(
+			service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
+		)
+	}
 	// activeAttachmentSvc backs the case-attachment routes registered below
 	// (POST/GET/PATCH/DELETE /attachments...) — see caseAttachmentOverrideSvc's
 	// own doc comment above for when and why it differs from activeCaseSvc.
@@ -492,9 +518,18 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 
 	changeRequestRepo := repository.NewChangeRequestRepository(db)
 	var activeChangeRequestSvc service.ChangeRequestService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeChangeRequestSvc = service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// Pilot extension: change request CREATE only, same ServiceNow-first,
+		// synchronous shape as the case/incident pilots above -- see
+		// changeRequestService.createChangeRequestSNFirst's own doc comment.
+		// Reads stay on Postgres in this mode; snChangeRequestMirrorSvc's
+		// CreateChangeRequest is the only method of it this mode ever calls.
+		snChangeRequestMirrorSvc := service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
+		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNMirror(changeRequestRepo, snChangeRequestMirrorSvc)
+	default:
 		activeChangeRequestSvc = service.NewChangeRequestService(changeRequestRepo)
 	}
 	changeRequestHandler := handler.NewChangeRequestHandler(activeChangeRequestSvc)
@@ -521,10 +556,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	catalogHandler := handler.NewCatalogHandler(activeCatalogSvc)
 
-	var feedbackHandler *handler.FeedbackHandler
+	// Case feedback (CSAT submissions) is a ServiceNow-only entity -- no
+	// feedback table exists anywhere in migrations/ -- but the routes are
+	// registered for both data sources, same as tasks above: with no handler
+	// the mux answers a silent, undocumented 404, while the OpenAPI spec
+	// documents a 503 ErrorResponse for these paths. The Postgres stand-in
+	// supplies that 503.
+	var activeFeedbackSvc service.FeedbackService
 	if cfg.DataSource == config.DataSourceServiceNow {
-		feedbackHandler = handler.NewFeedbackHandler(service.NewServiceNowFeedbackService(serviceNowIntegrationServiceClient))
+		activeFeedbackSvc = service.NewServiceNowFeedbackService(serviceNowIntegrationServiceClient)
+	} else {
+		activeFeedbackSvc = service.NewUnavailableFeedbackService()
 	}
+	feedbackHandler := handler.NewFeedbackHandler(activeFeedbackSvc)
 
 	productVulnerabilityRepo := repository.NewProductVulnerabilityRepository(db)
 	var activeProductVulnerabilitySvc service.ProductVulnerabilityService
@@ -541,18 +585,50 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	// needing work_item.number generation or undiscoverable business rules).
 	incidentRepo := repository.NewIncidentRepository(db)
 	var activeIncidentSvc service.IncidentService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeIncidentSvc = service.NewServiceNowIncidentService(serviceNowIntegrationServiceClient, eventPublisher)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// Pilot extension: incident CREATE only, same ServiceNow-first,
+		// synchronous shape as the case pilot above -- see
+		// incidentService.createIncidentSNFirst's own doc comment. Reads
+		// stay on Postgres in this mode; snIncidentMirrorSvc's CreateIncident
+		// is the only method of it this mode ever calls.
+		//
+		// eventPublisher is passed through here (unlike snCaseMirrorSvc's nil
+		// publisher/access args above, which are inert for case because
+		// caseService's own CreateCase response building doesn't need them).
+		// The mirror is built with publisher=nil deliberately (unlike a
+		// plain DataSourceServiceNow instance) -- its own automatic publish
+		// fires right after the ServiceNow POST returns, before the
+		// Postgres insert this mode's reads depend on has even been
+		// attempted, which is exactly the premature-event bug CodeRabbit
+		// flagged on PR #1922. incident.created is instead published by
+		// createIncidentSNFirst itself, after that Postgres insert
+		// succeeds -- see NewIncidentServiceWithSNMirror's own doc comment
+		// and publishIncidentCreatedEvent's.
+		snIncidentMirrorSvc := service.NewServiceNowIncidentService(serviceNowIntegrationServiceClient, nil)
+		activeIncidentSvc = service.NewIncidentServiceWithSNMirror(incidentRepo, snIncidentMirrorSvc, eventPublisher)
+	default:
 		activeIncidentSvc = service.NewIncidentService(incidentRepo)
 	}
 	incidentHandler := handler.NewIncidentHandler(activeIncidentSvc)
 
 	problemRepo := repository.NewProblemRepository(db)
 	var activeProblemSvc service.ProblemService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeProblemSvc = service.NewServiceNowProblemService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// Pilot extension: problem CREATE only, same ServiceNow-first,
+		// synchronous shape as the case/incident/change-request pilots
+		// above -- see problemService.createProblemSNFirst's own doc
+		// comment. Reads stay on Postgres in this mode;
+		// snProblemMirrorSvc's CreateProblem is the only method of it this
+		// mode ever calls.
+		snProblemMirrorSvc := service.NewServiceNowProblemService(serviceNowIntegrationServiceClient)
+		activeProblemSvc = service.NewProblemServiceWithSNMirror(problemRepo, snProblemMirrorSvc)
+	default:
 		activeProblemSvc = service.NewProblemService(problemRepo)
 	}
 	problemHandler := handler.NewProblemHandler(activeProblemSvc)
@@ -715,6 +791,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	}
 	if githubWebhookHandler != nil {
 		mux.HandleFunc("POST /webhooks/github", githubWebhookHandler.Handle)
+		mux.HandleFunc("POST /github/service-requests", githubServiceRequestHandler.Create)
 	}
 
 	if scheduledTaskRunHandler != nil {
@@ -735,13 +812,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("POST /announcement-requests/{id}/dry-run", announcementRequestHandler.RecordAnnouncementRequestDryRun)
 		mux.HandleFunc("POST /announcement-requests/{id}/submit", announcementRequestHandler.SubmitAnnouncementRequest)
 		mux.HandleFunc("POST /announcement-requests/{id}/approve", announcementRequestHandler.ApproveAnnouncementRequest)
+		mux.HandleFunc("POST /announcement-requests/{id}/schedule", announcementRequestHandler.ScheduleAnnouncementRequest)
+		mux.HandleFunc("POST /announcement-requests/{id}/auto-publish", announcementRequestHandler.AutoPublishAnnouncementRequest)
 		mux.HandleFunc("POST /announcement-requests/{id}/publish", announcementRequestHandler.PublishAnnouncementRequest)
 		mux.HandleFunc("POST /announcement-requests/{id}/updates", announcementRequestHandler.CreateAnnouncementRequestUpdate)
 		mux.HandleFunc("GET /announcement-requests/{id}/updates", announcementRequestHandler.ListAnnouncementRequestUpdates)
+		mux.HandleFunc("POST /announcement-requests/{id}/deliveries", announcementRequestHandler.RecordAnnouncementRequestDeliveries)
+		mux.HandleFunc("GET /announcement-requests/{id}/deliveries", announcementRequestHandler.ListAnnouncementRequestDeliveries)
 	}
 	if savedFilterViewHandler != nil {
 		mux.HandleFunc("GET /users/me/saved-filter-views", savedFilterViewHandler.List)
-		mux.HandleFunc("PUT /users/me/saved-filter-views", savedFilterViewHandler.Save)
+		mux.HandleFunc("PATCH /users/me/saved-filter-views", savedFilterViewHandler.Save)
 		mux.HandleFunc("DELETE /users/me/saved-filter-views", savedFilterViewHandler.Delete)
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
 	}
@@ -783,14 +864,12 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
 	}
 	mux.HandleFunc("GET /projects/{id}/metadata", projectMetadataHandler.GetProjectMetadata)
-	if projectStatsHandler != nil {
-		mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectStats)
-		mux.HandleFunc("GET /projects/{id}/cases/stats", projectStatsHandler.GetProjectCaseStats)
-		mux.HandleFunc("GET /projects/{id}/conversations/stats", projectStatsHandler.GetProjectConversationStats)
-		mux.HandleFunc("GET /projects/{id}/deployments/stats", projectStatsHandler.GetProjectDeploymentStats)
-		mux.HandleFunc("GET /projects/{id}/time-cards/stats", projectStatsHandler.GetProjectTimeCardStats)
-		mux.HandleFunc("GET /projects/{id}/change-requests/stats", projectStatsHandler.GetProjectChangeRequestStats)
-	}
+	mux.HandleFunc("GET /projects/{id}/cases/stats", projectCaseStatsHandler.GetProjectCaseStats)
+	mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectStats)
+	mux.HandleFunc("GET /projects/{id}/conversations/stats", projectStatsHandler.GetProjectConversationStats)
+	mux.HandleFunc("GET /projects/{id}/deployments/stats", projectStatsHandler.GetProjectDeploymentStats)
+	mux.HandleFunc("GET /projects/{id}/time-cards/stats", projectStatsHandler.GetProjectTimeCardStats)
+	mux.HandleFunc("GET /projects/{id}/change-requests/stats", projectStatsHandler.GetProjectChangeRequestStats)
 	if snProductHandler != nil {
 		mux.HandleFunc("POST /products/search", snProductHandler.SearchProducts)
 	} else {
@@ -815,10 +894,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, service.Even
 	mux.HandleFunc("POST /cases", caseHandler.CreateCase)
 	mux.HandleFunc("POST /cases/search", caseHandler.SearchCases)
 	mux.HandleFunc("POST /cases/aggregate", caseHandler.AggregateCases)
-	if feedbackHandler != nil {
-		mux.HandleFunc("POST /cases/feedback/search", feedbackHandler.SearchFeedback)
-		mux.HandleFunc("POST /cases/feedback/aggregate", feedbackHandler.AggregateFeedback)
-	}
+	mux.HandleFunc("POST /cases/feedback/search", feedbackHandler.SearchFeedback)
+	mux.HandleFunc("POST /cases/feedback/aggregate", feedbackHandler.AggregateFeedback)
 	mux.HandleFunc("POST /cases/{id}/comments", caseHandler.CreateCaseComment)
 	mux.HandleFunc("POST /cases/{id}/comments/search", caseHandler.SearchCaseComments)
 	mux.HandleFunc("POST /cases/{id}/activities/search", caseHandler.SearchCaseActivities)

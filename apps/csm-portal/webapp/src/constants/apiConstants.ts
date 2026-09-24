@@ -114,10 +114,12 @@ export const ApiQueryKeys = {
   CSM_ABT_DASHBOARD: "csm-abt-dashboard",
   CSM_CASES: "csm-cases",
   CSM_ANNOUNCEMENTS: "csm-announcements",
+  CSM_ANNOUNCEMENT_REGISTRY: "csm-announcement-registry",
   CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS: "csm-announcement-excluded-project-keys",
   ANNOUNCEMENT_REQUEST_DETAIL: "announcement-request-detail",
   ANNOUNCEMENT_REQUESTS_SEARCH: "announcement-requests-search",
   ANNOUNCEMENT_REQUEST_UPDATES: "announcement-request-updates",
+  ANNOUNCEMENT_REQUEST_DELIVERIES: "announcement-request-deliveries",
   CSM_CASE_COUNTS: "csm-case-counts",
   CSM_DASHBOARD_WIDGET_DATA: "csm-dashboard-widget-data",
   CSM_DASHBOARD_LIST: "csm-dashboard-list",
@@ -154,6 +156,7 @@ export const ApiQueryKeys = {
   CSM_ADMIN_TEAM_DETAIL: "csm-admin-team-detail",
   CSM_ADMIN_PERMISSIONS: "csm-admin-permissions",
   CSM_GITHUB_ISSUE_REPO_OPTIONS: "csm-github-issue-repo-options",
+  SAVED_FILTER_VIEWS: "saved-filter-views",
 } as const;
 
 // Constants for API-related mutation keys.

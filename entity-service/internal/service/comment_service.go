@@ -69,9 +69,13 @@ func commentRowToDomain(row repository.CommentRow) domain.Comment {
 		// foreign key into "user" -- it mirrors ServiceNow's sys_journal_field
 		// author string, which can be an integration/automation account with
 		// no local user row. This data source writes the resolved caller's
-		// email into it (see CreateComment below), so read it back as an
-		// email for symmetry; there is no id to attach.
-		CreatedBy: domain.NewUserReference("", row.CreatedBy, ""),
+		// email into it (see CreateComment below); CommentRow.CreatedByName
+		// is SearchComments' own best-effort resolution of that email against
+		// "user" (empty when no row matches, e.g. an integration/automation
+		// account), matching the display name case_repo.go's
+		// SearchCaseActivities already resolves for the same comment on the
+		// case activity timeline -- there is no id to attach either way.
+		CreatedBy: domain.NewUserReference("", row.CreatedBy, row.CreatedByName),
 	}
 	if row.Type != nil {
 		if t, ok := commentEnumToType[*row.Type]; ok {

@@ -16,9 +16,11 @@
 
 import { useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
 import {
+  AdapterDateFns,
   Box,
   Button,
   Checkbox,
+  DatePickers,
   Dialog,
   DialogActions,
   DialogContent,
@@ -33,8 +35,16 @@ import {
 import { RefreshCw, X } from "@wso2/oxygen-ui-icons-react";
 import { Link } from "react-router";
 import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
-import { formatAbsoluteForUser } from "@utils/dateTime";
+import {
+  formatAbsoluteForUser,
+  formatDateTimeLocal,
+  isPastDateTime,
+  parseDateTimeLocal,
+  resolveDisplayTimeZone,
+  zonedInputToUtcIso,
+} from "@utils/dateTime";
 import { sanitizeRichTextHtml } from "@utils/sanitizeHtml";
 import {
   DRY_RUN_TAG_LABEL,
@@ -45,20 +55,35 @@ import { useUpdateAnnouncementRequest } from "@features/csm-announcements/api/us
 import { useRecordAnnouncementRequestDryRun } from "@features/csm-announcements/api/useRecordAnnouncementRequestDryRun";
 import { useSubmitAnnouncementRequest } from "@features/csm-announcements/api/useSubmitAnnouncementRequest";
 import { useApproveAnnouncementRequest } from "@features/csm-announcements/api/useApproveAnnouncementRequest";
+import { useScheduleAnnouncementRequest } from "@features/csm-announcements/api/useScheduleAnnouncementRequest";
 import { usePublishAnnouncementRequest } from "@features/csm-announcements/api/usePublishAnnouncementRequest";
 import { SECURITY_ANNOUNCEMENT_TAG_LABEL } from "@features/csm-announcements/components/CreateCustomerAnnouncementForm";
 import AnnouncementSendProgress, {
   type AnnouncementSendProgressState,
 } from "@features/csm-announcements/components/AnnouncementSendProgress";
 import PublishConfirmationDialog from "@features/csm-announcements/components/PublishConfirmationDialog";
+import { useResolvedAudiencePreview } from "@features/csm-announcements/api/useResolvedAudiencePreview";
 import AddUpdateConfirmationDialog from "@features/csm-announcements/components/AddUpdateConfirmationDialog";
 import { useCreateAnnouncementRequestUpdate } from "@features/csm-announcements/api/useCreateAnnouncementRequestUpdate";
 import { useListAnnouncementRequestUpdates } from "@features/csm-announcements/api/useListAnnouncementRequestUpdates";
 import { usePostAnnouncementUpdateComments } from "@features/csm-announcements/api/usePostAnnouncementUpdateComments";
+import type { AnnouncementRegistryCaseMember } from "@features/csm-announcements/types/announcementRegistry";
+
+const { DateTimePicker, LocalizationProvider } = DatePickers;
 
 interface AnnouncementRequestDialogProps {
   requestId: string;
   onClose: () => void;
+  /**
+   * Every member case this request published — only known when this dialog
+   * was opened from a batch row in the Announcements tab's registry list
+   * (the one place this data exists; see AnnouncementRegistryRow's own doc
+   * comment). Opened from the Pending tab instead, this is empty, and the
+   * "Delivered to" section below simply doesn't render — same graceful
+   * "nothing to show" behavior as a legacy published request with no
+   * publishedCaseIds at all.
+   */
+  caseMembers?: AnnouncementRegistryCaseMember[];
 }
 
 const STATE_TITLE: Record<string, string> = {
@@ -117,7 +142,9 @@ function isEmptyHtml(html: string): boolean {
 export default function AnnouncementRequestDialog({
   requestId,
   onClose,
+  caseMembers = [],
 }: AnnouncementRequestDialogProps): JSX.Element {
+  const { canWrite } = usePortalAccess();
   const { data: request, isLoading, isError, refetch } = useGetAnnouncementRequest(requestId);
   const update = useUpdateAnnouncementRequest();
   const recordDryRun = useRecordAnnouncementRequestDryRun();
@@ -141,6 +168,36 @@ export default function AnnouncementRequestDialog({
   const claimsReady = claims !== undefined;
   const isRequestCreator = !!request && !!claims?.userid && claims.userid === request.createdBy;
   const [confirmPublishOpen, setConfirmPublishOpen] = useState(false);
+  const [confirmGiveUpOpen, setConfirmGiveUpOpen] = useState(false);
+  const [givingUp, setGivingUp] = useState(false);
+
+  // Resolves failedProjectIds to their real short keys (e.g. "CUPPTSUB") for
+  // the send-progress card's chips below — those ids come straight off the
+  // frozen resolvedProjectIds snapshot, which carries no key/name data of
+  // its own. Re-resolves whenever the failed set actually changes (a retry
+  // narrowing it, a fresh failure widening it), not on every render.
+  const failedProjectsPreview = useResolvedAudiencePreview();
+  const failedProjectIdsKey = publish.failedProjectIds.join(",");
+  useEffect(() => {
+    if (publish.failedProjectIds.length > 0) {
+      void failedProjectsPreview.resolve(publish.failedProjectIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedProjectIdsKey]);
+  const failedProjectLabel = (projectId: string): string =>
+    failedProjectsPreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
+
+  // Schedule: an alternative to clicking Publish immediately — pick a
+  // future date/time and operations/csm-scheduled-tasks' own sub-cron
+  // publishes automatically once it arrives. Purely additive: Publish
+  // itself (above) keeps every one of its own guards unchanged and still
+  // works at any time, schedule pending or not, as an explicit override.
+  const schedule = useScheduleAnnouncementRequest();
+  const [schedulePickerOpen, setSchedulePickerOpen] = useState(false);
+  const [scheduleInput, setScheduleInput] = useState("");
+  const scheduleTimeZone = resolveDisplayTimeZone();
+  const scheduleInputDate = parseDateTimeLocal(scheduleInput);
+  const scheduleInputIsPast = isPastDateTime(scheduleInputDate);
 
   // Add-update: composing and posting a follow-up comment to every case a
   // published request created. Restricted to the creator, same as Publish
@@ -427,7 +484,12 @@ export default function AnnouncementRequestDialog({
                     variant="outlined"
                     size="small"
                     onClick={handleSaveContent}
-                    disabled={update.isPending || subject.trim().length === 0 || contentLockedForRetry}
+                    disabled={
+                      update.isPending ||
+                      subject.trim().length === 0 ||
+                      contentLockedForRetry ||
+                      !canWrite
+                    }
                   >
                     {update.isPending ? "Saving…" : "Save changes"}
                   </Button>
@@ -473,21 +535,29 @@ export default function AnnouncementRequestDialog({
                 </Typography>
               </DetailField>
               <DetailField label="Created">
-                <Typography variant="body2">{whoWhen(request.createdBy, request.createdAt)}</Typography>
+                <Typography variant="body2">
+                  {whoWhen(request.createdByEmail ?? request.createdBy, request.createdAt)}
+                </Typography>
               </DetailField>
               {request.submittedAt && (
                 <DetailField label="Submitted">
-                  <Typography variant="body2">{whoWhen(request.submittedBy, request.submittedAt)}</Typography>
+                  <Typography variant="body2">
+                    {whoWhen(request.submittedByEmail ?? request.submittedBy, request.submittedAt)}
+                  </Typography>
                 </DetailField>
               )}
               {request.approvedAt && (
                 <DetailField label="Approved">
-                  <Typography variant="body2">{whoWhen(request.approvedBy, request.approvedAt)}</Typography>
+                  <Typography variant="body2">
+                    {whoWhen(request.approvedByEmail ?? request.approvedBy, request.approvedAt)}
+                  </Typography>
                 </DetailField>
               )}
               {request.publishedAt && (
                 <DetailField label="Published">
-                  <Typography variant="body2">{whoWhen(request.publishedBy, request.publishedAt)}</Typography>
+                  <Typography variant="body2">
+                    {whoWhen(request.publishedByEmail ?? request.publishedBy, request.publishedAt)}
+                  </Typography>
                 </DetailField>
               )}
             </Box>
@@ -519,11 +589,16 @@ export default function AnnouncementRequestDialog({
                   variant="contained"
                   size="small"
                   onClick={() => approve.mutate({ id: request.id })}
-                  disabled={approve.isPending}
+                  disabled={approve.isPending || !canWrite}
                 >
                   {approve.isPending ? "Approving…" : "Mark as approved"}
                 </Button>
-                <Button variant="text" size="small" onClick={() => setConfirmEditOpen(true)}>
+                <Button
+                  variant="text"
+                  size="small"
+                  onClick={() => setConfirmEditOpen(true)}
+                  disabled={!canWrite}
+                >
                   Edit
                 </Button>
                 {approve.isError && (
@@ -545,7 +620,8 @@ export default function AnnouncementRequestDialog({
                     submittingForApproval ||
                     hasUnsavedChanges ||
                     subject.trim().length === 0 ||
-                    isEmptyHtml(description)
+                    isEmptyHtml(description) ||
+                    !canWrite
                   }
                 >
                   {dryRun.runningDryRun
@@ -579,9 +655,20 @@ export default function AnnouncementRequestDialog({
                     color="primary"
                     size="small"
                     onClick={() =>
-                      !hasUnsavedChanges && claimsReady && isRequestCreator && setConfirmPublishOpen(true)
+                      !hasUnsavedChanges &&
+                      claimsReady &&
+                      isRequestCreator &&
+                      publish.readyToPublish &&
+                      setConfirmPublishOpen(true)
                     }
-                    disabled={publish.publishing || hasUnsavedChanges || !claimsReady || !isRequestCreator}
+                    disabled={
+                      publish.publishing ||
+                      hasUnsavedChanges ||
+                      !claimsReady ||
+                      !isRequestCreator ||
+                      !publish.readyToPublish ||
+                      !canWrite
+                    }
                   >
                     {!claimsReady
                       ? "Publish"
@@ -593,10 +680,28 @@ export default function AnnouncementRequestDialog({
                             ? "Retry security label"
                             : "Publish"}
                   </Button>
+                  {claimsReady &&
+                    isRequestCreator &&
+                    publish.readyToPublish &&
+                    !publish.publishing &&
+                    publish.failedProjectIds.length > 0 &&
+                    publish.failedTagProjectIds.length === 0 &&
+                    publish.succeededProjectIds.length > 0 && (
+                      <Button
+                        variant="outlined"
+                        color="warning"
+                        size="small"
+                        disabled={hasUnsavedChanges || !canWrite}
+                        onClick={() => setConfirmGiveUpOpen(true)}
+                      >
+                        Publish anyway
+                      </Button>
+                    )}
                 </Box>
                 {claimsReady && !isRequestCreator && (
                   <Typography variant="caption" color="text.secondary">
-                    Only {request.createdBy} can publish this request — approving it doesn't grant that.
+                    Only {request.createdByEmail ?? request.createdBy} can publish this request — approving it
+                    doesn't grant that.
                   </Typography>
                 )}
                 {claimsReady && isRequestCreator && hasUnsavedChanges && (
@@ -605,8 +710,40 @@ export default function AnnouncementRequestDialog({
                     unsaved here.
                   </Typography>
                 )}
+                {claimsReady && isRequestCreator && !hasUnsavedChanges && publish.hydratingDeliveries && (
+                  <Typography variant="caption" color="text.secondary">
+                    Loading previous progress…
+                  </Typography>
+                )}
+                {claimsReady && isRequestCreator && !hasUnsavedChanges && publish.hydrationFailed && (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    <Typography variant="caption" color="error">
+                      Couldn't load previous progress for this request — Publish is blocked until this
+                      loads, so an already-sent project isn't sent a duplicate case.
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<RefreshCw size={14} />}
+                      onClick={publish.retryHydration}
+                    >
+                      Retry
+                    </Button>
+                  </Box>
+                )}
                 {(publish.publishing || priorSucceededCount > 0 || publish.failedProjectIds.length > 0) && (
-                  <AnnouncementSendProgress progress={sendProgress} />
+                  <AnnouncementSendProgress
+                    progress={sendProgress}
+                    // Once there's an outstanding failure, the succeeded
+                    // count is either stale history (reopening a request
+                    // with prior progress) or already visible via the
+                    // "Retry failed projects" flow itself — only the
+                    // currently-failing projects need attention. A fully
+                    // successful send (no failures at all) still shows the
+                    // reassuring full tally.
+                    hideSucceededTally={publish.failedProjectIds.length > 0}
+                    projectLabel={failedProjectLabel}
+                  />
                 )}
                 {publish.failedTagProjectIds.length > 0 && (
                   <Typography variant="caption" color="warning.main">
@@ -614,6 +751,148 @@ export default function AnnouncementRequestDialog({
                     retry before this can be published.
                   </Typography>
                 )}
+
+                <Divider />
+
+                {request.dueOn && (
+                  <Typography variant="caption" color="text.secondary">
+                    Due {formatAbsoluteForUser(request.dueOn)}
+                  </Typography>
+                )}
+
+                {request.scheduledFor ? (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                    <Typography variant="body2">
+                      Scheduled to publish on {formatAbsoluteForUser(request.scheduledFor)}
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="text"
+                      color="error"
+                      disabled={schedule.isPending || !canWrite || !isRequestCreator}
+                      onClick={() => schedule.mutate({ id: request.id, scheduledFor: null })}
+                    >
+                      Cancel schedule
+                    </Button>
+                  </Box>
+                ) : (
+                  isRequestCreator &&
+                  canWrite &&
+                  (schedulePickerOpen ? (
+                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                      <LocalizationProvider dateAdapter={AdapterDateFns}>
+                        <DateTimePicker
+                          label={`Publish at (${scheduleTimeZone})`}
+                          value={scheduleInputDate}
+                          onChange={(next) =>
+                            setScheduleInput(next instanceof Date && !Number.isNaN(next.getTime()) ? formatDateTimeLocal(next) : "")
+                          }
+                          disabled={schedule.isPending}
+                          slotProps={{
+                            textField: {
+                              fullWidth: true,
+                              size: "small",
+                              error: !!scheduleInput && scheduleInputIsPast,
+                              helperText: scheduleInputIsPast
+                                ? "Must be in the future."
+                                : `Entered in your timezone (${scheduleTimeZone}); stored as UTC.`,
+                            },
+                          }}
+                        />
+                      </LocalizationProvider>
+                      <Box sx={{ display: "flex", gap: 1 }}>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          disabled={!scheduleInput || scheduleInputIsPast || schedule.isPending}
+                          onClick={() => {
+                            const iso = zonedInputToUtcIso(scheduleInput, scheduleTimeZone);
+                            if (!iso) return;
+                            schedule.mutate(
+                              { id: request.id, scheduledFor: iso },
+                              { onSuccess: () => setSchedulePickerOpen(false) },
+                            );
+                          }}
+                        >
+                          {schedule.isPending ? "Scheduling…" : "Confirm schedule"}
+                        </Button>
+                        <Button
+                          size="small"
+                          variant="text"
+                          disabled={schedule.isPending}
+                          onClick={() => {
+                            setSchedulePickerOpen(false);
+                            setScheduleInput("");
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </Box>
+                      {schedule.isError && (
+                        <Typography variant="caption" color="error">
+                          {schedule.error instanceof Error ? schedule.error.message : "Could not set the schedule."}
+                        </Typography>
+                      )}
+                    </Box>
+                  ) : (
+                    <Box>
+                      <Button size="small" variant="outlined" onClick={() => setSchedulePickerOpen(true)}>
+                        Schedule for later…
+                      </Button>
+                    </Box>
+                  ))
+                )}
+              </Box>
+            )}
+
+            {request.state === "published" && caseMembers.length > 0 && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <Divider />
+                <Typography variant="subtitle2">
+                  Delivered to {caseMembers.length} project{caseMembers.length === 1 ? "" : "s"}
+                </Typography>
+                {/* A real send can reach ~100 projects, so this is a dense,
+                    scrollable list rather than one card per case (the shape
+                    "Past updates" below uses, fine there since those are
+                    rare and rich-text) — bounded height keeps the dialog
+                    itself from growing without limit alongside the list. */}
+                <Box
+                  sx={{
+                    maxHeight: 220,
+                    overflowY: "auto",
+                    border: 1,
+                    borderColor: "divider",
+                    borderRadius: 1,
+                  }}
+                >
+                  {caseMembers.map((m) => (
+                    <Box
+                      key={m.caseId}
+                      component={Link}
+                      to={`/announcements/${m.caseId}`}
+                      sx={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 1,
+                        px: 1.5,
+                        py: 0.75,
+                        textDecoration: "none",
+                        color: "inherit",
+                        borderBottom: 1,
+                        borderColor: "divider",
+                        "&:last-of-type": { borderBottom: 0 },
+                        "&:hover": { bgcolor: "action.hover" },
+                      }}
+                    >
+                      <Typography variant="body2" noWrap>
+                        {m.projectName || "—"}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ flexShrink: 0 }}>
+                        {m.caseNumber || m.wso2CaseId || "—"}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
               </Box>
             )}
 
@@ -628,7 +907,7 @@ export default function AnnouncementRequestDialog({
 
                 {claimsReady && !isRequestCreator && (
                   <Typography variant="caption" color="text.secondary">
-                    Only {request.createdBy} can post an update to this request.
+                    Only {request.createdByEmail ?? request.createdBy} can post an update to this request.
                   </Typography>
                 )}
                 {claimsReady && isRequestCreator && (request.publishedCaseIds ?? []).length === 0 && (
@@ -651,7 +930,8 @@ export default function AnnouncementRequestDialog({
                           updateContent.trim().length === 0 ||
                           createUpdate.isPending ||
                           postUpdateComments.posting ||
-                          (request.publishedCaseIds ?? []).length === 0
+                          (request.publishedCaseIds ?? []).length === 0 ||
+                          !canWrite
                         }
                         onClick={() => setConfirmUpdateOpen(true)}
                       >
@@ -679,7 +959,7 @@ export default function AnnouncementRequestDialog({
                     {updatesQuery.data.updates.map((u) => (
                       <Box key={u.id} sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 1.5 }}>
                         <Typography variant="caption" color="text.secondary">
-                          {whoWhen(u.createdBy, u.createdOn)}
+                          {whoWhen(u.createdByEmail ?? u.createdBy, u.createdOn)}
                         </Typography>
                         <Box
                           sx={{ fontSize: "0.875rem", lineHeight: 1.5, wordBreak: "break-word", mt: 0.5 }}
@@ -736,6 +1016,48 @@ export default function AnnouncementRequestDialog({
             void publish.handlePublish();
           }}
         />
+      )}
+
+      {request && (
+        <Dialog open={confirmGiveUpOpen} onClose={givingUp ? undefined : () => setConfirmGiveUpOpen(false)} maxWidth="sm" fullWidth>
+          <DialogTitle>Publish without the failed projects?</DialogTitle>
+          <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            <Typography variant="body2">
+              This marks the request published using only the {publish.succeededProjectIds.length} project
+              {publish.succeededProjectIds.length === 1 ? "" : "s"} that already received a case. The
+              following {publish.failedProjectIds.length === 1 ? "project" : "projects"} will be permanently
+              skipped — there's no way to send this announcement to {publish.failedProjectIds.length === 1 ? "it" : "them"} afterward:
+            </Typography>
+            <Typography variant="body2" fontWeight={600} color="error.main">
+              {publish.failedProjectIds.map(failedProjectLabel).join(", ")}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Only use this once you've confirmed the retry genuinely can't succeed — a project that's just
+              slow or transiently failing should be retried instead.
+            </Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmGiveUpOpen(false)} disabled={givingUp}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              color="warning"
+              disabled={givingUp}
+              onClick={async () => {
+                setGivingUp(true);
+                try {
+                  await publish.publishGivingUpOnFailed();
+                } finally {
+                  setGivingUp(false);
+                  setConfirmGiveUpOpen(false);
+                }
+              }}
+            >
+              {givingUp ? "Publishing…" : "Publish anyway"}
+            </Button>
+          </DialogActions>
+        </Dialog>
       )}
 
       {request && (

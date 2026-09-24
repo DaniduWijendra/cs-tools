@@ -151,14 +151,14 @@ func TestConfig_Validate_InvalidDataSource(t *testing.T) {
 	}
 }
 
-// baseValidPostgresPrimarySNFallbackConfig returns a minimally valid Config
-// for DATA_SOURCE=postgres-primary-sn-fallback: both a full database (reads
+// baseValidPostgresServiceNowDualWriteConfig returns a minimally valid Config
+// for DATA_SOURCE=postgres-servicenow-dual-write: both a full database (reads
 // and writes are always Postgres-authoritative in this mode) AND full
 // ServiceNow integration service credentials (the best-effort mirror write
 // goes there) are required.
-func baseValidPostgresPrimarySNFallbackConfig() Config {
+func baseValidPostgresServiceNowDualWriteConfig() Config {
 	c := baseValidConfig()
-	c.DataSource = DataSourcePostgresPrimarySNFallback
+	c.DataSource = DataSourcePostgresServiceNowDualWrite
 	c.ServiceNowIntegrationServiceBaseURL = "https://example.com"
 	c.ServiceNowIntegrationServiceTokenURL = "https://example.com/token"
 	c.ServiceNowIntegrationServiceClientID = "client-id"
@@ -166,17 +166,17 @@ func baseValidPostgresPrimarySNFallbackConfig() Config {
 	return c
 }
 
-func TestConfig_Validate_PostgresPrimarySNFallbackIsValid(t *testing.T) {
-	c := baseValidPostgresPrimarySNFallbackConfig()
+func TestConfig_Validate_PostgresServiceNowDualWriteIsValid(t *testing.T) {
+	c := baseValidPostgresServiceNowDualWriteConfig()
 	if err := c.Validate(); err != nil {
-		t.Fatalf("unexpected error for a fully configured postgres-primary-sn-fallback source: %v", err)
+		t.Fatalf("unexpected error for a fully configured postgres-servicenow-dual-write source: %v", err)
 	}
 }
 
-// TestConfig_Validate_PostgresPrimarySNFallbackRequiresDBFields guards the
+// TestConfig_Validate_PostgresServiceNowDualWriteRequiresDBFields guards the
 // "Postgres is authoritative" half of the new mode: unlike plain
 // DATA_SOURCE=servicenow, the DB cannot be dropped here.
-func TestConfig_Validate_PostgresPrimarySNFallbackRequiresDBFields(t *testing.T) {
+func TestConfig_Validate_PostgresServiceNowDualWriteRequiresDBFields(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(c *Config)
@@ -187,7 +187,7 @@ func TestConfig_Validate_PostgresPrimarySNFallbackRequiresDBFields(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := baseValidPostgresPrimarySNFallbackConfig()
+			c := baseValidPostgresServiceNowDualWriteConfig()
 			tt.mutate(&c)
 			if err := c.Validate(); err == nil {
 				t.Errorf("Validate() = nil, want an error when %s", tt.name)
@@ -196,11 +196,11 @@ func TestConfig_Validate_PostgresPrimarySNFallbackRequiresDBFields(t *testing.T)
 	}
 }
 
-// TestConfig_Validate_PostgresPrimarySNFallbackRequiresIntegrationServiceFields
+// TestConfig_Validate_PostgresServiceNowDualWriteRequiresIntegrationServiceFields
 // guards the "ServiceNow mirror write" half: unlike plain
 // DATA_SOURCE=postgres, the SN integration service credentials cannot be
 // dropped here — Dispatch has nowhere to send the mirror write without them.
-func TestConfig_Validate_PostgresPrimarySNFallbackRequiresIntegrationServiceFields(t *testing.T) {
+func TestConfig_Validate_PostgresServiceNowDualWriteRequiresIntegrationServiceFields(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(c *Config)
@@ -212,7 +212,7 @@ func TestConfig_Validate_PostgresPrimarySNFallbackRequiresIntegrationServiceFiel
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := baseValidPostgresPrimarySNFallbackConfig()
+			c := baseValidPostgresServiceNowDualWriteConfig()
 			tt.mutate(&c)
 			if err := c.Validate(); err == nil {
 				t.Errorf("Validate() = nil, want an error when %s", tt.name)

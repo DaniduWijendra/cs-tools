@@ -1335,6 +1335,213 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /users/me/saved-filter-views:
+    get:
+      summary: List the caller's saved filter views for one CSM list.
+      operationId: listSavedFilterViews
+      parameters:
+        - name: listKey
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [cases, incidents, change_requests, problems]
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFilterViewList'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+    patch:
+      summary: Save or overwrite a saved filter view.
+      operationId: saveSavedFilterView
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSavedFilterViewPayload'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFilterViewList'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+    delete:
+      summary: Delete a saved filter view by name.
+      operationId: deleteSavedFilterView
+      parameters:
+        - name: listKey
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [cases, incidents, change_requests, problems]
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFilterViewList'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /users/me/saved-filter-views/reorder:
+    post:
+      summary: Move a saved filter view one slot up or down.
+      operationId: reorderSavedFilterView
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderSavedFilterViewPayload'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFilterViewList'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /users/{id}:
     get:
       summary: Get one user's full profile.
@@ -2089,6 +2296,61 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /announcements/registry/search:
+    post:
+      summary: The Announcements tab's own grouped registry list (Phase 3 "registry groups by batch").
+      description: >-
+        Returns one row per announcement (a "batch" row, for a published
+        announcement request — every case it created collapses into this one
+        row) or one row per case with no known owning request (anything
+        sent before this workflow existed, or via any other path — shown
+        individually, not dropped). Pagination applies to this grouped row
+        list, not the raw per-case list underneath it.
+      operationId: searchAnnouncementRegistry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchAnnouncementRegistryPayload'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRegistryResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError — including when the underlying case or announcement-request set is too large to group safely.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /announcement-requests/{id}:
     get:
       summary: Get one announcement request by id.
@@ -2399,6 +2661,75 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /announcement-requests/{id}/schedule:
+    post:
+      summary: Set or clear an approved request's automatic-publish time.
+      description: >-
+        Does not itself publish anything — once scheduledFor is set,
+        operations/csm-scheduled-tasks' publish_scheduled_announcements
+        sub-cron publishes it automatically once that time arrives, the same
+        way the manual publish call does. A null scheduledFor clears the
+        schedule. actorId is always the authenticated caller, never read
+        from the body. Restricted to the request's own creator, same rule as
+        publish — scheduling is choosing when publish happens.
+      operationId: scheduleAnnouncementRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleAnnouncementRequestPayload'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnouncementRequest'
+        "400":
+          description: BadRequest — invalid id format, or a scheduledFor that isn't strictly in the future.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — the caller did not create this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: Conflict — the request is not approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /announcement-requests/{id}/publish:
     post:
       summary: Mark an approved request published (Phase 2 draft/approval workflow).
@@ -2560,6 +2891,122 @@ paths:
                 $ref: '#/components/schemas/ErrorPayload'
         "401":
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /announcement-requests/{id}/deliveries:
+    post:
+      summary: Record one Publish fan-out pass's per-project delivery outcomes (Phase 3 delivery ledger).
+      description: >-
+        A durable ledger replacing purely in-memory retry tracking that used
+        to be lost if the dialog closed mid-retry — the webapp's own Publish
+        fan-out calls this after each pass (initial attempt or retry) with
+        the outcome for every project attempted in that pass. actorId is
+        always the authenticated caller. Restricted to the request's own
+        creator, same as publish. Only accepted while the request is
+        approved.
+      operationId: recordAnnouncementRequestDeliveries
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordAnnouncementRequestDeliveriesPayload'
+      responses:
+        "200":
+          description: Ok — the saved delivery rows for this pass.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRequestDeliveriesResponse'
+        "400":
+          description: BadRequest — invalid id format or an incomplete delivery entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — the caller did not create this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: Conflict — the request is not approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+    get:
+      summary: List every delivery recorded for this announcement request.
+      operationId: listAnnouncementRequestDeliveries
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRequestDeliveriesResponse'
+        "400":
+          description: BadRequest — invalid id format.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
           content:
             application/json:
               schema:
@@ -9332,6 +9779,46 @@ components:
         endingUpdateLevel:
           type: integer
 
+    SavedFilterView:
+      type: object
+      required: [name, qs]
+      properties:
+        name:
+          type: string
+        qs:
+          type: string
+    SavedFilterViewList:
+      type: object
+      required: [views]
+      properties:
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedFilterView'
+    SaveSavedFilterViewPayload:
+      type: object
+      required: [listKey, name, qs]
+      properties:
+        listKey:
+          type: string
+          enum: [cases, incidents, change_requests, problems]
+        name:
+          type: string
+        qs:
+          type: string
+    ReorderSavedFilterViewPayload:
+      type: object
+      required: [listKey, name, direction]
+      properties:
+        listKey:
+          type: string
+          enum: [cases, incidents, change_requests, problems]
+        name:
+          type: string
+        direction:
+          type: string
+          enum: [up, down]
+
     UserResponse:
       type: object
       required:
@@ -12649,7 +13136,7 @@ components:
               type: array
               items:
                 type: string
-                enum: [ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
+                enum: [OPEN, ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
             number:
               type: string
               description: >-
@@ -12707,7 +13194,7 @@ components:
         state:
           type: string
           nullable: true
-          enum: [ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
+          enum: [OPEN, ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
         createdOn:
           type: string
         createdBy:
@@ -12880,6 +13367,13 @@ components:
           nullable: true
         createdBy:
           type: string
+        createdByEmail:
+          type: string
+          nullable: true
+          description: >-
+            Display-only companion to createdBy (an opaque IdP account id) —
+            the actor's resolved email at creation time. Null for any row
+            written before this field existed.
         createdAt:
           type: string
           format: date-time
@@ -12889,6 +13383,9 @@ components:
         submittedBy:
           type: string
           nullable: true
+        submittedByEmail:
+          type: string
+          nullable: true
         submittedAt:
           type: string
           format: date-time
@@ -12896,11 +13393,17 @@ components:
         approvedBy:
           type: string
           nullable: true
+        approvedByEmail:
+          type: string
+          nullable: true
         approvedAt:
           type: string
           format: date-time
           nullable: true
         publishedBy:
+          type: string
+          nullable: true
+        publishedByEmail:
           type: string
           nullable: true
         publishedAt:
@@ -12913,6 +13416,18 @@ components:
             type: string
           nullable: true
           description: The real case id created for each project in resolvedProjectIds. Null until published.
+        dueOn:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set once, automatically, on submit (now + one month) — display only. Null until submitted.
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Set/cleared only via POST .../schedule. When set on an approved
+            request, it's automatically published once this time arrives.
 
     CreateAnnouncementRequestPayload:
       type: object
@@ -12953,6 +13468,16 @@ components:
         caseId:
           type: string
 
+    ScheduleAnnouncementRequestPayload:
+      type: object
+      additionalProperties: false
+      properties:
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+          description: A null (or omitted) value clears the schedule. Non-null must be strictly in the future.
+
     PublishAnnouncementRequestPayload:
       type: object
       required: [caseIds]
@@ -12987,6 +13512,10 @@ components:
           type: string
         createdBy:
           type: string
+        createdByEmail:
+          type: string
+          nullable: true
+          description: Display-only companion to createdBy — see AnnouncementRequest.createdByEmail.
         createdOn:
           type: string
           format: date-time
@@ -12998,6 +13527,72 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AnnouncementRequestUpdate'
+
+    AnnouncementRequestDelivery:
+      description: The durable record of one project's outcome within an announcement request's own Publish fan-out.
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        announcementRequestId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        caseId:
+          type: string
+          nullable: true
+          description: Set for status succeeded/tag_failed (the case is real either way). Null for failed.
+        status:
+          type: string
+          enum: [succeeded, tag_failed, failed]
+        errorMessage:
+          type: string
+          nullable: true
+        createdOn:
+          type: string
+          format: date-time
+        updatedOn:
+          type: string
+          format: date-time
+
+    RecordAnnouncementRequestDeliveryEntry:
+      type: object
+      required: [projectId, status]
+      additionalProperties: false
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        caseId:
+          type: string
+          description: Required for status succeeded/tag_failed.
+        status:
+          type: string
+          enum: [succeeded, tag_failed, failed]
+        errorMessage:
+          type: string
+
+    RecordAnnouncementRequestDeliveriesPayload:
+      type: object
+      required: [deliveries]
+      additionalProperties: false
+      properties:
+        deliveries:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RecordAnnouncementRequestDeliveryEntry'
+
+    SearchAnnouncementRequestDeliveriesResponse:
+      type: object
+      properties:
+        deliveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnnouncementRequestDelivery'
 
     SearchAnnouncementRequestsPayload:
       type: object
@@ -13019,6 +13614,93 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AnnouncementRequest'
+
+    SearchAnnouncementRegistryPayload:
+      type: object
+      required: [pagination]
+      additionalProperties: false
+      properties:
+        search:
+          type: string
+        states:
+          type: array
+          items:
+            type: string
+        projectIds:
+          type: array
+          items:
+            type: string
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    AnnouncementRegistryRow:
+      type: object
+      description: One row of the grouped registry — see kind for which other fields are populated.
+      properties:
+        kind:
+          type: string
+          enum: [batch, case]
+        subject:
+          type: string
+        createdBy:
+          type: string
+        createdOn:
+          type: string
+          format: date-time
+        updatedOn:
+          type: string
+          format: date-time
+        announcementRequestId:
+          type: string
+          format: uuid
+          description: Set for kind=batch only.
+        projectCount:
+          type: integer
+          description: Set for kind=batch only.
+        cases:
+          type: array
+          description: >-
+            Every member case this batch's request published, one per
+            project. Set for kind=batch only.
+          items:
+            $ref: '#/components/schemas/AnnouncementRegistryCaseMember'
+        caseId:
+          type: string
+          description: Set for kind=case only.
+        caseNumber:
+          type: string
+          description: Set for kind=case only.
+        wso2CaseId:
+          type: string
+          description: Project-scoped WSO2 case reference (case internalId). Set for kind=case only.
+        state:
+          type: string
+          description: The underlying case's own state. Set for kind=case only.
+        projectName:
+          type: string
+          description: Set for kind=case only.
+
+    AnnouncementRegistryCaseMember:
+      type: object
+      description: One project's own case within a batch row.
+      properties:
+        caseId:
+          type: string
+        caseNumber:
+          type: string
+        wso2CaseId:
+          type: string
+          description: Project-scoped WSO2 case reference (case internalId).
+        projectName:
+          type: string
+
+    SearchAnnouncementRegistryResponse:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnnouncementRegistryRow'
         total:
           type: integer
         limit:

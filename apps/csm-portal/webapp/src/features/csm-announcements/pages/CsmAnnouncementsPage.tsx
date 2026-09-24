@@ -37,6 +37,7 @@ import { Plus, Search, X } from "@wso2/oxygen-ui-icons-react";
 import { useMemo, useState, type ChangeEvent, type JSX, type KeyboardEvent, type ReactNode } from "react";
 import { Link as RouterLink, useSearchParams } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import ColumnCustomizerButton from "@components/column-customizer/ColumnCustomizerButton";
 import MultiSelectField from "@components/MultiSelectField";
 import QueryErrorState from "@components/QueryErrorState";
@@ -51,14 +52,17 @@ import {
   type ColumnOption,
 } from "@hooks/useColumnPreferences";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
-import { useSearchAnnouncements } from "@features/csm-announcements/api/useSearchAnnouncements";
+import { useSearchAnnouncementRegistry } from "@features/csm-announcements/api/useSearchAnnouncementRegistry";
 import { useSearchAnnouncementRequests } from "@features/csm-announcements/api/useSearchAnnouncementRequests";
 import AnnouncementRequestDialog from "@features/csm-announcements/components/AnnouncementRequestDialog";
 import {
   DEFAULT_ANNOUNCEMENT_FILTERS,
   type AnnouncementFilters,
-  type CsmAnnouncementRow,
 } from "@features/csm-announcements/types/csmAnnouncements";
+import type {
+  AnnouncementRegistryCaseMember,
+  AnnouncementRegistryRow,
+} from "@features/csm-announcements/types/announcementRegistry";
 import type { AnnouncementRequestState } from "@features/csm-announcements/types/announcementRequests";
 import { announcementStateRole } from "@features/csm-announcements/utils/announcementState";
 import { STATE_LABEL } from "@features/csm-dashboard/utils/abtDashboard";
@@ -160,17 +164,23 @@ function formatDate(value?: string | null): string {
   );
 }
 
-function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow): ReactNode {
+// row.kind decides what each column actually shows: a "case" row is exactly
+// what CsmAnnouncementRow used to render (one case, one project, one state);
+// a "batch" row represents every case a published announcement created
+// collapsed into one row, so columns with no single-value meaning across a
+// batch (Number, Reference, State) show "—", and Project shows the count
+// instead of a single project name.
+function renderRegistryCell(id: AnnouncementColumnId, row: AnnouncementRegistryRow): ReactNode {
   switch (id) {
     case "number":
-      return a.number || "—";
+      return row.kind === "case" ? row.caseNumber || "—" : "—";
     case "wso2CaseId":
-      return a.wso2CaseId || "—";
+      return row.kind === "case" ? row.wso2CaseId || "—" : "—";
     case "subject":
       return (
         <Typography
           variant="body2"
-          title={a.subject}
+          title={row.subject}
           sx={{
             display: "-webkit-box",
             WebkitLineClamp: 2,
@@ -178,27 +188,32 @@ function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow)
             overflow: "hidden",
           }}
         >
-          {a.subject}
+          {row.subject}
         </Typography>
       );
     case "project":
-      return a.projectName;
+      return row.kind === "batch"
+        ? `${row.projectCount ?? 0} project${row.projectCount === 1 ? "" : "s"}`
+        : row.projectName;
     case "state":
-      return a.state ? (
+      if (row.kind === "batch") {
+        return <SemanticChip role="success" label="Published" variant="outlined" />;
+      }
+      return row.state ? (
         <SemanticChip
-          role={announcementStateRole(a.state)}
-          label={STATE_LABEL[a.state] ?? a.state}
+          role={announcementStateRole(row.state as CaseState)}
+          label={STATE_LABEL[row.state as CaseState] ?? row.state}
           variant="outlined"
         />
       ) : (
         "—"
       );
     case "createdBy":
-      return a.createdBy || "—";
+      return row.createdBy || "—";
     case "createdAt":
-      return formatDate(a.createdAt);
+      return formatDate(row.createdOn);
     case "updatedAt":
-      return formatDate(a.updatedAt);
+      return formatDate(row.updatedOn);
   }
 }
 
@@ -211,6 +226,7 @@ function renderAnnouncementCell(id: AnnouncementColumnId, a: CsmAnnouncementRow)
  */
 export default function CsmAnnouncementsPage(): JSX.Element {
   const navigate = useNavTransition();
+  const { canWrite } = usePortalAccess();
   const [searchParams] = useSearchParams();
   // Seeded once from `?tab=pending` (e.g. the create form's post-save
   // redirect landing straight on the request just saved), not kept in sync
@@ -226,17 +242,34 @@ export default function CsmAnnouncementsPage(): JSX.Element {
   const debouncedSearch = useDebouncedValue(filters.search.trim(), 300);
 
   const { data, isLoading, isFetching, isError, error, refetch, dataUpdatedAt } =
-    useSearchAnnouncements({ ...filters, search: debouncedSearch }, page, rowsPerPage);
+    useSearchAnnouncementRegistry({ ...filters, search: debouncedSearch }, page, rowsPerPage);
 
-  const announcements = data?.announcements ?? [];
+  const registryRows = data?.rows ?? [];
   const total = data?.total ?? 0;
 
   const [pendingState, setPendingState] = useState<AnnouncementRequestState>("pending_approval");
   const [pendingPage, setPendingPage] = useState(0);
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  // Only ever populated by clicking a batch row below — the registry search
+  // result is the one place this data exists (see AnnouncementRegistryRow's
+  // own doc comment); a dialog opened from the Pending tab has none, and the
+  // dialog itself already treats an empty/undefined list as "nothing to
+  // show" the same way it already does for a legacy published request with
+  // no publishedCaseIds at all.
+  const [selectedCaseMembers, setSelectedCaseMembers] = useState<AnnouncementRegistryCaseMember[]>([]);
   const pendingSearch = useSearchAnnouncementRequests(pendingState, pendingPage, PENDING_ROWS_PER_PAGE);
   const pendingRequests = pendingSearch.data?.requests ?? [];
   const pendingTotal = pendingSearch.data?.total ?? 0;
+
+  const openBatchRow = (row: AnnouncementRegistryRow): void => {
+    if (!row.announcementRequestId) return;
+    setSelectedCaseMembers(row.cases ?? []);
+    setSelectedRequestId(row.announcementRequestId);
+  };
+  const openPendingRow = (id: string): void => {
+    setSelectedCaseMembers([]);
+    setSelectedRequestId(id);
+  };
 
   const columnOptions = useMemo<ColumnOption[]>(
     () => ANNOUNCEMENT_COLUMNS.map(({ id, label }) => ({ id, label })),
@@ -275,15 +308,17 @@ export default function CsmAnnouncementsPage(): JSX.Element {
           </Typography>
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Button
-            variant="contained"
-            color="primary"
-            size="small"
-            startIcon={<Plus size={16} />}
-            onClick={() => navigate("/announcements/new")}
-          >
-            New announcement
-          </Button>
+          {canWrite && (
+            <Button
+              variant="contained"
+              color="primary"
+              size="small"
+              startIcon={<Plus size={16} />}
+              onClick={() => navigate("/announcements/new")}
+            >
+              New announcement
+            </Button>
+          )}
           <RefreshButton
             onRefresh={() => void refetch()}
             isFetching={isFetching}
@@ -413,7 +448,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                     />
                   </TableCell>
                 </TableRow>
-              ) : announcements.length === 0 ? (
+              ) : registryRows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={visibleColumnIds.length} align="center" sx={{ py: 4 }}>
                     <Typography variant="body2" color="text.secondary">
@@ -422,41 +457,86 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                   </TableCell>
                 </TableRow>
               ) : (
-                announcements.map((a) => (
-                  // A real anchor (not a click-handler row) so it supports
-                  // cmd/middle-click "open in new tab" and exposes a copyable
-                  // URL — same rationale as CasesList's row links (ISSU-031).
-                  <TableRow
-                    key={a.id}
-                    hover
-                    component={RouterLink}
-                    to={`/announcements/${a.id}`}
-                    sx={{
-                      cursor: "pointer",
-                      textDecoration: "none",
-                      color: "inherit",
-                      "&:focus-visible": {
-                        outline: (t) => `2px solid ${t.palette.primary.main}`,
-                        outlineOffset: -2,
-                      },
-                    }}
-                  >
-                    {visibleColumnIds.map((id) => (
-                      <TableCell
-                        key={id}
-                        sx={
-                          id === "subject"
-                            ? { width: "28%", maxWidth: 360 }
-                            : id === "updatedAt" || id === "createdAt"
-                              ? { whiteSpace: "nowrap" }
-                              : undefined
+                registryRows.map((row) =>
+                  // A "case" row is an individual case with no owning
+                  // announcement request — a real anchor (not a click-handler
+                  // row) so it supports cmd/middle-click "open in new tab" and
+                  // exposes a copyable URL, same rationale as CasesList's row
+                  // links (ISSU-031). A "batch" row represents every case a
+                  // published announcement request created collapsed into
+                  // one row — clicking it opens that request's own dialog
+                  // (the same one the Pending tab already uses) rather than
+                  // navigating to any single case.
+                  row.kind === "case" ? (
+                    <TableRow
+                      key={`case-${row.caseId}`}
+                      hover
+                      component={RouterLink}
+                      to={`/announcements/${row.caseId}`}
+                      sx={{
+                        cursor: "pointer",
+                        textDecoration: "none",
+                        color: "inherit",
+                        "&:focus-visible": {
+                          outline: (t) => `2px solid ${t.palette.primary.main}`,
+                          outlineOffset: -2,
+                        },
+                      }}
+                    >
+                      {visibleColumnIds.map((id) => (
+                        <TableCell
+                          key={id}
+                          sx={
+                            id === "subject"
+                              ? { width: "28%", maxWidth: 360 }
+                              : id === "updatedAt" || id === "createdAt"
+                                ? { whiteSpace: "nowrap" }
+                                : undefined
+                          }
+                        >
+                          {renderRegistryCell(id, row)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ) : (
+                    <TableRow
+                      key={`batch-${row.announcementRequestId}`}
+                      hover
+                      onClick={() => openBatchRow(row)}
+                      onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openBatchRow(row);
                         }
-                      >
-                        {renderAnnouncementCell(id, a)}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))
+                      }}
+                      tabIndex={0}
+                      aria-label={`View announcement request: ${row.subject || "(no subject)"}`}
+                      sx={{
+                        cursor: "pointer",
+                        "&:focus-visible": {
+                          outline: "2px solid",
+                          outlineColor: "primary.main",
+                          outlineOffset: -2,
+                        },
+                      }}
+                    >
+                      {visibleColumnIds.map((id) => (
+                        <TableCell
+                          key={id}
+                          sx={
+                            id === "subject"
+                              ? { width: "28%", maxWidth: 360 }
+                              : id === "updatedAt" || id === "createdAt"
+                                ? { whiteSpace: "nowrap" }
+                                : undefined
+                          }
+                        >
+                          {renderRegistryCell(id, row)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ),
+                )
               )}
             </TableBody>
           </Table>
@@ -553,11 +633,11 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                       <TableRow
                         key={r.id}
                         hover
-                        onClick={() => setSelectedRequestId(r.id)}
+                        onClick={() => openPendingRow(r.id)}
                         onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            setSelectedRequestId(r.id);
+                            openPendingRow(r.id);
                           }
                         }}
                         tabIndex={0}
@@ -586,7 +666,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                           </Typography>
                         </TableCell>
                         <TableCell>{r.kind === "eol" ? "EOL" : "Customer"}</TableCell>
-                        <TableCell>{r.createdBy || "—"}</TableCell>
+                        <TableCell>{r.createdByEmail || r.createdBy || "—"}</TableCell>
                         <TableCell sx={{ whiteSpace: "nowrap" }}>{formatDate(r.createdAt)}</TableCell>
                         <TableCell sx={{ whiteSpace: "nowrap" }}>{formatDate(r.updatedAt)}</TableCell>
                       </TableRow>
@@ -610,6 +690,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
       {selectedRequestId && (
         <AnnouncementRequestDialog
           requestId={selectedRequestId}
+          caseMembers={selectedCaseMembers}
           onClose={() => setSelectedRequestId(null)}
         />
       )}

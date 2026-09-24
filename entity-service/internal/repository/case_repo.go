@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -115,21 +116,30 @@ func caseEscalationLevelFromEnum(raw string) string {
 type CaseRepository interface {
 	// CreateCase inserts a new case row (both work_item and "case").
 	CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
-	// CreateCaseFromServiceNow inserts a new case row (both work_item and
-	// "case"), the same as CreateCase, but for DATA_SOURCE=postgres-primary-sn-fallback's
-	// SN-first case creation (see caseService.CreateCase's own doc comment):
-	// req.Type must already be "case" (validated by the caller). Unlike
-	// CreateCase, identity is NOT generated here -- id/number/wso2ID/createdBy
-	// are exactly what ServiceNow already returned for the case it just
-	// created, so both systems agree on identity from the moment the Postgres
-	// row exists. id must be a canonical UUID (sysidToUUID(sn sys_id) -- the
-	// same identity convention every DataSource=servicenow response already
-	// uses, see internal/service/sn_id.go). Returns a ValidationError if id is
-	// not a valid UUID or if a row already exists for it/number/wso2ID
+	// CreateCaseFromServiceNow inserts a new case-like row (work_item plus
+	// one of "case"/announcement/service_request/engagement/
+	// security_report_analysis, branching on req.Type -- see
+	// createAnnouncementFromServiceNowQuery/createServiceRequestFromServiceNowQuery/
+	// createEngagementFromServiceNowQuery/createSecurityReportAnalysisFromServiceNowQuery's
+	// own doc comments for why the four non-case types each need a genuinely
+	// different insert, not just a different type literal), for
+	// DATA_SOURCE=postgres-servicenow-dual-write's SN-first creation (see
+	// caseService.CreateCase's own doc comment): req.Type must already be one
+	// of those five (validated by the caller). Unlike CreateCase, identity is
+	// NOT generated here -- id/number/wso2ID/createdBy are exactly what
+	// ServiceNow already returned for the record it just created, so both
+	// systems agree on identity from the moment the Postgres row exists. id
+	// must be a canonical UUID (sysidToUUID(sn sys_id) -- the same identity
+	// convention every DataSource=servicenow response already uses, see
+	// internal/service/sn_id.go). state is the target extension table's own
+	// state enum literal value, already resolved by the caller from
+	// ServiceNow's state label (ignored for req.Type == "case", which hardcodes
+	// 'OPEN' itself, same as before this change). Returns a ValidationError if
+	// id is not a valid UUID or if a row already exists for it/number/wso2ID
 	// (unique violation) -- the latter should not happen in practice since
 	// ServiceNow only just generated these, but is reported precisely rather
 	// than as an opaque infrastructure error if it ever does.
-	CreateCaseFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy string) (domain.Case, error)
+	CreateCaseFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error)
 	// GetCaseByID returns the enriched case view for the given UUID, or a
 	// NotFoundError if no matching row exists OR it exists but scope excludes
 	// it (existence is never revealed to a caller who can't see it).
@@ -355,10 +365,12 @@ func mapCreateCaseError(err error) error {
 // + "case", the same shared-primary-key pattern updateCaseQuery documents)
 // in one round trip via a CTE, using caller-supplied identity throughout
 // rather than generating any of it -- see CreateCaseFromServiceNow's own
-// doc comment for why. type is hardcoded to 'CASE'::work_item_type_enum
-// (the caller guarantees req.Type == "case" -- caseService.CreateCase's SN-
-// first path is case-only, same restriction the existing CreateCase already
-// enforces for the plain Postgres path) and state to 'OPEN'::case_state_enum
+// doc comment for why. Used only for req.Type == "case" -- req.Type ==
+// "announcement" goes through createAnnouncementFromServiceNowQuery instead
+// (see its own doc comment for why announcement needs a structurally
+// different insert, not just a different type literal). type is hardcoded
+// to 'CASE'::work_item_type_enum (the caller guarantees req.Type == "case"
+// on this branch) and state to 'OPEN'::case_state_enum
 // (every case ServiceNow creates starts in its own equivalent initial state;
 // reliably parsing that back out of ServiceNow's raw create-response state
 // label would need the same label->enum lookup sn_case_service.go keeps
@@ -394,14 +406,236 @@ const createCaseFromServiceNowQuery = `
 	FROM inserted_work_item iwi
 	JOIN inserted_case ic ON ic.id = iwi.id`
 
+// createAnnouncementFromServiceNowQuery is createCaseFromServiceNowQuery's
+// counterpart for req.Type == "announcement": announcements are NOT a "case"
+// row at all -- they extend work_item through the separate "announcement"
+// table (migration 000019), which has no severity/issue_type/work_state
+// columns and uses announcement_state_enum (only OPEN/CLOSE) rather than
+// case_state_enum. deployment_id/deployed_product_id are hardcoded NULL
+// (never parameterized as req.DeploymentID/req.DeployedProductID, which are
+// "" for an announcement -- binding "" to a UUID column would fail with
+// 22P02, not silently store nothing) since announcements have no
+// deployment/deployed-product concept (validateCreateCaseRequest's own
+// comment). $8 is the announcement's initial state, already resolved to
+// announcement_state_enum's literal ('OPEN' in practice -- see
+// snAnnouncementStateToEnum) by the caller, not derived here: this layer
+// stays free of ServiceNow label vocabulary. cause/closed_by_user_id/
+// closed_on/resolved_on are left NULL -- all four are closure-time-only
+// fields, meaningless on a fresh row.
+//
+// Column/output order matches scanUpdatedCase exactly, same as
+// createCaseFromServiceNowQuery, with severity/issue_type/work_state as
+// literal NULLs (columns that don't exist on "announcement").
+const createAnnouncementFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, wso2_id, subject, description, type,
+			project_id, deployment_id, deployed_product_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, $5, $6, 'ANNOUNCEMENT'::work_item_type_enum,
+			$7, NULL, NULL
+		)
+		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
+		          subject, description, created_on, updated_on
+	),
+	inserted_announcement AS (
+		INSERT INTO announcement (id, state)
+		VALUES ($1, $8::announcement_state_enum)
+		RETURNING id, state, closed_on
+	)
+	SELECT iwi.id, iwi.number, iwi.wso2_id, iwi.created_by,
+	       iwi.project_id, COALESCE(iwi.deployment_id::TEXT, ''), COALESCE(iwi.deployed_product_id::TEXT, ''),
+	       iwi.subject, iwi.description,
+	       NULL::TEXT, NULL::TEXT, ia.state::TEXT, NULL::TEXT,
+	       iwi.created_on, iwi.updated_on, ia.closed_on
+	FROM inserted_work_item iwi
+	JOIN inserted_announcement ia ON ia.id = iwi.id`
+
+// createServiceRequestFromServiceNowQuery is createCaseFromServiceNowQuery's
+// counterpart for req.Type == "service_request": service_request (migration
+// 000019) has no severity/issue_type/work_state columns and no catalog/
+// variables columns either -- req.CatalogID/req.CatalogItemID/req.Variables
+// are ServiceNow-only inputs for the actual case creation (see
+// snCaseService.CreateCase's "service_request" branch), not persisted here,
+// same "id + state only, everything else NULL" pattern as announcement's own
+// insert. Unlike announcement, deployment_id/deployed_product_id ARE bound
+// from req -- service_request has no exemption from that requirement (see
+// validateCreateCaseRequest's own conditional, which only exempts
+// "announcement"). $10 is the service_request's initial state, already
+// resolved to service_request_state_enum's literal by the caller (see
+// snServiceRequestStateToEnum) -- this layer stays free of ServiceNow label
+// vocabulary. cause/closed_by_user_id/closed_on/resolved_on/category/
+// autoclosure_step/autoclosure_state_on/json_data are left NULL -- all are
+// either closure-time-only or SN-detail fields with no counterpart on
+// req/CreateCaseRequest.
+//
+// Column/output order matches scanUpdatedCase exactly, same as
+// createCaseFromServiceNowQuery, with severity/issue_type/work_state as
+// literal NULLs (columns that don't exist on "service_request").
+const createServiceRequestFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, wso2_id, subject, description, type,
+			project_id, deployment_id, deployed_product_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, $5, $6, 'SERVICE_REQUEST'::work_item_type_enum,
+			$7, $8, $9
+		)
+		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
+		          subject, description, created_on, updated_on
+	),
+	inserted_service_request AS (
+		INSERT INTO service_request (id, state)
+		VALUES ($1, $10::service_request_state_enum)
+		RETURNING id, state, closed_on
+	)
+	SELECT iwi.id, iwi.number, iwi.wso2_id, iwi.created_by,
+	       iwi.project_id, iwi.deployment_id, iwi.deployed_product_id,
+	       iwi.subject, iwi.description,
+	       NULL::TEXT, NULL::TEXT, isr.state::TEXT, NULL::TEXT,
+	       iwi.created_on, iwi.updated_on, isr.closed_on
+	FROM inserted_work_item iwi
+	JOIN inserted_service_request isr ON isr.id = iwi.id`
+
+// createEngagementFromServiceNowQuery is createCaseFromServiceNowQuery's
+// counterpart for req.Type == "engagement": engagement (migration 000019)
+// has no severity/issue_type/work_state columns, same "id + state only"
+// shape as service_request/security_report_analysis for most fields, EXCEPT
+// engagement.type/payment_type -- validateCreateCaseRequest requires
+// req.EngagementType/req.EngagementPaymentType for this type, and unlike
+// service_request's catalog/variables fields, engagement's extension table
+// HAS real columns for these (engagement_type_enum/engagement_payment_type_enum),
+// so they are genuinely required, non-defaultable creation-time fields that
+// must reach this insert, not silently dropped. req.EngagementType/
+// req.EngagementPaymentType's own domain values (e.g. "migration", "foc")
+// upper-case directly onto their SQL enum literals (e.g. 'MIGRATION', 'FOC')
+// -- confirmed against migration 000019's engagement_type_enum/
+// engagement_payment_type_enum value lists, same convention
+// strings.ToUpper(string(req.IssueType)) already relies on for "case". $10 is
+// the engagement's initial state, resolved the same way service_request's is
+// (see snEngagementStateToEnum). deployment_id/deployed_product_id ARE bound
+// from req -- engagement has no exemption from that requirement either.
+//
+// Column/output order matches scanUpdatedCase exactly, same as
+// createCaseFromServiceNowQuery, with severity/issue_type/work_state as
+// literal NULLs (columns that don't exist on "engagement").
+const createEngagementFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, wso2_id, subject, description, type,
+			project_id, deployment_id, deployed_product_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, $5, $6, 'ENGAGEMENT'::work_item_type_enum,
+			$7, $8, $9
+		)
+		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
+		          subject, description, created_on, updated_on
+	),
+	inserted_engagement AS (
+		INSERT INTO engagement (id, state, type, payment_type)
+		VALUES ($1, $10::engagement_state_enum, $11::engagement_type_enum, $12::engagement_payment_type_enum)
+		RETURNING id, state, closed_on
+	)
+	SELECT iwi.id, iwi.number, iwi.wso2_id, iwi.created_by,
+	       iwi.project_id, iwi.deployment_id, iwi.deployed_product_id,
+	       iwi.subject, iwi.description,
+	       NULL::TEXT, NULL::TEXT, ieng.state::TEXT, NULL::TEXT,
+	       iwi.created_on, iwi.updated_on, ieng.closed_on
+	FROM inserted_work_item iwi
+	JOIN inserted_engagement ieng ON ieng.id = iwi.id`
+
+// createSecurityReportAnalysisFromServiceNowQuery is
+// createCaseFromServiceNowQuery's counterpart for req.Type ==
+// "security_report_analysis": security_report_analysis (migration 000019)
+// has no severity/issue_type/work_state columns and no field with a
+// counterpart in req.Attachments (attachments are uploaded via a separate
+// request per file, same as validateCreateCaseRequest's own comment on this
+// type) -- same "id + state only, everything else NULL" pattern as
+// service_request. deployment_id/deployed_product_id ARE bound from req --
+// this type has no exemption from that requirement either. $10 is the
+// record's initial state, resolved the same way service_request's is (see
+// snSecurityReportAnalysisStateToEnum).
+//
+// Column/output order matches scanUpdatedCase exactly, same as
+// createCaseFromServiceNowQuery, with severity/issue_type/work_state as
+// literal NULLs (columns that don't exist on "security_report_analysis").
+const createSecurityReportAnalysisFromServiceNowQuery = `
+	WITH inserted_work_item AS (
+		INSERT INTO work_item (
+			id, created_on, updated_on, created_by, updated_by,
+			number, wso2_id, subject, description, type,
+			project_id, deployment_id, deployed_product_id
+		)
+		VALUES (
+			$1, NOW(), NOW(), $2, $2,
+			$3, $4, $5, $6, 'SECURITY_REPORT_ANALYSIS'::work_item_type_enum,
+			$7, $8, $9
+		)
+		RETURNING id, number, wso2_id, created_by, project_id, deployment_id, deployed_product_id,
+		          subject, description, created_on, updated_on
+	),
+	inserted_security_report_analysis AS (
+		INSERT INTO security_report_analysis (id, state)
+		VALUES ($1, $10::security_report_analysis_state_enum)
+		RETURNING id, state, closed_on
+	)
+	SELECT iwi.id, iwi.number, iwi.wso2_id, iwi.created_by,
+	       iwi.project_id, iwi.deployment_id, iwi.deployed_product_id,
+	       iwi.subject, iwi.description,
+	       NULL::TEXT, NULL::TEXT, isra.state::TEXT, NULL::TEXT,
+	       iwi.created_on, iwi.updated_on, isra.closed_on
+	FROM inserted_work_item iwi
+	JOIN inserted_security_report_analysis isra ON isra.id = iwi.id`
+
 // CreateCaseFromServiceNow implements CaseRepository.
-func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy string) (domain.Case, error) {
-	c, err := scanUpdatedCase(r.db.QueryRow(ctx, createCaseFromServiceNowQuery,
-		id, createdBy,
-		number, wso2ID, req.Subject, req.Description,
-		req.ProjectID, req.DeploymentID, req.DeployedProductID,
-		caseSeverityToEnum[req.Severity], strings.ToUpper(string(req.IssueType)),
-	))
+func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error) {
+	var row pgx.Row
+	switch req.Type {
+	case "announcement":
+		row = r.db.QueryRow(ctx, createAnnouncementFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, state,
+		)
+	case "service_request":
+		row = r.db.QueryRow(ctx, createServiceRequestFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, req.DeploymentID, req.DeployedProductID,
+			state,
+		)
+	case "engagement":
+		row = r.db.QueryRow(ctx, createEngagementFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, req.DeploymentID, req.DeployedProductID,
+			state, strings.ToUpper(string(req.EngagementType)), strings.ToUpper(string(req.EngagementPaymentType)),
+		)
+	case "security_report_analysis":
+		row = r.db.QueryRow(ctx, createSecurityReportAnalysisFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, req.DeploymentID, req.DeployedProductID,
+			state,
+		)
+	default:
+		row = r.db.QueryRow(ctx, createCaseFromServiceNowQuery,
+			id, createdBy,
+			number, wso2ID, req.Subject, req.Description,
+			req.ProjectID, req.DeploymentID, req.DeployedProductID,
+			caseSeverityToEnum[req.Severity], strings.ToUpper(string(req.IssueType)),
+		)
+	}
+	c, err := scanUpdatedCase(row)
 	if err != nil {
 		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) {
 			switch pgErr.Code {
@@ -443,7 +677,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		// response, matching CaseView.InternalID's own doc comment on why
 		// it can't become *string.
 		internalID                               *string
-		aeID, aeName                             *string
+		aeID, aeName, aeEmail                    *string
 		pcID, pcNum, pcType                      *string
 		rcID, rcNum                              *string
 		accountID, accountName                   *string
@@ -482,7 +716,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		        dp.id, prod.name || COALESCE(' ' || pv.version, ''),
 		        prod.id, prod.name,
 		        a.id, a.name,
-		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')),
+		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
 		        pw.id, pw.number, pw.type::TEXT,
 		        rc_wi.id, rc_wi.number
 		 FROM work_item wi
@@ -513,7 +747,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		&dpID, &dpDisplayName,
 		&prodID, &prodName,
 		&accountID, &accountName,
-		&aeID, &aeName,
+		&aeID, &aeName, &aeEmail,
 		&pcID, &pcNum, &pcType,
 		&rcID, &rcNum,
 	)
@@ -626,7 +860,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		if aeName != nil {
 			aName = *aeName
 		}
-		cv.AssignedEngineer = domain.NewUserReference(*aeID, "", aName)
+		cv.AssignedEngineer = domain.NewUserReference(*aeID, stringOrEmpty(aeEmail), aName)
 	}
 	if pcID != nil {
 		// work_item.parent_id (migration 000036) is a generic self-reference
@@ -652,7 +886,50 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		return domain.CaseView{}, err
 	}
 	cv.WatchList = watchers
+
+	// Mirrors sn_case_service.go's GetCaseByID: a tags lookup failure must
+	// not fail the whole case read (see CaseView.Tags' own doc comment) --
+	// cv.Tags is left nil and the failure is logged instead.
+	tags, err := fetchCaseTags(ctx, r.db, id)
+	if err != nil {
+		slog.WarnContext(ctx, "get case: case tags lookup failed", "caseId", id, "error", err)
+	} else {
+		cv.Tags = tags
+	}
 	return cv, nil
+}
+
+// fetchCaseTags reads the tags currently attached to the case (== work_item)
+// identified by caseID, via work_item_tag joined to tag -- the same rows
+// AddCaseTag/RemoveCaseTag write. There is no case-scoped "list tags" route
+// on this data source (only POST .../tags and DELETE .../tags/{tagId}), so
+// GetCaseByID is the only place a caller ever sees a case's current tag set;
+// unlike sn_case_service.go's listCaseTags, which calls a real case-scoped
+// ServiceNow endpoint, this reads work_item_tag directly.
+func fetchCaseTags(ctx context.Context, q rowsQuerier, caseID string) ([]domain.Tag, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.id, t.name
+		FROM work_item_tag wit
+		JOIN tag t ON t.id = wit.tag_id
+		WHERE wit.work_item_id = $1
+		ORDER BY t.name`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch case tags: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []domain.Tag
+	for rows.Next() {
+		tag, err := scanTag(rows)
+		if err != nil {
+			return nil, fmt.Errorf("fetch case tags: scan: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("fetch case tags: %w", err)
+	}
+	return tags, nil
 }
 
 // caseCommentTypeEnum maps a domain.CommentType to its comment_type_enum
@@ -1013,7 +1290,7 @@ func (r *caseRepo) SearchCaseAttachments(ctx context.Context, caseID string, pag
 	const countQuery = `SELECT COUNT(*) FROM case_attachment WHERE case_id = $1 AND status = 'complete'`
 	const dataQuery = `
 		SELECT ca.id, ca.case_id, ca.filename, ca.mime_type, ca.size_bytes, ca.description,
-		       u.id, u.email, TRIM(u.first_name || ' ' || u.last_name) AS full_name,
+		       u.id, u.email, COALESCE(u.name, NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), '') AS full_name,
 		       ca.created_on, ca.storage_key, ca.status
 		FROM case_attachment ca
 		JOIN "user" u ON u.id = ca.uploaded_by
@@ -1082,7 +1359,7 @@ func (r *caseRepo) SearchCaseAttachments(ctx context.Context, caseID string, pag
 func (r *caseRepo) GetCaseAttachmentByID(ctx context.Context, id string) (domain.Attachment, error) {
 	const query = `
 		SELECT ca.id, ca.case_id, ca.filename, ca.mime_type, ca.size_bytes, ca.description,
-		       u.id, u.email, TRIM(u.first_name || ' ' || u.last_name) AS full_name,
+		       u.id, u.email, COALESCE(u.name, NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), '') AS full_name,
 		       ca.created_on, ca.storage_key, ca.status
 		FROM case_attachment ca
 		JOIN "user" u ON u.id = ca.uploaded_by
@@ -1394,7 +1671,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		        d.id, d.name,
 		        dp.id, prod.name || COALESCE(' ' || pv.version, ''),
 		        prod.id, prod.name,
-		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')),
+		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
 		        pw.id, pw.number,
 		        rc_wi.id, rc_wi.number
 		 FROM work_item wi %s %s
@@ -1431,7 +1708,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			var description *string
 			var severity, issueType, engagementType, workState, state, escalationLevel *string
 			var createdAt, updatedAt time.Time
-			var aeID, aeName *string
+			var aeID, aeName, aeEmail *string
 			var pcID, pcNumber *string
 			var rcID, rcNumber *string
 			var prodID, prodName *string
@@ -1448,7 +1725,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 				&depID, &depName,
 				&dpID, &dpName,
 				&prodID, &prodName,
-				&aeID, &aeName,
+				&aeID, &aeName, &aeEmail,
 				&pcID, &pcNumber,
 				&rcID, &rcNumber,
 			); err != nil {
@@ -1505,7 +1782,7 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 			// display name, so the canonical reference keeps a null id.
 			cv.CreatedBy = domain.NewUserReference("", creatorEmail, "")
 			if aeID != nil {
-				cv.AssignedEngineer = domain.NewUserReference(*aeID, "", stringOrEmpty(aeName))
+				cv.AssignedEngineer = domain.NewUserReference(*aeID, stringOrEmpty(aeEmail), stringOrEmpty(aeName))
 			}
 			if pcID != nil {
 				cv.ParentCase = &domain.EntityRef{ID: *pcID, Name: stringOrEmpty(pcNumber)}

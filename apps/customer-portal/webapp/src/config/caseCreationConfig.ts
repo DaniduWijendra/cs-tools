@@ -14,11 +14,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { createSavedFilterViewsStore } from "@features/csm-operations/utils/savedFilterViews";
-
-/** Saved views for the Incidents tab, on their own `localStorage` key —
- * independent of the Cases list's and the other Operations sub-tabs' own
- * saved views. */
-export const incidentsSavedViews = createSavedFilterViewsStore(
-  "csm.savedFilters.incidents.v1",
-);
+/**
+ * Kill switch for the case-creation "add deployment/product inline" feature:
+ * the empty-state alert, the in-menu add-new row, the two-step wizard, and
+ * singleton auto-select. Defaults to enabled when unset - this flag exists
+ * to allow disabling the whole feature quickly, not to gate a rollout.
+ *
+ * @returns {boolean} Whether the feature is enabled.
+ */
+export function isDeploymentSetupDuringCaseCreationEnabled(): boolean {
+  return window.config?.CUSTOMER_PORTAL_ALLOW_DEPLOYMENT_SETUP_DURING_CASE_CREATION ?? true;
+}

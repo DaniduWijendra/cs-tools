@@ -518,3 +518,148 @@ func TestSearchUsers(t *testing.T) {
 		}
 	})
 }
+
+func TestListSavedFilterViews(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false)
+		r := httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil)
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+		assertErrorMessage(t, w, ErrMsgUnauthorized)
+	})
+
+	t.Run("requires listKey", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views", nil))
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, "listKey is required.")
+	})
+
+	t.Run("forwards listKey and returns upstream body", func(t *testing.T) {
+		var gotKey string
+		entityClient := &mockEntityUserClient{
+			listSavedFilterViewsFn: func(_ context.Context, listKey string) ([]byte, error) {
+				gotKey = listKey
+				return []byte(`{"views":[{"name":"Open","qs":"states=open"}]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil))
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if gotKey != "cases" {
+			t.Errorf("listKey = %q, want cases", gotKey)
+		}
+	})
+
+	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
+		for _, tc := range upstreamErrorsGeneric("Failed to list saved filter views.") {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				entityClient := &mockEntityUserClient{
+					listSavedFilterViewsFn: func(_ context.Context, _ string) ([]byte, error) {
+						return nil, tc.err
+					},
+				}
+				h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false)
+				r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil))
+				w := httptest.NewRecorder()
+				h.ListSavedFilterViews(w, r)
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+			})
+		}
+	})
+}
+
+func TestSaveSavedFilterView(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false)
+		r := httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(`{}`))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+	})
+
+	t.Run("rejects invalid JSON", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(`not-json`)))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, ErrMsgBadRequest)
+	})
+
+	t.Run("forwards body", func(t *testing.T) {
+		const payload = `{"listKey":"cases","name":"Open","qs":"states=open"}`
+		var captured []byte
+		entityClient := &mockEntityUserClient{
+			saveSavedFilterViewFn: func(_ context.Context, body []byte) ([]byte, error) {
+				captured = body
+				return []byte(`{"views":[{"name":"Open","qs":"states=open"}]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(payload)))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(captured) != payload {
+			t.Errorf("body = %q, want %q", captured, payload)
+		}
+	})
+}
+
+func TestDeleteSavedFilterView(t *testing.T) {
+	t.Run("requires listKey and name", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodDelete, "/users/me/saved-filter-views?listKey=cases", nil))
+		w := httptest.NewRecorder()
+		h.DeleteSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, "listKey and name are required.")
+	})
+
+	t.Run("forwards query params", func(t *testing.T) {
+		var gotKey, gotName string
+		entityClient := &mockEntityUserClient{
+			deleteSavedFilterViewFn: func(_ context.Context, listKey, name string) ([]byte, error) {
+				gotKey, gotName = listKey, name
+				return []byte(`{"views":[]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodDelete, "/users/me/saved-filter-views?listKey=incidents&name=Mine", nil))
+		w := httptest.NewRecorder()
+		h.DeleteSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if gotKey != "incidents" || gotName != "Mine" {
+			t.Errorf("got %s/%s", gotKey, gotName)
+		}
+	})
+}
+
+func TestReorderSavedFilterView(t *testing.T) {
+	t.Run("forwards body", func(t *testing.T) {
+		const payload = `{"listKey":"cases","name":"Open","direction":"down"}`
+		var captured []byte
+		entityClient := &mockEntityUserClient{
+			reorderSavedFilterViewFn: func(_ context.Context, body []byte) ([]byte, error) {
+				captured = body
+				return []byte(`{"views":[]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users/me/saved-filter-views/reorder", strings.NewReader(payload)))
+		w := httptest.NewRecorder()
+		h.ReorderSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(captured) != payload {
+			t.Errorf("body = %q, want %q", captured, payload)
+		}
+	})
+}

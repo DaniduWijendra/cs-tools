@@ -55,8 +55,8 @@ type snWritebackJob struct {
 }
 
 // SNWritebackDispatcher runs best-effort, one-way ServiceNow mirror writes
-// for DATA_SOURCE=postgres-primary-sn-fallback (see
-// config.DataSourcePostgresPrimarySNFallback). Postgres is always written
+// for DATA_SOURCE=postgres-servicenow-dual-write (see
+// config.DataSourcePostgresServiceNowDualWrite). Postgres is always written
 // synchronously, in the request path, before Dispatch is ever called —
 // Dispatch only ever fires after that commit already succeeded. The
 // ServiceNow write it queues runs on a fixed background worker pool, fully
@@ -77,7 +77,7 @@ type SNWritebackDispatcher struct {
 // NewSNWritebackDispatcher constructs an SNWritebackDispatcher and starts
 // its fixed pool of background workers. failures must not be nil — the
 // dispatcher only makes sense where a Postgres pool (and therefore this
-// table) is available, which DATA_SOURCE=postgres-primary-sn-fallback
+// table) is available, which DATA_SOURCE=postgres-servicenow-dual-write
 // guarantees (see config.Config.Validate's dbRequired check).
 func NewSNWritebackDispatcher(failures repository.SNWritebackFailureRepository) *SNWritebackDispatcher {
 	d := &SNWritebackDispatcher{

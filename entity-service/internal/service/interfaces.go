@@ -241,7 +241,7 @@ type AnnouncementRequestService interface {
 	// Approve moves pending_approval -> approved. A ConflictError is
 	// returned unless the current state is pending_approval. There is no
 	// approver-role check — see the interface's own doc comment.
-	Approve(ctx context.Context, id, actorID string) (domain.AnnouncementRequest, error)
+	Approve(ctx context.Context, id, actorID, actorEmail string) (domain.AnnouncementRequest, error)
 	// MarkPublished moves approved -> published, storing caseIDs (the real
 	// case created for each resolved project, from the caller's own
 	// fan-out) as PublishedCaseIDs. Does not itself create any cases. A
@@ -250,7 +250,26 @@ type AnnouncementRequestService interface {
 	// restricted: a ForbiddenError is returned unless actorID matches the
 	// request's own CreatedBy -- an approver's job is only to approve, not
 	// to also trigger the real send to customers.
-	MarkPublished(ctx context.Context, id, actorID string, caseIDs []string) (domain.AnnouncementRequest, error)
+	MarkPublished(ctx context.Context, id, actorID, actorEmail string, caseIDs []string) (domain.AnnouncementRequest, error)
+	// Schedule sets or clears (nil) scheduledFor for an approved request —
+	// once set, operations/csm-scheduled-tasks' publish_scheduled_announcements
+	// sub-cron publishes it automatically once that time arrives. A
+	// ConflictError is returned unless the current state is approved; a
+	// ForbiddenError unless actorID matches the request's own CreatedBy
+	// (same creator-only restriction as MarkPublished — scheduling is
+	// choosing when Publish happens); a ValidationError if scheduledFor is
+	// non-nil and not strictly in the future.
+	Schedule(ctx context.Context, id, actorID, actorEmail string, scheduledFor *time.Time) (domain.AnnouncementRequest, error)
+	// AutoPublish runs the entire Publish fan-out in-process (create a case
+	// per unresolved project, attach the security tag, record deliveries,
+	// mark published) for one already-due scheduled request — the automatic
+	// counterpart to the webapp's own manual Publish flow, callable only by
+	// an internal service (a ForbiddenError otherwise). A ConflictError is
+	// returned if the request isn't approved, its scheduled time hasn't
+	// arrived yet, it has no resolved audience, or a pass still has
+	// outstanding case-creation/tag failures (safe to call again — it
+	// resumes from the delivery ledger exactly like a manual retry would).
+	AutoPublish(ctx context.Context, id string) (domain.AnnouncementRequest, error)
 	// AddUpdate posts a new AnnouncementRequestUpdate for a published
 	// request. Does not itself apply Content as a comment anywhere -- the
 	// caller's own fan-out does that, separately, after this call succeeds
@@ -258,10 +277,21 @@ type AnnouncementRequestService interface {
 	// unless the current state is published; a ForbiddenError unless
 	// actorID matches the request's own CreatedBy (same creator-only
 	// restriction as MarkPublished, for the same reason).
-	AddUpdate(ctx context.Context, id, actorID, content string) (domain.AnnouncementRequestUpdate, error)
+	AddUpdate(ctx context.Context, id, actorID, actorEmail, content string) (domain.AnnouncementRequestUpdate, error)
 	// ListUpdates returns every update posted for id, newest first. A
 	// NotFoundError is returned if the request itself doesn't exist.
 	ListUpdates(ctx context.Context, id string) (domain.SearchAnnouncementRequestUpdatesResponse, error)
+	// RecordDeliveries upserts one Publish fan-out pass's worth of
+	// per-project outcomes for id. Same creator-only restriction as
+	// MarkPublished, and for the same reason: this is bookkeeping for the
+	// real send, which only the request's own creator can drive. A
+	// ConflictError is returned unless the current state is approved (a
+	// delivery only means anything mid-fan-out, before the request reaches
+	// published); a ValidationError if deliveries is empty.
+	RecordDeliveries(ctx context.Context, id, actorID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) (domain.SearchAnnouncementRequestDeliveriesResponse, error)
+	// ListDeliveries returns every delivery recorded for id. A NotFoundError
+	// is returned if the request itself doesn't exist.
+	ListDeliveries(ctx context.Context, id string) (domain.SearchAnnouncementRequestDeliveriesResponse, error)
 }
 
 // SNAccountService defines the account operations backed by the ServiceNow data source.
@@ -310,10 +340,31 @@ type ProjectMetadataService interface {
 	GetProjectMetadata(ctx context.Context, projectID string) (domain.ProjectMetadataResponse, error)
 }
 
+// ProjectCaseStatsService is the GetProjectCaseStats slice of
+// ProjectStatsService, split out for the same reason ProjectMetadataService
+// is: it has a Postgres-backed implementation (projectCaseStatsService) as
+// well as the ServiceNow one, so it is wired and registered independently of
+// the remaining stats methods, which stay ServiceNow-only. In ServiceNow mode
+// snProjectStatsService satisfies this interface structurally, so the same
+// concrete value backs both. See ProjectCaseStatsHandler.
+type ProjectCaseStatsService interface {
+	// GetProjectCaseStats returns the case statistics for a project,
+	// optionally narrowed by case type and creator. A ValidationError is
+	// returned for a malformed UUID or an unrecognised case type; a
+	// NotFoundError if no project matches.
+	GetProjectCaseStats(ctx context.Context, projectID string, req domain.ProjectCaseStatsRequest) (domain.ProjectCaseStatsResponse, error)
+}
+
 // ProjectStatsService defines the project-scoped metadata and statistics
-// operations. GetProjectMetadata also has a Postgres-backed implementation --
-// see ProjectMetadataService. The remaining stats methods require the
-// ServiceNow data source; there is no Postgres fallback for them yet.
+// operations. Every method has both a ServiceNow implementation
+// (snProjectStatsService) and a Postgres one (projectStatsService), so all of
+// these routes are registered regardless of the data source.
+//
+// GetProjectMetadata and GetProjectCaseStats additionally have their own
+// narrower interfaces (ProjectMetadataService, ProjectCaseStatsService):
+// each was portable to Postgres before the rest of the bundle was, and the
+// Postgres projectStatsService composes them rather than reimplementing
+// either.
 type ProjectStatsService interface {
 	// GetProjectMetadata returns the reference data (choice lists, feature
 	// flags) needed to build the project's UI.

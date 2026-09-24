@@ -14,17 +14,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package auth validates the Asgardeo-issued tokens entity-service receives and
-// carries the verified caller identity to the services that scope by it.
+// Package auth validates the Asgardeo-issued x-user-id-token entity-service
+// receives, and carries the verified caller identity to the services that
+// scope by it.
 //
 // Two tokens can arrive on a request:
 //   - x-user-id-token: the end user's ID token (email claim, audience = one of
 //     the accepted application client ids). Present when a portal backend acts
-//     for a user.
-//   - Authorization: Bearer: the calling application's client-credentials
-//     access token (client_id/azp claim). Present on every service-to-service
+//     for a user. Fully verified: signature, issuer, expiry, audience.
+//   - x-jwt-assertion: the calling application's own client-credentials
+//     assertion (client_id/azp claim). Present on every service-to-service
 //     call; it is the ONLY token a machine-to-machine caller (e.g.
-//     csm-integration-service) sends.
+//     csm-integration-service) sends. Only decoded, never signature-verified
+//     -- see ExtractClientID's own doc comment for why.
 package auth
 
 import (
@@ -56,15 +58,27 @@ var signingMethods = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS51
 type UserClaims struct {
 	Email   string
 	Subject string
+	// UserID is the token's "userid" claim -- Asgardeo's stable, per-account
+	// user identifier. Unlike Subject ("sub"), which csm-portal-backend's own
+	// frontend has separately documented as per-session rather than stable
+	// (see that repo's IdTokenClaims doc comment), UserID is the same value
+	// both csm-portal-backend and customer-portal backend-v2 already decode
+	// from this identical token into their own UserInfo.UserID and log on
+	// every request they handle -- see that value's own doc comment for why
+	// this one, not Subject, is the field to correlate a request across
+	// services by.
+	UserID string
 }
 
-// ClientClaims is what a validated client-credentials access token yields.
+// ClientClaims is what a decoded client-credentials assertion yields. See
+// ExtractClientID for why this is a decode, not a validation.
 type ClientClaims struct {
 	ClientID string
 }
 
 type tokenClaims struct {
 	Email    string `json:"email"`
+	UserID   string `json:"userid"`
 	ClientID string `json:"client_id"`
 	AZP      string `json:"azp"`
 	jwt.RegisteredClaims
@@ -135,18 +149,33 @@ func (v *Validator) ValidateUserToken(raw string) (UserClaims, error) {
 	if strings.TrimSpace(c.Email) == "" {
 		return UserClaims{}, errors.New("token missing email claim")
 	}
-	return UserClaims{Email: strings.TrimSpace(c.Email), Subject: c.Subject}, nil
+	return UserClaims{Email: strings.TrimSpace(c.Email), Subject: c.Subject, UserID: strings.TrimSpace(c.UserID)}, nil
 }
 
-// ValidateClientToken validates an application's client-credentials access
-// token: signature, issuer and expiry, then extracts the client id from the
-// client_id claim (falling back to azp). No audience is enforced -- the client
-// id is what gets authorized, by AccessService checking it against
-// AUTH_INTERNAL_CLIENT_IDS.
-func (v *Validator) ValidateClientToken(raw string) (ClientClaims, error) {
-	c, err := v.parse(raw)
-	if err != nil {
-		return ClientClaims{}, err
+// ExtractClientID reads the client id (client_id claim, falling back to azp)
+// out of a client-credentials assertion -- x-jwt-assertion -- WITHOUT
+// verifying its signature, issuer, or expiry. Unlike ValidateUserToken, this
+// is a plain decode.
+//
+// This is deliberate, not a shortcut: x-jwt-assertion is minted by the
+// gateway in front of this service after it has already authenticated the
+// caller by whatever means that gateway uses, and delivered over a path this
+// service already trusts (the same reason apps/csm-portal/backend's own
+// x-jwt-assertion handling runs with signature verification off in every
+// Choreo deployment, not just locally -- see that repo's own
+// middleware.Auth). Re-verifying it here against Asgardeo's JWKS doesn't add
+// security (the token isn't necessarily even Asgardeo-issued or signed with a
+// key that JWKS publishes) and did cause real outages: a JWKS refresh
+// rate-limit or transient lookup failure turned into every internal caller
+// being rejected. The client id is only ever used to check membership in
+// AUTH_INTERNAL_CLIENT_IDS -- a deployment-controlled allow-list, not a
+// capability grant derived from unproven claims -- so trusting it at face
+// value here carries no more risk than trusting any other value read off this
+// same header elsewhere in the fleet.
+func (v *Validator) ExtractClientID(raw string) (ClientClaims, error) {
+	var c tokenClaims
+	if _, _, err := new(jwt.Parser).ParseUnverified(raw, &c); err != nil {
+		return ClientClaims{}, fmt.Errorf("decode token: %w", err)
 	}
 	id := strings.TrimSpace(c.ClientID)
 	if id == "" {

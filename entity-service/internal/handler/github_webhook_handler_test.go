@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,10 @@ type fakeSync struct {
 	called  int
 	outcome service.Outcome
 	err     error
+}
+
+func (f *fakeSync) CreateServiceRequestFromIssue(context.Context, domain.CreateServiceRequestFromIssueRequest) (domain.CreateServiceRequestFromIssueResponse, error) {
+	return domain.CreateServiceRequestFromIssueResponse{}, nil
 }
 
 func (f *fakeSync) HandleWebhook(context.Context, service.Delivery) (service.Outcome, error) {

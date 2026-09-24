@@ -66,7 +66,7 @@ func staticValidator(key *rsa.PrivateKey) *Validator {
 }
 
 func userClaims(mod func(jwt.MapClaims)) jwt.MapClaims {
-	c := jwt.MapClaims{"iss": testIssuer, "aud": []string{testSPA}, "sub": "user-1", "email": "Jane@Example.com", "exp": time.Now().Add(time.Hour).Unix()}
+	c := jwt.MapClaims{"iss": testIssuer, "aud": []string{testSPA}, "sub": "user-1", "userid": "asgardeo-uuid-1", "email": "Jane@Example.com", "exp": time.Now().Add(time.Hour).Unix()}
 	if mod != nil {
 		mod(c)
 	}
@@ -86,7 +86,7 @@ func TestValidateUserToken(t *testing.T) {
 	v := staticValidator(key)
 
 	uc, err := v.ValidateUserToken(sign(t, key, userClaims(nil)))
-	if err != nil || uc.Email != "Jane@Example.com" || uc.Subject != "user-1" {
+	if err != nil || uc.Email != "Jane@Example.com" || uc.Subject != "user-1" || uc.UserID != "asgardeo-uuid-1" {
 		t.Fatalf("valid token: %+v, %v", uc, err)
 	}
 
@@ -120,33 +120,56 @@ func TestValidateUserToken_RejectsAlgorithmConfusion(t *testing.T) {
 	_ = key
 }
 
-func TestValidateClientToken(t *testing.T) {
+func TestExtractClientID(t *testing.T) {
 	key, other := newKey(t), newKey(t)
 	v := staticValidator(key)
 
-	cc, err := v.ValidateClientToken(sign(t, key, clientClaims(nil)))
+	cc, err := v.ExtractClientID(sign(t, key, clientClaims(nil)))
 	if err != nil || cc.ClientID != testM2M {
 		t.Fatalf("client_id claim: %+v, %v", cc, err)
 	}
-	cc, err = v.ValidateClientToken(sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id"); c["azp"] = "from-azp" })))
+	cc, err = v.ExtractClientID(sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id"); c["azp"] = "from-azp" })))
 	if err != nil || cc.ClientID != "from-azp" {
 		t.Fatalf("azp fallback: %+v, %v", cc, err)
 	}
 
-	bad := map[string]string{
-		"no client id":        sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id") })),
+	// Deliberately unverified -- see ExtractClientID's own doc comment for
+	// why: the client id is still read out of a wrong-issuer, expired, or
+	// wrong-key-signed token, since none of that is checked.
+	unverified := map[string]string{
 		"wrong issuer":        sign(t, key, clientClaims(func(c jwt.MapClaims) { c["iss"] = "https://evil.example/token" })),
 		"expired":             sign(t, key, clientClaims(func(c jwt.MapClaims) { c["exp"] = time.Now().Add(-time.Hour).Unix() })),
+		"no exp claim at all": sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "exp") })),
 		"signed by other key": sign(t, other, clientClaims(nil)),
 	}
+	for name, tok := range unverified {
+		if cc, err := v.ExtractClientID(tok); err != nil || cc.ClientID != testM2M {
+			t.Errorf("%s: expected the client id to still be extracted, got %+v, %v", name, cc, err)
+		}
+	}
+
+	bad := map[string]string{
+		"no client id, no azp": sign(t, key, clientClaims(func(c jwt.MapClaims) { delete(c, "client_id") })),
+		"not a jwt":            "garbage",
+	}
 	for name, tok := range bad {
-		if _, err := v.ValidateClientToken(tok); err == nil {
+		if _, err := v.ExtractClientID(tok); err == nil {
 			t.Errorf("%s: token was accepted", name)
 		}
 	}
 }
 
 func run(t *testing.T, v *Validator, headers map[string]string) (code int, id Identity, called bool) {
+	t.Helper()
+	_, code, id, called = runWithHolder(t, v, headers)
+	return code, id, called
+}
+
+// runWithHolder is run's superset, also returning the *IdentityHolder --
+// installed into context the same way middleware.Logger installs one in
+// production, before Middleware runs -- so a test can assert what an outer
+// access logger would see, including on a rejected request.
+func runWithHolder(t *testing.T, v *Validator, headers map[string]string) (holder *IdentityHolder, code int, id Identity, called bool) {
 	t.Helper()
 	h := Middleware(v)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -156,9 +179,11 @@ func run(t *testing.T, v *Validator, headers map[string]string) (code int, id Id
 	for k, val := range headers {
 		req.Header.Set(k, val)
 	}
+	ctx, holderRef := WithIdentityHolder(req.Context())
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return rec.Code, id, called
+	return holderRef, rec.Code, id, called
 }
 
 // TestMiddleware_NilValidatorIsADefensiveFallbackNotADeploymentMode: routes.go
@@ -166,7 +191,7 @@ func run(t *testing.T, v *Validator, headers map[string]string) (code int, id Id
 // some caller wires this middleware incorrectly -- it must still fail safe
 // (pass through, never trust the token) rather than panic.
 func TestMiddleware_NilValidatorIsADefensiveFallbackNotADeploymentMode(t *testing.T) {
-	code, id, called := run(t, nil, map[string]string{"x-user-id-token": "garbage", "Authorization": "Bearer garbage"})
+	code, id, called := run(t, nil, map[string]string{"x-user-id-token": "garbage", "x-jwt-assertion": "garbage"})
 	if code != http.StatusOK || !called {
 		t.Fatalf("a nil validator must pass through, got %d called=%v", code, called)
 	}
@@ -179,7 +204,7 @@ func TestMiddleware_Enabled(t *testing.T) {
 	key := newKey(t)
 	v := staticValidator(key)
 	user := sign(t, key, userClaims(nil))
-	bearer := sign(t, key, clientClaims(nil))
+	clientAssertion := sign(t, key, clientClaims(nil))
 
 	t.Run("no tokens passes as validated-but-anonymous", func(t *testing.T) {
 		code, id, called := run(t, v, nil)
@@ -187,34 +212,93 @@ func TestMiddleware_Enabled(t *testing.T) {
 			t.Fatalf("got %d %+v called=%v", code, id, called)
 		}
 	})
-	t.Run("m2m: bearer only", func(t *testing.T) {
-		_, id, _ := run(t, v, map[string]string{"Authorization": "Bearer " + bearer})
+	t.Run("m2m: client assertion only", func(t *testing.T) {
+		_, id, _ := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion})
 		if !id.Validated || id.ClientID != testM2M || id.UserEmail != "" {
 			t.Fatalf("got %+v", id)
 		}
 	})
-	t.Run("on behalf of a user: bearer + user token", func(t *testing.T) {
-		_, id, _ := run(t, v, map[string]string{"authorization": "bearer " + bearer, "x-user-id-token": user})
-		if id.ClientID != testM2M || id.UserEmail != "Jane@Example.com" || id.UserSubject != "user-1" {
+	t.Run("an expired or wrong-key-signed client assertion still resolves the client id", func(t *testing.T) {
+		other := newKey(t)
+		expired := sign(t, key, clientClaims(func(c jwt.MapClaims) { c["exp"] = time.Now().Add(-time.Hour).Unix() }))
+		wrongKey := sign(t, other, clientClaims(nil))
+		for _, tok := range []string{expired, wrongKey} {
+			code, id, _ := run(t, v, map[string]string{"x-jwt-assertion": tok})
+			if code != http.StatusOK || id.ClientID != testM2M {
+				t.Fatalf("x-jwt-assertion is decoded, not verified -- got %d %+v", code, id)
+			}
+		}
+	})
+	t.Run("on behalf of a user: client assertion + user token", func(t *testing.T) {
+		_, id, _ := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": user})
+		if id.ClientID != testM2M || id.UserEmail != "Jane@Example.com" || id.UserSubject != "user-1" || id.UserID != "asgardeo-uuid-1" {
 			t.Fatalf("got %+v", id)
 		}
 	})
 	t.Run("invalid user token is rejected, not downgraded to anonymous", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"Authorization": "Bearer " + bearer, "x-user-id-token": "garbage"})
+		code, _, called := run(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
 	})
-	t.Run("invalid bearer is rejected", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"Authorization": "Bearer garbage"})
+	t.Run("invalid client assertion is rejected", func(t *testing.T) {
+		code, _, called := run(t, v, map[string]string{"x-jwt-assertion": "garbage"})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
 		}
 	})
 	t.Run("a client-credentials token is not accepted as a user token", func(t *testing.T) {
-		code, _, called := run(t, v, map[string]string{"x-user-id-token": bearer})
+		code, _, called := run(t, v, map[string]string{"x-user-id-token": clientAssertion})
 		if code != http.StatusUnauthorized || called {
 			t.Fatalf("got %d called=%v", code, called)
+		}
+	})
+}
+
+// TestMiddleware_IdentityHolder covers what middleware.Logger actually reads
+// to build its access-log line: the *IdentityHolder installed into context
+// before Middleware runs, not IdentityFromContext (see IdentityHolder's own
+// doc comment for why the two differ on a rejected request).
+func TestMiddleware_IdentityHolder(t *testing.T) {
+	key := newKey(t)
+	v := staticValidator(key)
+	user := sign(t, key, userClaims(nil))
+	clientAssertion := sign(t, key, clientClaims(nil))
+
+	t.Run("no tokens: holder stays empty", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, nil)
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("m2m: holder carries the client id", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion})
+		if holder.ClientID != testM2M || holder.UserID != "" {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("on behalf of a user: holder carries the user UUID, not sub", func(t *testing.T) {
+		holder, _, _, _ := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": user})
+		if holder.UserID != "asgardeo-uuid-1" || holder.ClientID != testM2M {
+			t.Fatalf("got %+v", holder)
+		}
+	})
+	t.Run("invalid user token: holder stays empty, even though the client assertion alone would have validated", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"x-jwt-assertion": clientAssertion, "x-user-id-token": "garbage"})
+		if code != http.StatusUnauthorized || called {
+			t.Fatalf("got %d called=%v", code, called)
+		}
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("a rejected request must never attribute the access log to an unproven claim, got %+v", holder)
+		}
+	})
+	t.Run("invalid client assertion: holder stays empty", func(t *testing.T) {
+		holder, code, _, called := runWithHolder(t, v, map[string]string{"x-jwt-assertion": "garbage"})
+		if code != http.StatusUnauthorized || called {
+			t.Fatalf("got %d called=%v", code, called)
+		}
+		if holder.UserID != "" || holder.ClientID != "" {
+			t.Fatalf("got %+v", holder)
 		}
 	})
 }

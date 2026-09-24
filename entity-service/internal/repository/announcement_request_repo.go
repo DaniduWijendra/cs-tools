@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,7 +53,26 @@ type AnnouncementRequestRepository interface {
 	// the dry-run precondition before this is called.
 	Submit(ctx context.Context, id string, req domain.SubmitAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
 	// Approve moves state to approved and sets approved_by/approved_on.
-	Approve(ctx context.Context, id, actorID string) (domain.AnnouncementRequest, error)
+	Approve(ctx context.Context, id, actorID, actorEmail string) (domain.AnnouncementRequest, error)
+	// SetSchedule sets or clears scheduled_on (nil clears it) — only
+	// callable while the row is approved. The service layer has already
+	// validated the current state, the actor, and (if non-nil) that
+	// scheduledFor is in the future.
+	SetSchedule(ctx context.Context, id string, scheduledFor *time.Time) (domain.AnnouncementRequest, error)
+	// ClaimForAutoPublish atomically marks a due, approved row as "being
+	// auto-published right now" (publish_claimed_on = NOW()), so a second,
+	// overlapping AutoPublish attempt for the same row can't also start
+	// fanning out to the same projects. Only succeeds when the row is
+	// approved, due (scheduled_on <= NOW()), and not already claimed within
+	// staleAfter -- an older claim is assumed abandoned (the process that
+	// held it crashed or was killed) and can be reclaimed. Callers must
+	// release the claim (ReleaseAutoPublishClaim) once their attempt ends,
+	// success or failure.
+	ClaimForAutoPublish(ctx context.Context, id string, staleAfter time.Duration) (domain.AnnouncementRequest, error)
+	// ReleaseAutoPublishClaim clears publish_claimed_on unconditionally --
+	// safe to call even if the row has since moved to published, or was
+	// never claimed at all.
+	ReleaseAutoPublishClaim(ctx context.Context, id string) error
 	// RevertToDraft moves state back to draft, clearing
 	// resolved_project_ids/resolved_project_count/dry_run_case_id/
 	// dry_run_on/dry_run_by/submitted_by/submitted_on, and — in the same
@@ -62,11 +82,18 @@ type AnnouncementRequestRepository interface {
 	RevertToDraft(ctx context.Context, id string, req domain.UpdateAnnouncementRequestRequest) (domain.AnnouncementRequest, error)
 	// MarkPublished moves state to published, sets published_by/published_on,
 	// and stores caseIDs as published_case_ids.
-	MarkPublished(ctx context.Context, id, actorID string, caseIDs []string) (domain.AnnouncementRequest, error)
+	MarkPublished(ctx context.Context, id, actorID, actorEmail string, caseIDs []string) (domain.AnnouncementRequest, error)
 	// CreateUpdate inserts a new announcement_request_updates row.
-	CreateUpdate(ctx context.Context, announcementRequestID, content, createdBy string) (domain.AnnouncementRequestUpdate, error)
+	CreateUpdate(ctx context.Context, announcementRequestID, content, createdBy, createdByEmail string) (domain.AnnouncementRequestUpdate, error)
 	// ListUpdates returns every update for announcementRequestID, newest first.
 	ListUpdates(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestUpdate, error)
+	// UpsertDeliveries records (inserts or overwrites) one delivery row per
+	// input, keyed on (announcementRequestID, projectID) — see
+	// announcement_request_deliveries' own migration doc comment for why
+	// this is an upsert rather than a plain insert.
+	UpsertDeliveries(ctx context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error)
+	// ListDeliveries returns every delivery recorded for announcementRequestID.
+	ListDeliveries(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestDelivery, error)
 }
 
 type announcementRequestRepo struct {
@@ -86,9 +113,11 @@ const announcementRequestColumns = `
 	id, kind, state, subject, description, is_security_announcement,
 	audience_definition, resolved_project_ids, resolved_project_count,
 	dry_run_case_id, dry_run_on, dry_run_by,
-	created_by, created_on, updated_on,
-	submitted_by, submitted_on, approved_by, approved_on, published_by, published_on,
-	published_case_ids`
+	created_by, created_by_email, created_on, updated_on,
+	submitted_by, submitted_by_email, submitted_on,
+	approved_by, approved_by_email, approved_on,
+	published_by, published_by_email, published_on,
+	published_case_ids, due_on, scheduled_on`
 
 func scanAnnouncementRequest(row pgx.Row) (domain.AnnouncementRequest, error) {
 	var r domain.AnnouncementRequest
@@ -97,9 +126,11 @@ func scanAnnouncementRequest(row pgx.Row) (domain.AnnouncementRequest, error) {
 		&r.ID, &r.Kind, &r.State, &r.Subject, &r.Description, &r.IsSecurityAnnouncement,
 		&r.AudienceDefinition, &resolvedProjectIDsRaw, &r.ResolvedProjectCount,
 		&r.DryRunCaseID, &r.DryRunAt, &r.DryRunBy,
-		&r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
-		&r.SubmittedBy, &r.SubmittedAt, &r.ApprovedBy, &r.ApprovedAt, &r.PublishedBy, &r.PublishedAt,
-		&publishedCaseIDsRaw,
+		&r.CreatedBy, &r.CreatedByEmail, &r.CreatedAt, &r.UpdatedAt,
+		&r.SubmittedBy, &r.SubmittedByEmail, &r.SubmittedAt,
+		&r.ApprovedBy, &r.ApprovedByEmail, &r.ApprovedAt,
+		&r.PublishedBy, &r.PublishedByEmail, &r.PublishedAt,
+		&publishedCaseIDsRaw, &r.DueOn, &r.ScheduledFor,
 	); err != nil {
 		return domain.AnnouncementRequest{}, err
 	}
@@ -127,12 +158,12 @@ func (r *announcementRequestRepo) Create(ctx context.Context, req domain.CreateA
 		audience = json.RawMessage(`{}`)
 	}
 	query := `
-		INSERT INTO announcement_requests (kind, subject, description, is_security_announcement, audience_definition, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO announcement_requests (kind, subject, description, is_security_announcement, audience_definition, created_by, created_by_email)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
 		RETURNING ` + announcementRequestColumns
 
 	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query,
-		req.Kind, req.Subject, req.Description, req.IsSecurityAnnouncement, audience, req.CreatedBy,
+		req.Kind, req.Subject, req.Description, req.IsSecurityAnnouncement, audience, req.CreatedBy, req.CreatedByEmail,
 	))
 	if err != nil {
 		return domain.AnnouncementRequest{}, fmt.Errorf("create announcement_request: %w", err)
@@ -158,12 +189,20 @@ func (r *announcementRequestRepo) Get(ctx context.Context, id string) (domain.An
 func (r *announcementRequestRepo) Search(ctx context.Context, req domain.SearchAnnouncementRequestsRequest) ([]domain.AnnouncementRequest, int, error) {
 	// state and created_by are both optional filters; NULL::text on the
 	// unused side of each OR makes an unset filter match every row without
-	// needing to build the WHERE clause dynamically.
-	const where = `WHERE ($1::text IS NULL OR state = $1) AND ($2::text IS NULL OR created_by = $2)`
+	// needing to build the WHERE clause dynamically. readyForScheduledPublish
+	// works the same way via NOT $3::boolean: when false the whole OR branch
+	// is unconditionally true (no extra restriction), when true it requires
+	// state = 'approved' and a scheduled_on that has already arrived — the
+	// one query operations/csm-scheduled-tasks' publish_scheduled_announcements
+	// sub-cron needs (the service layer validates this is never combined
+	// with an explicit State).
+	const where = `WHERE ($1::text IS NULL OR state = $1)
+		AND ($2::text IS NULL OR created_by = $2)
+		AND (NOT $3::boolean OR (state = 'approved' AND scheduled_on IS NOT NULL AND scheduled_on <= NOW()))`
 	countQuery := `SELECT COUNT(*) FROM announcement_requests ` + where
 	dataQuery := `SELECT ` + announcementRequestColumns + ` FROM announcement_requests ` + where + `
 		ORDER BY created_on DESC, id
-		LIMIT $3 OFFSET $4`
+		LIMIT $4 OFFSET $5`
 
 	var state *string
 	if req.State != nil {
@@ -175,10 +214,10 @@ func (r *announcementRequestRepo) Search(ctx context.Context, req domain.SearchA
 	var requests []domain.AnnouncementRequest
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		return r.db.QueryRow(egCtx, countQuery, state, req.CreatedBy).Scan(&total)
+		return r.db.QueryRow(egCtx, countQuery, state, req.CreatedBy, req.ReadyForScheduledPublish).Scan(&total)
 	})
 	eg.Go(func() error {
-		rows, err := r.db.Query(egCtx, dataQuery, state, req.CreatedBy, req.Pagination.Limit, req.Pagination.Offset)
+		rows, err := r.db.Query(egCtx, dataQuery, state, req.CreatedBy, req.ReadyForScheduledPublish, req.Pagination.Limit, req.Pagination.Offset)
 		if err != nil {
 			return err
 		}
@@ -292,12 +331,13 @@ func (r *announcementRequestRepo) Submit(ctx context.Context, id string, req dom
 			state = 'pending_approval',
 			resolved_project_ids = $2,
 			resolved_project_count = $3,
-			submitted_by = $4, submitted_on = NOW(),
+			submitted_by = $4, submitted_by_email = NULLIF($5, ''), submitted_on = NOW(),
+			due_on = NOW() + INTERVAL '1 month',
 			updated_on = NOW()
 		WHERE id = $1 AND state = 'draft' AND dry_run_case_id IS NOT NULL
 		RETURNING ` + announcementRequestColumns
 
-	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, projectIDs, len(req.ResolvedProjectIDs), req.ActorID))
+	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, projectIDs, len(req.ResolvedProjectIDs), req.ActorID, req.ActorEmail))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.AnnouncementRequest{}, r.onConflictOrNotFound(ctx, id, "submit for approval")
@@ -308,14 +348,14 @@ func (r *announcementRequestRepo) Submit(ctx context.Context, id string, req dom
 }
 
 // Approve implements AnnouncementRequestRepository.
-func (r *announcementRequestRepo) Approve(ctx context.Context, id, actorID string) (domain.AnnouncementRequest, error) {
+func (r *announcementRequestRepo) Approve(ctx context.Context, id, actorID, actorEmail string) (domain.AnnouncementRequest, error) {
 	query := `
 		UPDATE announcement_requests SET
-			state = 'approved', approved_by = $2, approved_on = NOW(), updated_on = NOW()
+			state = 'approved', approved_by = $2, approved_by_email = NULLIF($3, ''), approved_on = NOW(), updated_on = NOW()
 		WHERE id = $1 AND state = 'pending_approval'
 		RETURNING ` + announcementRequestColumns
 
-	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, actorID))
+	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, actorID, actorEmail))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.AnnouncementRequest{}, r.onConflictOrNotFound(ctx, id, "approve")
@@ -323,6 +363,55 @@ func (r *announcementRequestRepo) Approve(ctx context.Context, id, actorID strin
 		return domain.AnnouncementRequest{}, fmt.Errorf("approve announcement_request: %w", err)
 	}
 	return ar, nil
+}
+
+// SetSchedule implements AnnouncementRequestRepository. Only callable from
+// approved — the state condition below matches Approve's own race-closing
+// shape (a concurrent Publish racing this call can't leave a published row
+// with a stale schedule silently reapplied).
+func (r *announcementRequestRepo) SetSchedule(ctx context.Context, id string, scheduledFor *time.Time) (domain.AnnouncementRequest, error) {
+	query := `
+		UPDATE announcement_requests SET
+			scheduled_on = $2, updated_on = NOW()
+		WHERE id = $1 AND state = 'approved'
+		RETURNING ` + announcementRequestColumns
+
+	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, scheduledFor))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.AnnouncementRequest{}, r.onConflictOrNotFound(ctx, id, "schedule")
+		}
+		return domain.AnnouncementRequest{}, fmt.Errorf("schedule announcement_request: %w", err)
+	}
+	return ar, nil
+}
+
+// ClaimForAutoPublish implements AnnouncementRequestRepository.
+func (r *announcementRequestRepo) ClaimForAutoPublish(ctx context.Context, id string, staleAfter time.Duration) (domain.AnnouncementRequest, error) {
+	query := `
+		UPDATE announcement_requests SET
+			publish_claimed_on = NOW()
+		WHERE id = $1 AND state = 'approved'
+			AND scheduled_on IS NOT NULL AND scheduled_on <= NOW()
+			AND (publish_claimed_on IS NULL OR publish_claimed_on <= NOW() - ($2 * INTERVAL '1 second'))
+		RETURNING ` + announcementRequestColumns
+
+	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, staleAfter.Seconds()))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.AnnouncementRequest{}, r.onConflictOrNotFound(ctx, id, "claim for auto-publish")
+		}
+		return domain.AnnouncementRequest{}, fmt.Errorf("claim announcement_request for auto-publish: %w", err)
+	}
+	return ar, nil
+}
+
+// ReleaseAutoPublishClaim implements AnnouncementRequestRepository.
+func (r *announcementRequestRepo) ReleaseAutoPublishClaim(ctx context.Context, id string) error {
+	if _, err := r.db.Exec(ctx, `UPDATE announcement_requests SET publish_claimed_on = NULL WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("release announcement_request auto-publish claim: %w", err)
+	}
+	return nil
 }
 
 // RevertToDraft implements AnnouncementRequestRepository. Only callable from
@@ -364,19 +453,19 @@ func (r *announcementRequestRepo) RevertToDraft(ctx context.Context, id string, 
 }
 
 // MarkPublished implements AnnouncementRequestRepository.
-func (r *announcementRequestRepo) MarkPublished(ctx context.Context, id, actorID string, caseIDs []string) (domain.AnnouncementRequest, error) {
+func (r *announcementRequestRepo) MarkPublished(ctx context.Context, id, actorID, actorEmail string, caseIDs []string) (domain.AnnouncementRequest, error) {
 	caseIDsJSON, err := json.Marshal(caseIDs)
 	if err != nil {
 		return domain.AnnouncementRequest{}, fmt.Errorf("marshal published case ids: %w", err)
 	}
 	query := `
 		UPDATE announcement_requests SET
-			state = 'published', published_by = $2, published_on = NOW(),
-			published_case_ids = $3, updated_on = NOW()
+			state = 'published', published_by = $2, published_by_email = NULLIF($3, ''), published_on = NOW(),
+			published_case_ids = $4, updated_on = NOW()
 		WHERE id = $1 AND state = 'approved'
 		RETURNING ` + announcementRequestColumns
 
-	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, actorID, caseIDsJSON))
+	ar, err := scanAnnouncementRequest(r.db.QueryRow(ctx, query, id, actorID, actorEmail, caseIDsJSON))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.AnnouncementRequest{}, r.onConflictOrNotFound(ctx, id, "publish")
@@ -387,15 +476,15 @@ func (r *announcementRequestRepo) MarkPublished(ctx context.Context, id, actorID
 }
 
 // CreateUpdate implements AnnouncementRequestRepository.
-func (r *announcementRequestRepo) CreateUpdate(ctx context.Context, announcementRequestID, content, createdBy string) (domain.AnnouncementRequestUpdate, error) {
+func (r *announcementRequestRepo) CreateUpdate(ctx context.Context, announcementRequestID, content, createdBy, createdByEmail string) (domain.AnnouncementRequestUpdate, error) {
 	query := `
-		INSERT INTO announcement_request_updates (announcement_request_id, content, created_by)
-		VALUES ($1, $2, $3)
-		RETURNING id, announcement_request_id, content, created_by, created_on`
+		INSERT INTO announcement_request_updates (announcement_request_id, content, created_by, created_by_email)
+		VALUES ($1, $2, $3, NULLIF($4, ''))
+		RETURNING id, announcement_request_id, content, created_by, created_by_email, created_on`
 
 	var u domain.AnnouncementRequestUpdate
-	err := r.db.QueryRow(ctx, query, announcementRequestID, content, createdBy).Scan(
-		&u.ID, &u.AnnouncementRequestID, &u.Content, &u.CreatedBy, &u.CreatedOn,
+	err := r.db.QueryRow(ctx, query, announcementRequestID, content, createdBy, createdByEmail).Scan(
+		&u.ID, &u.AnnouncementRequestID, &u.Content, &u.CreatedBy, &u.CreatedByEmail, &u.CreatedOn,
 	)
 	if err != nil {
 		return domain.AnnouncementRequestUpdate{}, fmt.Errorf("create announcement_request_update: %w", err)
@@ -406,7 +495,7 @@ func (r *announcementRequestRepo) CreateUpdate(ctx context.Context, announcement
 // ListUpdates implements AnnouncementRequestRepository.
 func (r *announcementRequestRepo) ListUpdates(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestUpdate, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, announcement_request_id, content, created_by, created_on
+		`SELECT id, announcement_request_id, content, created_by, created_by_email, created_on
 		 FROM announcement_request_updates
 		 WHERE announcement_request_id = $1
 		 ORDER BY created_on DESC`, announcementRequestID)
@@ -418,7 +507,7 @@ func (r *announcementRequestRepo) ListUpdates(ctx context.Context, announcementR
 	updates := []domain.AnnouncementRequestUpdate{}
 	for rows.Next() {
 		var u domain.AnnouncementRequestUpdate
-		if err := rows.Scan(&u.ID, &u.AnnouncementRequestID, &u.Content, &u.CreatedBy, &u.CreatedOn); err != nil {
+		if err := rows.Scan(&u.ID, &u.AnnouncementRequestID, &u.Content, &u.CreatedBy, &u.CreatedByEmail, &u.CreatedOn); err != nil {
 			return nil, fmt.Errorf("scan announcement_request_update: %w", err)
 		}
 		updates = append(updates, u)
@@ -427,4 +516,91 @@ func (r *announcementRequestRepo) ListUpdates(ctx context.Context, announcementR
 		return nil, fmt.Errorf("iterate announcement_request_updates: %w", err)
 	}
 	return updates, nil
+}
+
+// announcementRequestDeliveryColumns is the column list shared by every
+// query returning a full delivery row, kept in one place so it can't drift
+// out of sync with scanAnnouncementRequestDelivery's field order.
+const announcementRequestDeliveryColumns = `
+	id, announcement_request_id, project_id, case_id, status, error_message, created_on, updated_on`
+
+func scanAnnouncementRequestDelivery(row pgx.Row) (domain.AnnouncementRequestDelivery, error) {
+	var d domain.AnnouncementRequestDelivery
+	if err := row.Scan(
+		&d.ID, &d.AnnouncementRequestID, &d.ProjectID, &d.CaseID, &d.Status, &d.ErrorMessage,
+		&d.CreatedOn, &d.UpdatedOn,
+	); err != nil {
+		return domain.AnnouncementRequestDelivery{}, err
+	}
+	return d, nil
+}
+
+// UpsertDeliveries implements AnnouncementRequestRepository. Runs every
+// input's upsert inside one transaction — a Publish fan-out pass either
+// records completely or not at all, never a partial batch that could leave
+// this table disagreeing with what the caller's own in-memory tally says
+// happened for that same pass.
+func (r *announcementRequestRepo) UpsertDeliveries(ctx context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error) {
+	if len(deliveries) == 0 {
+		return nil, nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("upsert announcement_request_deliveries: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		INSERT INTO announcement_request_deliveries
+			(announcement_request_id, project_id, case_id, status, error_message)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (announcement_request_id, project_id) DO UPDATE SET
+			case_id = EXCLUDED.case_id,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message,
+			updated_on = NOW()
+		RETURNING ` + announcementRequestDeliveryColumns
+
+	results := make([]domain.AnnouncementRequestDelivery, 0, len(deliveries))
+	for _, d := range deliveries {
+		row, err := scanAnnouncementRequestDelivery(tx.QueryRow(ctx, query,
+			announcementRequestID, d.ProjectID, d.CaseID, d.Status, d.ErrorMessage,
+		))
+		if err != nil {
+			return nil, fmt.Errorf("upsert announcement_request_delivery for project %s: %w", d.ProjectID, err)
+		}
+		results = append(results, row)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("upsert announcement_request_deliveries: commit: %w", err)
+	}
+	return results, nil
+}
+
+// ListDeliveries implements AnnouncementRequestRepository.
+func (r *announcementRequestRepo) ListDeliveries(ctx context.Context, announcementRequestID string) ([]domain.AnnouncementRequestDelivery, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT `+announcementRequestDeliveryColumns+`
+		 FROM announcement_request_deliveries
+		 WHERE announcement_request_id = $1
+		 ORDER BY created_on`, announcementRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("list announcement_request_deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	deliveries := []domain.AnnouncementRequestDelivery{}
+	for rows.Next() {
+		d, err := scanAnnouncementRequestDelivery(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan announcement_request_delivery: %w", err)
+		}
+		deliveries = append(deliveries, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate announcement_request_deliveries: %w", err)
+	}
+	return deliveries, nil
 }

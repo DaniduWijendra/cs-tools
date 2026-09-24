@@ -18,6 +18,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -41,6 +43,13 @@ import (
 
 type changeRequestService struct {
 	repo repository.ChangeRequestRepository
+	// snMirror is nil in every mode except DATA_SOURCE=postgres-servicenow-dual-write
+	// (config.DataSourcePostgresServiceNowDualWrite) -- see
+	// NewChangeRequestServiceWithSNMirror's own doc comment. When set,
+	// CreateChangeRequest delegates to createChangeRequestSNFirst instead of
+	// the plain Postgres path's ServiceUnavailableError below, mirroring
+	// incidentService's identical snMirror-gated branch for CreateIncident.
+	snMirror ChangeRequestService
 }
 
 // NewChangeRequestService constructs a ChangeRequestService backed by
@@ -50,6 +59,23 @@ type changeRequestService struct {
 // (no number-generation sequence; no approval-stage/approver tables).
 func NewChangeRequestService(repo repository.ChangeRequestRepository) ChangeRequestService {
 	return &changeRequestService{repo: repo}
+}
+
+// NewChangeRequestServiceWithSNMirror is NewChangeRequestService plus the
+// wiring DATA_SOURCE=postgres-servicenow-dual-write needs for change request
+// CREATE: a synchronous, ServiceNow-first creation path -- see
+// createChangeRequestSNFirst's own doc comment for the full reasoning
+// (identical to incidentService.createIncidentSNFirst's: a Postgres-first
+// async create could leave a permanent orphan). This mode has no change
+// request UPDATE mirror -- PatchChangeRequest stays exactly as it is in
+// every other mode; only CREATE is in scope for this pilot extension.
+//
+// mirror is the ServiceNow-backed ChangeRequestService (from
+// NewServiceNowChangeRequestService) whose CreateChangeRequest performs the
+// real ServiceNow POST. It is never made the active ChangeRequestService
+// here -- reads always stay on Postgres in this mode.
+func NewChangeRequestServiceWithSNMirror(repo repository.ChangeRequestRepository, mirror ChangeRequestService) ChangeRequestService {
+	return &changeRequestService{repo: repo, snMirror: mirror}
 }
 
 func validateChangeRequestFilters(f domain.SearchChangeRequestsFilters) error {
@@ -190,15 +216,75 @@ func (s *changeRequestService) PatchChangeRequest(ctx context.Context, id string
 	}, nil
 }
 
-// CreateChangeRequest implements ChangeRequestService. Not supported by the
-// Postgres data source: work_item.number has no DB default and no backing
-// sequence anywhere in migrations/, the same blocker
-// CaseRepository.CreateCase has -- see that method's own doc comment for
-// the full reasoning. Generating it requires a product decision (a new
-// migration adding a sequence, vs. Go-side generation, and the exact number
-// format) this change does not make unilaterally.
+// CreateChangeRequest implements ChangeRequestService.
+//
+// Under DATA_SOURCE=postgres-servicenow-dual-write (snMirror != nil), this
+// delegates to createChangeRequestSNFirst instead of the plain Postgres
+// path's ServiceUnavailableError below -- see that method's own doc comment.
 func (s *changeRequestService) CreateChangeRequest(ctx context.Context, req domain.CreateChangeRequestRequest) (domain.CreateChangeRequestResponse, error) {
+	if s.snMirror != nil {
+		return s.createChangeRequestSNFirst(ctx, req)
+	}
+	// CreateChangeRequest is not supported for the plain PostgreSQL data
+	// source: like CaseRepository.CreateCase, work_item.number has no DB
+	// default and no backing sequence anywhere in migrations/. Generating it
+	// requires a product decision (a new migration adding a sequence, vs.
+	// Go-side generation, and the exact number format) this change does not
+	// make unilaterally.
 	return domain.CreateChangeRequestResponse{}, &apierror.ServiceUnavailableError{Msg: "creating change requests is not yet supported on the Postgres data source (no number-generation sequence)"}
+}
+
+// createChangeRequestSNFirst implements CreateChangeRequest's
+// DATA_SOURCE=postgres-servicenow-dual-write path: ServiceNow-FIRST and
+// SYNCHRONOUS, exactly mirroring incidentService.createIncidentSNFirst's
+// reasoning -- see that method's own doc comment for why CREATE must be
+// ServiceNow-first rather than Postgres-first-and-async: a Postgres row with
+// no ServiceNow counterpart would be a PERMANENT orphan (ServiceNow is still
+// the real backing store this platform proxies most writes onto), while an
+// async-after-commit UPDATE has no equivalent failure mode.
+//
+// The ServiceNow call is made exactly once, with no internal retry: retrying
+// here risks creating a second, duplicate ServiceNow record if ServiceNow's
+// create actually succeeded but the HTTP response back to entity-service was
+// lost (timeout/network blip) -- entity-service has no way to distinguish
+// that from a real failure, and retry policy for that case belongs to the
+// caller, not this layer.
+//
+// On success, id/number/createdBy come from ServiceNow's own response and
+// are used AS-IS for the Postgres insert
+// (ChangeRequestRepository.CreateChangeRequestFromServiceNow) rather than
+// generated -- see that method's own doc comment for why there is no wso2ID
+// parameter here, unlike case's equivalent.
+func (s *changeRequestService) createChangeRequestSNFirst(ctx context.Context, req domain.CreateChangeRequestRequest) (domain.CreateChangeRequestResponse, error) {
+	// Reject an unsupported type before ServiceNow ever sees the request --
+	// this check is deterministic and needs no I/O, so there's no reason to
+	// defer it to CreateChangeRequestFromServiceNow's own check (which runs
+	// only after ServiceNow already accepted the create, at which point
+	// ServiceNow would keep an orphan with no Postgres row).
+	if req.Type != nil && !repository.ChangeRequestTypeSupported(*req.Type) {
+		return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("type %q is not supported on the PostgreSQL data source", *req.Type)}
+	}
+	snResp, err := s.snMirror.CreateChangeRequest(ctx, req)
+	if err != nil {
+		// ServiceNow never accepted the change request -- nothing is
+		// written to Postgres at all, by construction
+		// (s.repo.CreateChangeRequestFromServiceNow is simply never called
+		// on this path). No orphan gets created.
+		return domain.CreateChangeRequestResponse{}, err
+	}
+
+	resp, err := s.repo.CreateChangeRequestFromServiceNow(ctx, req, snResp.ChangeRequest.ID, snResp.ChangeRequest.Number, snResp.ChangeRequest.CreatedBy)
+	if err != nil {
+		// ServiceNow already has the change request at this point -- this
+		// is now real drift (ServiceNow has it, Postgres doesn't) needing
+		// operator attention, not a safely-rejected request. Logged loudly
+		// rather than only returned, same convention as
+		// incidentService.createIncidentSNFirst's identical failure shape.
+		slog.ErrorContext(ctx, "sn create change request: ServiceNow change request created but the Postgres insert failed",
+			"changeRequestId", snResp.ChangeRequest.ID, "snNumber", snResp.ChangeRequest.Number, "error", err)
+		return domain.CreateChangeRequestResponse{}, err
+	}
+	return resp, nil
 }
 
 // GetChangeRequestApprovals implements ChangeRequestService. Not supported

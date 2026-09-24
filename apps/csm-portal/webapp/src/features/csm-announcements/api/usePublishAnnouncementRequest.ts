@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useBackendApi } from "@api/backend/client";
 import { ApiQueryKeys } from "@constants/apiConstants";
@@ -26,7 +26,12 @@ import {
   ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
   settleWithConcurrencyLimit,
 } from "@features/csm-announcements/utils/settleWithConcurrencyLimit";
-import type { AnnouncementRequest } from "@features/csm-announcements/types/announcementRequests";
+import { useListAnnouncementRequestDeliveries } from "@features/csm-announcements/api/useListAnnouncementRequestDeliveries";
+import { useRecordAnnouncementRequestDeliveries } from "@features/csm-announcements/api/useRecordAnnouncementRequestDeliveries";
+import type {
+  AnnouncementRequest,
+  RecordAnnouncementRequestDeliveryEntry,
+} from "@features/csm-announcements/types/announcementRequests";
 
 export interface PublishProgress {
   completed: number;
@@ -55,6 +60,39 @@ export interface UsePublishAnnouncementRequestResult {
   /** Set once every resolved project has a case and the backend has marked the request published. */
   published: AnnouncementRequest | null;
   handlePublish: () => Promise<void>;
+  /**
+   * Marks the request published using only the projects that have already
+   * succeeded, permanently giving up on whatever's still in
+   * `failedProjectIds` — for when one or more projects can never be
+   * delivered to (a broken/invalid project id, an account that will never
+   * accept a case) and waiting for a retry that will never succeed is
+   * blocking every already-succeeded customer from being reachable via
+   * "Post an update". The backend's own `/publish` call has no "every
+   * project must have succeeded" requirement of its own — that rule lives
+   * entirely in `handlePublish` above, so this is a deliberate, explicit
+   * bypass of it, not a workaround. Requires at least one succeeded
+   * project and, unlike `handlePublish`, does *not* retry or wait on
+   * `failedProjectIds` at all — they keep their last-recorded "failed"
+   * ledger status. Still refuses while `failedTagProjectIds` is non-empty:
+   * a missing mandatory security tag is a content-completeness guarantee,
+   * not just a delivery attempt count, so it can't be bypassed the same
+   * way.
+   */
+  publishGivingUpOnFailed: () => Promise<void>;
+  /**
+   * False while `request` is `approved` and the delivery ledger hasn't been
+   * loaded (and folded into local state) yet for this request id —
+   * `handlePublish` refuses to run in that window, since `succeededProjectIds`
+   * would still be empty and every already-succeeded project would be sent a
+   * duplicate case. True for any other state (nothing to gate) or once
+   * hydration has completed.
+   */
+  readyToPublish: boolean;
+  /** True while ledger hydration is still loading for the current request. */
+  hydratingDeliveries: boolean;
+  /** True once ledger hydration has failed for the current request — call `retryHydration` to try again. */
+  hydrationFailed: boolean;
+  retryHydration: () => void;
 }
 
 /**
@@ -74,12 +112,19 @@ export interface UsePublishAnnouncementRequestResult {
  * Unlike those forms' one-shot "succeeded or list the failures" ending, this
  * tracks cumulative success across attempts, so calling `handlePublish` again
  * after a partial failure only resends to the projects still outstanding —
- * already-succeeded projects are never sent a duplicate case. The backend
- * doesn't persist this progress anywhere (see the Phase 2 design note on no
- * per-project delivery ledger): if the dialog is closed mid-retry, progress
- * made so far is lost and a fresh attempt resends to every resolved project
- * again, since there's nowhere to read "which ones already went out" back
- * from.
+ * already-succeeded projects are never sent a duplicate case.
+ *
+ * Every per-project outcome from each fan-out pass (initial attempt or
+ * retry) is also recorded to a durable backend ledger
+ * (`useRecordAnnouncementRequestDeliveries` — see entity-service's
+ * `announcement_request_deliveries` table for the full "why"), and on
+ * mount this hook reads that same ledger back
+ * (`useListAnnouncementRequestDeliveries`) to seed its local state — so if
+ * the dialog is closed mid-retry and reopened, `handlePublish` resumes from
+ * exactly where it left off instead of resending a case to every resolved
+ * project again. Hydration happens once (guarded by `hydratedRef`): a
+ * background refetch of the deliveries list must never clobber progress
+ * this hook's own fan-out has already made locally since that first load.
  */
 export function usePublishAnnouncementRequest(
   request: AnnouncementRequest | null | undefined,
@@ -89,6 +134,14 @@ export function usePublishAnnouncementRequest(
   const { showError } = useErrorBanner();
   const postCase = usePostCsmCase();
   const addTag = useAddTagToCase();
+  const recordDeliveries = useRecordAnnouncementRequestDeliveries();
+  // approved: the state a fan-out actually runs in. published: so a
+  // just-completed request's dialog can still show its own final ledger —
+  // handlePublish itself is a no-op by then (see its own early return).
+  const deliveriesQuery = useListAnnouncementRequestDeliveries(
+    request?.id,
+    request?.state === "approved" || request?.state === "published",
+  );
 
   const [publishing, setPublishing] = useState(false);
   const [progress, setProgress] = useState<PublishProgress | null>(null);
@@ -107,8 +160,86 @@ export function usePublishAnnouncementRequest(
   const [failedTagCaseIds, setFailedTagCaseIds] = useState<Record<string, string>>({});
   const [published, setPublished] = useState<AnnouncementRequest | null>(null);
 
+  // Seeds local state from the persisted ledger exactly once per request id
+  // — see this hook's own doc comment for why a later background refetch
+  // must not re-run this. Gated on `isSuccess`, not just `data` being
+  // truthy: an errored fetch must never be treated as "hydrated" (that
+  // would leave succeededProjectIds empty and let handlePublish resend a
+  // case to every project, including ones that already succeeded in an
+  // earlier session).
+  const [hydratedRequestId, setHydratedRequestId] = useState<string | null>(null);
+  const hydratedRequestIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!request?.id || !deliveriesQuery.isSuccess) return;
+    if (hydratedRequestIdRef.current === request.id) return;
+    hydratedRequestIdRef.current = request.id;
+    setHydratedRequestId(request.id);
+
+    const succeeded: string[] = [];
+    const caseIds: Record<string, string> = {};
+    const failed: string[] = [];
+    const failedTags: string[] = [];
+    const failedTagCases: Record<string, string> = {};
+
+    for (const d of deliveriesQuery.data?.deliveries ?? []) {
+      if (d.status === "succeeded") {
+        succeeded.push(d.projectId);
+        if (d.caseId) caseIds[d.projectId] = d.caseId;
+      } else if (d.status === "tag_failed") {
+        // The case is real either way — must not be re-created by a
+        // future fan-out pass, only its tag retried (see failedTagCaseIds).
+        succeeded.push(d.projectId);
+        failedTags.push(d.projectId);
+        if (d.caseId) {
+          caseIds[d.projectId] = d.caseId;
+          failedTagCases[d.projectId] = d.caseId;
+        }
+      } else {
+        failed.push(d.projectId);
+      }
+    }
+
+    if (succeeded.length > 0) {
+      setSucceededProjectIds(succeeded);
+      setCaseIdByProjectId(caseIds);
+    }
+    if (failed.length > 0) setFailedProjectIds(failed);
+    if (failedTags.length > 0) {
+      setFailedTagProjectIds(failedTags);
+      setFailedTagCaseIds(failedTagCases);
+    }
+  }, [request?.id, deliveriesQuery.data, deliveriesQuery.isSuccess]);
+
+  const readyToPublish =
+    !request || request.state !== "approved" || hydratedRequestId === request.id;
+  const hydratingDeliveries = !readyToPublish && !deliveriesQuery.isError;
+  const hydrationFailed = !readyToPublish && deliveriesQuery.isError;
+  const retryHydration = (): void => {
+    void deliveriesQuery.refetch();
+  };
+
+  /**
+   * Upserts this pass's outcomes to the durable ledger. Best-effort: a
+   * failure here is logged (via showError, non-blocking) but never
+   * re-throws — the real cases already exist or don't regardless of
+   * whether this bookkeeping call itself succeeds, the same "don't imply
+   * the send needs retrying" reasoning the final /publish call below
+   * already uses for its own failure.
+   */
+  const recordDeliveryOutcomes = async (entries: RecordAnnouncementRequestDeliveryEntry[]): Promise<void> => {
+    if (!request || entries.length === 0) return;
+    try {
+      await recordDeliveries.mutateAsync({ id: request.id, payload: { deliveries: entries } });
+    } catch {
+      showError(
+        "Sent, but this progress couldn't be saved — if you close this dialog before finishing, you may need to resend to every project on reopen.",
+      );
+    }
+  };
+
   const handlePublish = async (): Promise<void> => {
     if (!request || request.state !== "approved" || publishing) return;
+    if (!readyToPublish) return;
 
     const allProjectIds = request.resolvedProjectIds ?? [];
     if (allProjectIds.length === 0) {
@@ -128,16 +259,20 @@ export function usePublishAnnouncementRequest(
     // same call — a tag that fails again here just blocks, it isn't looped.
     if (request.isSecurityAnnouncement && failedTagProjectIds.length > 0) {
       const stillFailingTags: string[] = [];
+      const tagRetryEntries: RecordAnnouncementRequestDeliveryEntry[] = [];
       for (const projectId of failedTagProjectIds) {
         const caseId = failedTagCaseIds[projectId];
         if (!caseId) continue;
         try {
           await addTag.mutateAsync({ caseId, label: SECURITY_ANNOUNCEMENT_TAG_LABEL });
+          tagRetryEntries.push({ projectId, caseId, status: "succeeded" });
         } catch {
           stillFailingTags.push(projectId);
+          tagRetryEntries.push({ projectId, caseId, status: "tag_failed" });
         }
       }
       setFailedTagProjectIds(stillFailingTags);
+      await recordDeliveryOutcomes(tagRetryEntries);
 
       if (stillFailingTags.length > 0) {
         setPublishing(false);
@@ -171,6 +306,7 @@ export function usePublishAnnouncementRequest(
       setProgress({ completed: 0, total: pendingProjectIds.length });
       const newlyFailedTagIds: string[] = [];
       const newlyFailedTagCaseIds: Record<string, string> = {};
+      const passEntries: RecordAnnouncementRequestDeliveryEntry[] = [];
 
       const results = await settleWithConcurrencyLimit(
         pendingProjectIds,
@@ -193,8 +329,11 @@ export function usePublishAnnouncementRequest(
             } catch {
               newlyFailedTagIds.push(projectId);
               newlyFailedTagCaseIds[projectId] = created.id;
+              passEntries.push({ projectId, caseId: created.id, status: "tag_failed" });
+              return created;
             }
           }
+          passEntries.push({ projectId, caseId: created.id, status: "succeeded" });
           return created;
         },
         (completed, total) => setProgress({ completed, total }),
@@ -202,6 +341,9 @@ export function usePublishAnnouncementRequest(
 
       const newlySucceeded = pendingProjectIds.filter((_, i) => results[i].status === "fulfilled");
       const stillFailing = pendingProjectIds.filter((_, i) => results[i].status === "rejected");
+      for (const projectId of stillFailing) {
+        passEntries.push({ projectId, status: "failed" });
+      }
 
       setSucceededProjectIds((prev) => [...prev, ...newlySucceeded]);
       setCaseIdByProjectId((prev) => ({ ...prev, ...caseIdsForPublish }));
@@ -212,6 +354,7 @@ export function usePublishAnnouncementRequest(
       setFailedTagProjectIds(newlyFailedTagIds);
       setFailedTagCaseIds((prev) => ({ ...prev, ...newlyFailedTagCaseIds }));
       setProgress(null);
+      await recordDeliveryOutcomes(passEntries);
 
       if (stillFailing.length > 0) {
         setPublishing(false);
@@ -268,6 +411,36 @@ export function usePublishAnnouncementRequest(
     }
   };
 
+  const publishGivingUpOnFailed = async (): Promise<void> => {
+    if (!request || request.state !== "approved" || publishing) return;
+    if (!readyToPublish) return;
+    if (failedTagProjectIds.length > 0) return;
+    if (succeededProjectIds.length === 0) return;
+
+    setPublishing(true);
+    try {
+      const result = await api.post<{ caseIds: string[] }, AnnouncementRequest>(
+        `/announcement-requests/${encodeURIComponent(request.id)}/publish`,
+        { caseIds: Object.values(caseIdByProjectId) },
+      );
+      setPublished(result);
+      queryClient.invalidateQueries({
+        queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUEST_DETAIL, request.id],
+      });
+      queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.ANNOUNCEMENT_REQUESTS_SEARCH] });
+      queryClient.invalidateQueries({ queryKey: [ApiQueryKeys.CSM_ANNOUNCEMENTS] });
+    } catch {
+      // Same reasoning as handlePublish's own catch: the succeeded cases are
+      // real either way, only the request's own bookkeeping row failed to
+      // flip — retrying this call never resends anything.
+      showError(
+        "Marking the request published failed. Try again — it won't resend any cases.",
+      );
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return {
     publishing,
     progress,
@@ -276,5 +449,10 @@ export function usePublishAnnouncementRequest(
     failedTagProjectIds,
     published,
     handlePublish,
+    publishGivingUpOnFailed,
+    readyToPublish,
+    hydratingDeliveries,
+    hydrationFailed,
+    retryHydration,
   };
 }

@@ -1891,6 +1891,69 @@ func (s *snCaseService) CreateCaseComment(ctx context.Context, req domain.Create
 	return result, nil
 }
 
+// CreateBareCaseComment posts a case comment's content to ServiceNow via the
+// exact same "/comments" endpoint CreateCaseComment uses, but with NONE of
+// that method's side effects: no publishCommentAdded, no
+// applyCustomerReplyStateTransition. Those are separate, sequential Go-side
+// calls CreateCaseComment happens to make after its own POST succeeds --
+// not anything intrinsic to the "/comments" endpoint itself -- so calling
+// only the POST, as this does, genuinely has no side effects on either
+// side.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// comment mirror (see caseService.CreateCaseComment's own doc comment):
+// Postgres already IS authoritative for the comment and has already decided
+// the real outcome (including any state effects a future Postgres-native
+// implementation might add -- see that method's doc comment for the
+// feature-parity gap this deliberately does not build); this call's only
+// job is making sure ServiceNow's copy of the comment text exists too.
+//
+// Do not call this from CreateCaseComment itself -- that method's full
+// side-effect behavior is deliberate and unchanged for live
+// DATA_SOURCE=servicenow traffic.
+func (s *snCaseService) CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error) {
+	if !validCommentType[commentType] {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type contains invalid value: " + string(commentType)}
+	}
+	if content == "" {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "content is required"}
+	}
+	if commentType == domain.CommentTypeActivity {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type 'activity' is not supported for ServiceNow"}
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	snType := snCommentTypeMap[commentType]
+
+	payload := snCreateCommentPayload{
+		ReferenceID:   uuidToSysid(caseID),
+		ReferenceType: "case",
+		Type:          snType,
+		Content:       content,
+	}
+
+	raw, err := s.client.Post(ctx, "/comments", token, payload)
+	if err != nil {
+		return domain.CaseCommentDetail{}, err
+	}
+
+	var snResp snCreateCommentResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse response: %w", err)
+	}
+
+	createdOn, err := parseSNDateTime(ctx, "sn create bare case comment", "createdOn", snResp.Comment.CreatedOn)
+	if err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse createdOn %q: %w", snResp.Comment.CreatedOn, err)
+	}
+
+	return domain.CaseCommentDetail{
+		ID:        sysidToUUID(snResp.Comment.ID),
+		CreatedOn: createdOn,
+		CreatedBy: snResp.Comment.CreatedBy,
+	}, nil
+}
+
 type snCommentFilters struct {
 	Type string `json:"type,omitempty"`
 }
@@ -2844,6 +2907,87 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	}
 
 	return resp, nil
+}
+
+// patchCaseFields performs a bare ServiceNow PATCH for exactly the fields
+// given (state/severity/workState, whichever are non-nil), with NONE of
+// UpdateCase's enrichment reads, no-op detection, or event publishing: no
+// GetCaseByID, no publishStatusChanged/publishSeverityChanged.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// State/Severity/WorkState mirror (see caseService.UpdateCase's own doc
+// comment): Postgres has already decided the real outcome by the time this
+// runs, so re-running ServiceNow's own no-op-detection/event logic would be
+// redundant at best -- and for State/Severity specifically, would require
+// the very GetCaseByID read this mode must never perform, which is exactly
+// why State/Severity couldn't join the mirror before this method existed.
+//
+// Do not call this from UpdateCase itself -- that method's read-before-write
+// behavior is deliberate and unchanged for live DATA_SOURCE=servicenow
+// traffic. At most one of state/severity/workState is expected non-nil
+// (mirroring caseService.UpdateCase's own "exactly one" invariant), but this
+// method does not enforce that itself -- the caller already has.
+func (s *snCaseService) patchCaseFields(ctx context.Context, caseID string, state *domain.CaseState, severity *domain.CaseSeverity, workState *domain.CaseWorkState) (domain.UpdatedCase, error) {
+	payload := snUpdateCasePayload{}
+	if state != nil {
+		if !validCaseState[*state] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state contains invalid value: " + string(*state)}
+		}
+		id, ok := snStateIDMap[*state]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state " + string(*state) + " is not supported by ServiceNow"}
+		}
+		payload.StateKey = &id
+	}
+	if severity != nil {
+		if !validCaseSeverity[*severity] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity contains invalid value: " + string(*severity)}
+		}
+		id, ok := snSeverityIDMap[*severity]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity " + string(*severity) + " is not supported by ServiceNow"}
+		}
+		payload.SeverityKey = &id
+	}
+	if workState != nil {
+		if !validCaseWorkState[*workState] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(*workState)}
+		}
+		id, ok := snWorkStateIDMap[*workState]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState " + string(*workState) + " is not supported by ServiceNow"}
+		}
+		payload.WorkStateKey = &id
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	raw, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	var snResp snUpdateCaseResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse response: %w", err)
+	}
+
+	updatedOn, err := parseSNDateTime(ctx, "sn patch case fields", "updatedOn", snResp.Case.UpdatedOn)
+	if err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse updatedOn %q: %w", snResp.Case.UpdatedOn, err)
+	}
+
+	result := domain.UpdatedCase{ID: sysidToUUID(snResp.Case.ID), UpdatedOn: updatedOn, UpdatedBy: snResp.Case.UpdatedBy}
+	if snResp.Case.State != nil {
+		if st, err := snCaseStateLabelToEnum(snResp.Case.State); err == nil {
+			result.State = &st
+		}
+	}
+	if snResp.Case.Severity != nil {
+		sev := snSeverityToSeverity(snResp.Case.Severity)
+		result.Severity = &sev
+	}
+	result.WorkState = snWorkStateLabelToEnum(snResp.Case.WorkState)
+	return result, nil
 }
 
 type snCreateAttachmentPayload struct {
@@ -4245,6 +4389,122 @@ func snCaseStateLabelToEnum(state *snCaseState) (domain.CaseState, error) {
 		return v, nil
 	}
 	return "", fmt.Errorf("unknown case state %q from ServiceNow", state.Label)
+}
+
+// snAnnouncementStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for an announcement-typed case -- see
+// TestSNCaseService_CreateCase_Announcement's fixture, which returns
+// {"label": "Open"} for a fresh announcement, the same label case uses)
+// to announcement_state_enum's own literal values. Deliberately its own map
+// rather than reusing snCaseStateMap: announcement_state_enum only has two
+// values (OPEN/CLOSE, migration 000019) and spells the closed one CLOSE, not
+// CLOSED -- the same kind of label/enum spelling mismatch already handled
+// for case (CANCELLED->CANCELED) and incident (SITE_247->SITE_24_7), so this
+// is resolved by an explicit table instead of assumed to line up.
+var snAnnouncementStateMap = map[string]string{
+	"open":   "OPEN",
+	"closed": "CLOSE",
+}
+
+// snAnnouncementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created announcement into announcement_state_enum's
+// literal value, for CreateCaseFromServiceNow's announcement branch. Returns
+// an error rather than defaulting to "OPEN" for anything unrecognized: a
+// fresh announcement landing in neither OPEN nor CLOSE means ServiceNow
+// returned a label this integration doesn't understand yet, which should
+// fail loudly rather than silently mis-record the state.
+func snAnnouncementStateToEnum(label string) (string, error) {
+	if v, ok := snAnnouncementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown announcement state %q from ServiceNow", label)
+}
+
+// snCaseLikeStateLabels is the SN raw-label vocabulary this integration
+// understands for every case-like work_item type (case/service_request/
+// engagement/security_report_analysis) whose own state enum -- migrations
+// 000018 (case_state_enum) and 000019 (service_request_state_enum,
+// engagement_state_enum, security_report_analysis_state_enum) -- is spelled
+// identically: WORK_IN_PROGRESS, AWAITING_INFO, SOLUTION_PROPOSED, CLOSED,
+// OPEN, WAITING_ON_WSO2, REOPENED. ServiceNow's create-case response carries
+// state as the same generic {label} shape regardless of case type (see
+// CreateCase's shared stateLabel extraction above), so the raw label set
+// SN can return is the same set snCaseStateMap already documents for "case".
+// Deliberately its own map per type rather than one shared map, per this
+// change's own design brief -- but the source of truth is identical to
+// snCaseStateMap by construction: keep any future addition/edit to one in
+// sync with the others (announcement is the one exception -- its state enum
+// only has OPEN/CLOSE, see snAnnouncementStateMap).
+//
+// Unlike snCaseStateMap, "reopened" maps to its own literal (REOPENED) here
+// rather than to WAITING_ON_WSO2 -- snCaseStateMap's mapping of "reopened" to
+// WaitingOnWSO2 looks like a pre-existing bug in the case path, not
+// intentional behavior worth propagating into these three new maps.
+var snCaseLikeStateLabels = map[string]string{
+	"open":              "OPEN",
+	"work in progress":  "WORK_IN_PROGRESS",
+	"waiting on wso2":   "WAITING_ON_WSO2",
+	"awaiting info":     "AWAITING_INFO",
+	"reopened":          "REOPENED",
+	"solution proposed": "SOLUTION_PROPOSED",
+	"closed":            "CLOSED",
+}
+
+// snServiceRequestStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for a service_request-typed case) to
+// service_request_state_enum's own literal values (migration 000019) --
+// see snCaseLikeStateLabels's own doc comment for why this table is
+// identical to that one.
+var snServiceRequestStateMap = snCaseLikeStateLabels
+
+// snServiceRequestStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created service_request into service_request_state_enum's
+// literal value, for CreateCaseFromServiceNow's service_request branch.
+// Returns an error rather than defaulting to "OPEN" for anything unrecognized
+// -- same fail-closed discipline as snAnnouncementStateToEnum/
+// snCaseStateLabelToEnum.
+func snServiceRequestStateToEnum(label string) (string, error) {
+	if v, ok := snServiceRequestStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown service_request state %q from ServiceNow", label)
+}
+
+// snEngagementStateMap maps ServiceNow's raw state label to
+// engagement_state_enum's own literal values (migration 000019) -- see
+// snCaseLikeStateLabels's own doc comment for why this table is identical to
+// that one.
+var snEngagementStateMap = snCaseLikeStateLabels
+
+// snEngagementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created engagement into engagement_state_enum's literal
+// value, for CreateCaseFromServiceNow's engagement branch. Returns an error
+// rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snEngagementStateToEnum(label string) (string, error) {
+	if v, ok := snEngagementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown engagement state %q from ServiceNow", label)
+}
+
+// snSecurityReportAnalysisStateMap maps ServiceNow's raw state label to
+// security_report_analysis_state_enum's own literal values (migration
+// 000019) -- see snCaseLikeStateLabels's own doc comment for why this table
+// is identical to that one.
+var snSecurityReportAnalysisStateMap = snCaseLikeStateLabels
+
+// snSecurityReportAnalysisStateToEnum converts ServiceNow's raw
+// create-response state label for a newly created security_report_analysis
+// into security_report_analysis_state_enum's literal value, for
+// CreateCaseFromServiceNow's security_report_analysis branch. Returns an
+// error rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snSecurityReportAnalysisStateToEnum(label string) (string, error) {
+	if v, ok := snSecurityReportAnalysisStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown security_report_analysis state %q from ServiceNow", label)
 }
 
 // snSeverityLabel extracts the priority word from SN severity labels like

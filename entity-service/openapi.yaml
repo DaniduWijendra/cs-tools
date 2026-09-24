@@ -215,6 +215,67 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /github/service-requests:
+    post:
+      summary: >-
+        Raise a service request from a GitHub issue. The same work the webhook
+        does for an `issues` event, reachable directly -- for a repository that
+        would rather call than wait for a delivery.
+      operationId: createServiceRequestFromGithubIssue
+      description: >-
+        Requires an authorized internal client credential: the caller is a
+        workflow or operator tool, not an end user, and the account is resolved
+        from the repository mapping rather than from the caller.
+      security:
+        - internalClientCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServiceRequestFromIssueRequest'
+      responses:
+        "201":
+          description: The service request was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateServiceRequestFromIssueResponse'
+        "200":
+          description: >-
+            A service request already existed for this issue; nothing was
+            created. Returned rather than a conflict so a caller retrying after
+            a timeout is not left guessing whether it succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateServiceRequestFromIssueResponse'
+        "401":
+          description: >-
+            The request carried no authorized internal client credential.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "400":
+          description: Missing fields, or an issue that is not a service request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The repository is not mapped to an account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /webhooks/github:
     post:
       summary: >-
@@ -734,6 +795,132 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /announcement-requests/{id}/schedule:
+    post:
+      summary: >-
+        Set or clear an approved request's automatic-publish time. Restricted
+        to the request's own creator, same rule as publish — scheduling is
+        choosing when publish happens. Does not itself publish anything; once
+        set, operations/csm-scheduled-tasks' publish_scheduled_announcements
+        sub-cron publishes it automatically once scheduledFor arrives, the
+        same way the manual publish call does.
+      operationId: scheduleAnnouncementRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleAnnouncementRequestRequest'
+      responses:
+        "200":
+          description: Schedule set or cleared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnouncementRequest'
+        "400":
+          description: >-
+            Bad request (e.g. missing actorId, or a scheduledFor that isn't
+            strictly in the future).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller did not create this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is not approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /announcement-requests/{id}/auto-publish:
+    post:
+      summary: >-
+        Internal-caller-only. Runs the entire Publish fan-out in-process for
+        one already-due scheduled request — the automatic counterpart to the
+        manual publish call above, invoked only by
+        operations/csm-scheduled-tasks' publish_scheduled_announcements
+        sub-cron. Takes no request body — there is no actor to authenticate,
+        since this is never called by a browser; case attribution uses the
+        request's own createdBy. Safe to call repeatedly for the same
+        request: it resumes from the delivery ledger exactly like a manual
+        retry would, so a retry after a partial failure never recreates an
+        already-succeeded project's case.
+      operationId: autoPublishAnnouncementRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Every resolved project delivered; request marked published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnouncementRequest'
+        "400":
+          description: BadRequest — invalid id format.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden — the caller is not an internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: >-
+            Conflict — the request is not approved, its scheduled time
+            hasn't arrived, it has no resolved audience, or this pass still
+            has outstanding case-creation/tag failures (retry-safe; the
+            sub-cron's next tick resumes automatically).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /announcement-requests/{id}/publish:
     post:
       summary: >-
@@ -874,6 +1061,95 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchAnnouncementRequestUpdatesResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /announcement-requests/{id}/deliveries:
+    post:
+      summary: >-
+        Upsert one Publish fan-out pass's worth of per-project delivery
+        outcomes — a durable ledger replacing purely in-memory retry
+        tracking that used to be lost if the dialog closed mid-retry.
+        Restricted to the request's own creator, same as publish. Only
+        callable while the request is approved.
+      operationId: recordAnnouncementRequestDeliveries
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordAnnouncementRequestDeliveriesRequest'
+      responses:
+        "200":
+          description: The saved delivery rows for this pass.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRequestDeliveriesResponse'
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller did not create this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is not approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: List every delivery recorded for this request. No pagination.
+      operationId: listAnnouncementRequestDeliveries
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Deliveries for the request (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchAnnouncementRequestDeliveriesResponse'
         "404":
           description: No such request.
           content:
@@ -1244,7 +1520,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-    put:
+    patch:
       summary: Save or overwrite a saved filter view.
       description: >
         Inserts a new named view at the front of the list, or overwrites an
@@ -2044,7 +2320,13 @@ paths:
   /projects/{id}/stats:
     get:
       summary: Get a project's overall statistics.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. On Postgres, totalHours/billableHours
+        are in MINUTES despite their names, matching ServiceNow (the portal
+        divides by 60 itself); instanceCount
+        falls back to 0 where deployment_node is unavailable; and slaStatus
+        applies the same four conditions except the project-type-derived
+        allowed-severity narrowing, which has no Postgres equivalent.
       operationId: getProjectStats
       parameters:
         - name: id
@@ -2082,7 +2364,14 @@ paths:
   /projects/{id}/cases/stats:
     get:
       summary: Get a project's case statistics, optionally filtered by case type and/or creator.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. On Postgres, severityCount and
+        outstandingSeverityCount cover only the "case" type (it is the one
+        case-like table with a severity column), the project-type-derived
+        allowed-severity and allowed-case-type narrowing is not applied (no
+        feature-entitlement table exists), and choice ids are the raw enum
+        labels GET /projects/{id}/metadata also returns rather than ServiceNow
+        choice keys. casesTrend is a fixed placeholder on both.
       operationId: getProjectCaseStats
       parameters:
         - name: id
@@ -2114,7 +2403,10 @@ paths:
           required: false
           schema:
             type: string
-          description: Restrict to cases created by this user.
+          description: >-
+            Restrict to cases created by the calling user. The only accepted
+            value is the literal "me" -- it is not an email address; anything
+            else is rejected with a 400 on both data sources.
       responses:
         "200":
           description: The project's case statistics.
@@ -2144,7 +2436,9 @@ paths:
   /projects/{id}/conversations/stats:
     get:
       summary: Get a project's conversation statistics, optionally filtered by creator.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. On Postgres, stateCount ids are the
+        raw conversation_state_enum labels rather than ServiceNow choice keys.
       operationId: getProjectConversationStats
       parameters:
         - name: id
@@ -2158,7 +2452,10 @@ paths:
           required: false
           schema:
             type: string
-          description: Restrict to conversations created by this user.
+          description: >-
+            Restrict to conversations created by the calling user. The only
+            accepted value is the literal "me" -- it is not an email address;
+            anything else is rejected with a 400 on both data sources.
       responses:
         "200":
           description: The project's conversation statistics.
@@ -2188,7 +2485,10 @@ paths:
   /projects/{id}/deployments/stats:
     get:
       summary: Get a project's deployment statistics.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. On Postgres, lastDeploymentOn is the
+        newest deployment row's creation time -- this schema has no separate
+        customer-project-deployment table.
       operationId: getProjectDeploymentStats
       parameters:
         - name: id
@@ -2226,7 +2526,13 @@ paths:
   /projects/{id}/time-cards/stats:
     get:
       summary: Get a project's time-card statistics, optionally filtered by a date range.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. NOTE the figures are in MINUTES
+        despite the field names: ServiceNow sums time_card.total, which holds
+        minutes, into fields called *Hours, and the customer portal divides by
+        60 itself. Summed from the five per-activity minute columns of
+        APPROVED time cards, scoped by the time card's case rather than its
+        customer_project_id, and bounded by the work date.
       operationId: getProjectTimeCardStats
       parameters:
         - name: id
@@ -2278,7 +2584,10 @@ paths:
   /projects/{id}/change-requests/stats:
     get:
       summary: Get a project's change-request statistics.
-      description: ServiceNow data source only; there is no Postgres equivalent.
+      description: >-
+        Available on both data sources. On Postgres, stateCount ids are the raw
+        change_request_state_enum labels, whose vocabulary matches ServiceNow's
+        own change-request states one for one.
       operationId: getProjectChangeRequestStats
       parameters:
         - name: id
@@ -6334,7 +6643,7 @@ paths:
         On the Postgres data source, every request's tokens are validated (Asgardeo), and
         results are scoped to the caller (the same rule GET /projects/{id}, POST
         /projects/search, GET /cases/{id}, and POST /cases/search also apply): if the
-        request's `Authorization: Bearer` client-credentials token names a client id in
+        request's `x-jwt-assertion` client-credentials token names a client id in
         AUTH_INTERNAL_CLIENT_IDS, the caller sees every project and case unconditionally --
         regardless of any `x-user-id-token` the same request also carries (that token, if
         present, is never used to scope an internal caller). Any other caller is resolved
@@ -7153,7 +7462,70 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
 components:
+  securitySchemes:
+    internalClientCredential:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A client-credentials token whose client id appears in
+        AUTH_INTERNAL_CLIENT_IDS. Declared on the operations that verify it
+        themselves; most endpoints in this service scope by caller instead and
+        do not carry this requirement.
+
   schemas:
+    CreateServiceRequestFromIssueRequest:
+      type: object
+      required: [owner, repository, issueNumber, title]
+      properties:
+        owner:
+          type: string
+          description: The repository owner, which resolves the account.
+        repository:
+          type: string
+        issueNumber:
+          type: integer
+        title:
+          type: string
+          description: >-
+            A "[CR]:" or "[ECR]:" prefix makes this a change-style request;
+            otherwise a Type/ServiceRequest label is required.
+        body:
+          type: string
+          description: >-
+            The issue body. Its "### Field" sections are captured onto the
+            service request.
+        labels:
+          type: array
+          items:
+            type: string
+        author:
+          type: string
+          description: The GitHub login that raised the issue.
+
+    CreateServiceRequestFromIssueResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        id:
+          type: string
+        number:
+          type: string
+          description: >-
+            The new record's number. Absent when the issue already had a
+            service request, which is looked up by issue number and does
+            not read it.
+        created:
+          type: boolean
+          description: >-
+            True when this call created the record; false when one already
+            existed for the issue.
+      required:
+        - message
+        - id
+        - created
+
     GithubWebhookPayload:
       type: object
       description: >-
@@ -9902,6 +10274,9 @@ components:
           type: string
           nullable: true
         eulaVersionDecimal:
+          type: string
+          nullable: true
+        stage:
           type: string
           nullable: true
 
@@ -13622,6 +13997,7 @@ components:
             - madeSla
             - productName
             - assignedUserId
+            - incidentStateKeys
         op:
           type: string
           enum: [in, gte, lte, eq]
@@ -13661,6 +14037,14 @@ components:
           narrows rather than guarantees full coverage.
         - **assignedUserId** (in): assignee UUIDs to filter the incident's
           assigned user by.
+        - **incidentStateKeys** (in): one or more raw ServiceNow
+          `incident_state` numeric keys, passed through unmapped (unlike
+          state above, which translates the domain IncidentState enum to
+          SN's raw `state` numeric key). Deliberately separate from state:
+          `incident_state` is a distinct field that exists independently on
+          the same incident row. Kept only for exact parity with SN's native
+          incident dashboards; prefer state for general-purpose state
+          filtering.
 
     SearchIncidentsRequest:
       type: object
@@ -14899,7 +15283,7 @@ components:
               type: array
               items:
                 type: string
-                enum: [ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
+                enum: [OPEN, ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
             searchQuery:
               type: string
             number:
@@ -14965,7 +15349,7 @@ components:
         state:
           type: string
           nullable: true
-          enum: [ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
+          enum: [OPEN, ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
         createdOn:
           type: string
         createdBy:
@@ -15672,8 +16056,17 @@ components:
     ConversationState:
       type: string
       description: >
-        Only ACTIVE and RESOLVED are accepted by the conversation search filter; all five
-        values are accepted transitions for PATCH /conversations/{id}.
+        The state of a conversation as read (e.g. via GET or search). All six values
+        are accepted by the conversation search filter. Writes are narrower — see
+        ConversationUpdateState.
+      enum: [OPEN, ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
+
+    ConversationUpdateState:
+      type: string
+      description: >
+        The states PATCH /conversations/{id} accepts as a transition target. OPEN is
+        excluded: a conversation starts there and is never PATCHed back to it, so it
+        is readable (ConversationState) but not writable.
       enum: [ACTIVE, RESOLVED, CONVERTED, ABANDONED, CLOSED]
 
     ConversationDetails:
@@ -16026,7 +16419,7 @@ components:
       required: [state]
       properties:
         state:
-          $ref: '#/components/schemas/ConversationState'
+          $ref: '#/components/schemas/ConversationUpdateState'
 
     UpdatedConversation:
       type: object
@@ -17267,6 +17660,16 @@ components:
           nullable: true
         createdBy:
           type: string
+        createdByEmail:
+          type: string
+          nullable: true
+          description: >-
+            Display-only companion to createdBy (the IdP's stable, opaque
+            account id) — the actor's resolved email at creation time, for
+            showing something readable instead of that id. Never used for
+            the creator-only authorization checks (Publish/AddUpdate), which
+            always compare against createdBy. Null for any row written
+            before this field existed, or if the caller didn't supply one.
         createdAt:
           type: string
           format: date-time
@@ -17276,6 +17679,9 @@ components:
         submittedBy:
           type: string
           nullable: true
+        submittedByEmail:
+          type: string
+          nullable: true
         submittedAt:
           type: string
           format: date-time
@@ -17283,11 +17689,17 @@ components:
         approvedBy:
           type: string
           nullable: true
+        approvedByEmail:
+          type: string
+          nullable: true
         approvedAt:
           type: string
           format: date-time
           nullable: true
         publishedBy:
+          type: string
+          nullable: true
+        publishedByEmail:
           type: string
           nullable: true
         publishedAt:
@@ -17303,6 +17715,22 @@ components:
             The real case id created for each project in resolvedProjectIds,
             self-reported by the same creator-only caller MarkPublished
             restricts this transition to. Null until then.
+        dueOn:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Set once, automatically, by submit (now + one month) — display
+            only, never enforced or acted on. Null until submitted.
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Set/cleared only via the schedule action, never by the generic
+            update. When set on an approved request,
+            operations/csm-scheduled-tasks' publish_scheduled_announcements
+            sub-cron publishes it automatically once this time arrives.
 
     CreateAnnouncementRequestRequest:
       type: object
@@ -17323,6 +17751,9 @@ components:
         createdBy:
           type: string
           description: The caller-resolved actor id — this service is called server-to-server and does not resolve one itself.
+        createdByEmail:
+          type: string
+          description: Optional display-only companion to createdBy — see AnnouncementRequest.createdByEmail.
 
     UpdateAnnouncementRequestRequest:
       type: object
@@ -17363,6 +17794,9 @@ components:
           minItems: 1
         actorId:
           type: string
+        actorEmail:
+          type: string
+          description: Optional display-only companion to actorId — see AnnouncementRequest.createdByEmail.
 
     AnnouncementRequestActorRequest:
       type: object
@@ -17371,6 +17805,27 @@ components:
       properties:
         actorId:
           type: string
+        actorEmail:
+          type: string
+          description: Optional display-only companion to actorId — see AnnouncementRequest.createdByEmail.
+
+    ScheduleAnnouncementRequestRequest:
+      type: object
+      required: [actorId, scheduledFor]
+      additionalProperties: false
+      properties:
+        actorId:
+          type: string
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            null explicitly clears the schedule. Non-null must be strictly
+            in the future.
+        actorEmail:
+          type: string
+          description: Optional display-only companion to actorId — see AnnouncementRequest.createdByEmail.
 
     PublishAnnouncementRequestRequest:
       type: object
@@ -17385,6 +17840,9 @@ components:
             type: string
           minItems: 1
           description: The real case id created for each project in the request's own resolvedProjectIds, from the caller's own fan-out.
+        actorEmail:
+          type: string
+          description: Optional display-only companion to actorId — see AnnouncementRequest.createdByEmail.
 
     CreateAnnouncementRequestUpdateRequest:
       type: object
@@ -17395,6 +17853,9 @@ components:
           type: string
         actorId:
           type: string
+        actorEmail:
+          type: string
+          description: Optional display-only companion to actorId — see AnnouncementRequest.createdByEmail.
 
     AnnouncementRequestUpdate:
       description: >
@@ -17413,6 +17874,10 @@ components:
           type: string
         createdBy:
           type: string
+        createdByEmail:
+          type: string
+          nullable: true
+          description: Optional display-only companion to createdBy — see AnnouncementRequest.createdByEmail.
         createdOn:
           type: string
           format: date-time
@@ -17425,6 +17890,77 @@ components:
           items:
             $ref: '#/components/schemas/AnnouncementRequestUpdate'
 
+    AnnouncementRequestDelivery:
+      description: >
+        The durable record of one project's outcome within an announcement
+        request's own Publish fan-out. Has no ServiceNow equivalent — always
+        backed by Postgres.
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        announcementRequestId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        caseId:
+          type: string
+          nullable: true
+          description: Set for status succeeded/tag_failed (the case is real either way). Null for failed.
+        status:
+          type: string
+          enum: [succeeded, tag_failed, failed]
+        errorMessage:
+          type: string
+          nullable: true
+        createdOn:
+          type: string
+          format: date-time
+        updatedOn:
+          type: string
+          format: date-time
+
+    RecordAnnouncementRequestDeliveryInput:
+      type: object
+      required: [projectId, status]
+      additionalProperties: false
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        caseId:
+          type: string
+          description: Required for status succeeded/tag_failed.
+        status:
+          type: string
+          enum: [succeeded, tag_failed, failed]
+        errorMessage:
+          type: string
+
+    RecordAnnouncementRequestDeliveriesRequest:
+      type: object
+      required: [actorId, deliveries]
+      additionalProperties: false
+      properties:
+        actorId:
+          type: string
+        deliveries:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RecordAnnouncementRequestDeliveryInput'
+
+    SearchAnnouncementRequestDeliveriesResponse:
+      type: object
+      properties:
+        deliveries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnnouncementRequestDelivery'
+
     SearchAnnouncementRequestsRequest:
       type: object
       required: [pagination]
@@ -17435,6 +17971,13 @@ components:
           enum: [draft, pending_approval, approved, published]
         createdBy:
           type: string
+        readyForScheduledPublish:
+          type: boolean
+          description: >-
+            When true, ignores state and instead matches every approved
+            request whose scheduledFor has already arrived — the query
+            operations/csm-scheduled-tasks' publish_scheduled_announcements
+            sub-cron uses. Rejected if combined with state.
         pagination:
           $ref: '#/components/schemas/Pagination'
 

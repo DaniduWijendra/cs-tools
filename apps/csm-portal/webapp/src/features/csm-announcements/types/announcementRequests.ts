@@ -70,16 +70,36 @@ export interface AnnouncementRequest {
   dryRunAt?: string | null;
   dryRunBy?: string | null;
   createdBy: string;
+  /**
+   * Display-only companion to createdBy (an opaque IdP account id, not
+   * human-readable) — the actor's resolved email at the moment of the
+   * action, for showing something readable instead of that id. Never used
+   * for any creator/ownership check — those must always compare against
+   * the *By id field. Null for a row written before this field existed.
+   */
+  createdByEmail?: string | null;
   createdAt: string;
   updatedAt: string;
   submittedBy?: string | null;
+  submittedByEmail?: string | null;
   submittedAt?: string | null;
   approvedBy?: string | null;
+  approvedByEmail?: string | null;
   approvedAt?: string | null;
   publishedBy?: string | null;
+  publishedByEmail?: string | null;
   publishedAt?: string | null;
   /** The real case id created for each project in resolvedProjectIds. Null until published. */
   publishedCaseIds?: string[] | null;
+  /** Set once, automatically, on submit (now + one month) — display only. Null until submitted. */
+  dueOn?: string | null;
+  /**
+   * Set/cleared only via useScheduleAnnouncementRequest, never by the
+   * generic update. When set on an approved request, it's automatically
+   * published once this time arrives (see operations/csm-scheduled-tasks'
+   * publish_scheduled_announcements sub-cron).
+   */
+  scheduledFor?: string | null;
 }
 
 export interface CreateAnnouncementRequestPayload {
@@ -102,6 +122,11 @@ export interface RecordAnnouncementRequestDryRunPayload {
   caseId: string;
 }
 
+/** null explicitly clears the schedule. Non-null must be strictly in the future. */
+export interface ScheduleAnnouncementRequestPayload {
+  scheduledFor: string | null;
+}
+
 export interface SearchAnnouncementRequestsPayload {
   state?: AnnouncementRequestState;
   createdBy?: string;
@@ -122,6 +147,8 @@ export interface AnnouncementRequestUpdate {
   announcementRequestId: string;
   content: string;
   createdBy: string;
+  /** Display-only companion to createdBy — see AnnouncementRequest.createdByEmail. */
+  createdByEmail?: string | null;
   createdOn: string;
 }
 
@@ -131,4 +158,55 @@ export interface CreateAnnouncementRequestUpdatePayload {
 
 export interface SearchAnnouncementRequestUpdatesResponse {
   updates: AnnouncementRequestUpdate[];
+}
+
+/**
+ * The outcome of one project's attempt within an announcement request's own
+ * Publish fan-out. "tag_failed" (not just succeeded/failed) exists because a
+ * security announcement's case-create and its mandatory security-tag attach
+ * are two separate calls that can fail independently — a case that exists
+ * but is missing its tag must not be treated as "not sent" (a retry would
+ * create a duplicate case) or as "fully sent" (the tag is mandatory).
+ */
+export type AnnouncementRequestDeliveryStatus = "succeeded" | "tag_failed" | "failed";
+
+/**
+ * The durable record of one project's outcome within an announcement
+ * request's own Publish fan-out — see usePublishAnnouncementRequest's own
+ * doc comment for why this exists (replacing purely in-memory retry
+ * tracking that was lost if the dialog closed mid-retry).
+ */
+export interface AnnouncementRequestDelivery {
+  id: string;
+  announcementRequestId: string;
+  projectId: string;
+  /** Set for succeeded/tag_failed (the case is real either way). Null for failed. */
+  caseId?: string | null;
+  status: AnnouncementRequestDeliveryStatus;
+  errorMessage?: string | null;
+  createdOn: string;
+  updatedOn: string;
+}
+
+/** One project's outcome within a RecordAnnouncementRequestDeliveriesPayload batch. */
+export interface RecordAnnouncementRequestDeliveryEntry {
+  projectId: string;
+  /** Required for status succeeded/tag_failed. */
+  caseId?: string;
+  status: AnnouncementRequestDeliveryStatus;
+  errorMessage?: string;
+}
+
+/**
+ * One Publish fan-out pass's worth of per-project outcomes — one entry per
+ * project attempted in that pass, not the full resolved audience (a pass
+ * that only retried failures need not resend every already-succeeded
+ * project's own unchanged row).
+ */
+export interface RecordAnnouncementRequestDeliveriesPayload {
+  deliveries: RecordAnnouncementRequestDeliveryEntry[];
+}
+
+export interface SearchAnnouncementRequestDeliveriesResponse {
+  deliveries: AnnouncementRequestDelivery[];
 }

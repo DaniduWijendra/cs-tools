@@ -32,7 +32,7 @@ import (
 // must NOT reach any ServiceNow integration service call -- there is none
 // configured -- and must instead reach the Postgres-backed path, which fails
 // against a nil pool rather than a network call. This is what
-// TestCaseAttachmentRoutes_UseServiceNowUnderPostgresPrimarySNFallback below
+// TestCaseAttachmentRoutes_UseServiceNowUnderPostgresServiceNowDualWrite below
 // is contrasted against: that test proves ONLY the fallback DataSource
 // redirects attachments to ServiceNow, not that plain postgres started doing
 // so too.
@@ -53,15 +53,15 @@ func TestCaseAttachmentRoutes_UsePostgresUnderPlainPostgres(t *testing.T) {
 	}
 }
 
-// TestCaseAttachmentRoutes_UseServiceNowUnderPostgresPrimarySNFallback is the
+// TestCaseAttachmentRoutes_UseServiceNowUnderPostgresServiceNowDualWrite is the
 // regression guard for the routing fix: under
-// DataSource=postgres-primary-sn-fallback, case attachment routes must reach
+// DataSource=postgres-servicenow-dual-write, case attachment routes must reach
 // ServiceNow (via the same snCaseService already used for case CREATE/
 // UPDATE's mirror), never the Postgres-backed case_attachment path -- the
 // sftpgo-backed Postgres attachment implementation is not production-ready,
 // so this mode must never route a request to it, regardless of how case
 // metadata itself is wired in this mode.
-func TestCaseAttachmentRoutes_UseServiceNowUnderPostgresPrimarySNFallback(t *testing.T) {
+func TestCaseAttachmentRoutes_UseServiceNowUnderPostgresServiceNowDualWrite(t *testing.T) {
 	var snAttachmentCallReceived bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func TestCaseAttachmentRoutes_UseServiceNowUnderPostgresPrimarySNFallback(t *tes
 	defer snServer.Close()
 
 	cfg := &config.Config{
-		DataSource:                               config.DataSourcePostgresPrimarySNFallback,
+		DataSource:                               config.DataSourcePostgresServiceNowDualWrite,
 		ServiceNowIntegrationServiceBaseURL:      snServer.URL,
 		ServiceNowIntegrationServiceTokenURL:     snServer.URL + "/oauth2/token",
 		ServiceNowIntegrationServiceClientID:     "test-client",

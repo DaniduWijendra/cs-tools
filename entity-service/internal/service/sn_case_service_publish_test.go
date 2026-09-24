@@ -1064,3 +1064,61 @@ func TestSNCaseService_UpdateCase_SkipsPublishCaseAssignedWhenAssigneeUnchanged(
 		t.Fatalf("expected no publish call when the assignee didn't actually change, got %d", len(publisher.calls))
 	}
 }
+
+// TestSNCaseService_CreateBareCaseComment_NoSideEffects is the regression
+// guard CreateBareCaseComment exists for: unlike CreateCaseComment, it must
+// issue exactly one request (POST /comments) and nothing else -- no
+// GetCaseByID enrichment, no SearchComments author-name lookup, no
+// publishCommentAdded, no applyResponseSLAOnComment, no
+// applyCustomerReplyStateTransition. The fake server fails the test on any
+// request other than that single POST, which is what proves none of those
+// side effects ran, not just that the response looked right.
+func TestSNCaseService_CreateBareCaseComment_NoSideEffects(t *testing.T) {
+	caseSysid := sysid32('a')
+	commentSysid := sysid32('d')
+	caseID := sysidToUUID(caseSysid)
+	commentID := sysidToUUID(commentSysid)
+
+	var gotBody map[string]any
+	requestCount := 0
+	client := newTestCaseClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method != http.MethodPost || r.URL.Path != "/comments" {
+			t.Fatalf("CreateBareCaseComment must issue exactly one request, POST /comments — got %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"message": "Comment created successfully",
+			"comment": {"id": "` + commentSysid + `", "createdOn": "2026-01-02 11:00:00", "createdBy": "agent.smith"}
+		}`))
+	})
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowCaseService(client, nil, publisher, nil, nil).(*snCaseService)
+
+	detail, err := svc.CreateBareCaseComment(contextWithUserIDToken("token"), caseID, domain.CommentTypeComment, "Working on it")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ID != commentID {
+		t.Errorf("comment id = %q, want %q", detail.ID, commentID)
+	}
+	if requestCount != 1 {
+		t.Errorf("expected exactly 1 HTTP request (the POST), got %d", requestCount)
+	}
+	if gotBody["referenceId"] != uuidToSysid(caseID) {
+		t.Errorf("referenceId = %v, want %v", gotBody["referenceId"], uuidToSysid(caseID))
+	}
+	if gotBody["referenceType"] != "case" {
+		t.Errorf("referenceType = %v, want %q", gotBody["referenceType"], "case")
+	}
+	if gotBody["content"] != "Working on it" {
+		t.Errorf("content = %v, want %q", gotBody["content"], "Working on it")
+	}
+	if len(publisher.calls) != 0 {
+		t.Errorf("expected 0 publish calls, got %d", len(publisher.calls))
+	}
+}

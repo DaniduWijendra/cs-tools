@@ -12,9 +12,11 @@ Handler → Service → Repository → PostgreSQL (pgx/v5)
 
 All wiring happens explicitly in `internal/server/routes.go` (no DI framework). The full dependency graph is built there: `NewRepository(db) → NewService(repo) → NewHandler(svc)`, then registered on a `net/http.ServeMux`.
 
-Middleware chain wraps the mux: **CorrelationID → Recovery → Logger → UserIDToken → Timeout** (10 s per request).
+Middleware chain wraps the mux: **CorrelationID → Recovery → Logger → UserIDToken → auth.Middleware → Timeout** (10 s per request; `auth.Middleware` was missing from this list before — see "Token validation and caller-scoped access" below for what it does).
 
 `CorrelationID` reads the `X-CSM-Correlation-ID` request header forwarded by the portal BFF, or generates a UUID v4 if absent. The ID is stored in the request context and echoed in the response header. All access log lines and panic logs include the correlation ID for end-to-end request tracing.
+
+`Logger`'s access log line also carries `callerId` — the same Asgardeo user UUID `apps/csm-portal/backend`/`apps/customer-portal/backend-v2` already log for the request that reached them (their `UserInfo.UserID`, the `userid` claim), decoded here from the `x-user-id-token` those BFFs forward — so one request can be traced across services by that one value, not just the correlation ID. Falls back to the client id from a pure machine-to-machine caller's own `x-jwt-assertion` token when there's no end user in the loop, or `-` when neither validated (no tokens presented, or a token that failed validation — its claims are never trusted or logged). This needs its own plumbing (`auth.IdentityHolder`, a mutable pointer `Logger` installs into the request context before `auth.Middleware` runs) rather than the simpler `auth.WithIdentity`/`IdentityFromContext` pair every handler/service already uses to read the caller's identity: `auth.Middleware` returns early with a 401 without ever calling `next.ServeHTTP` on an invalid token, so a value it only ever handed *forward* down the chain (the normal way `context.WithValue` works) would never reach `Logger`, which wraps it — and a rejected request must still show up in this access log. See `auth.IdentityHolder`'s own doc comment for the full reasoning.
 
 ## Running locally
 
@@ -797,7 +799,25 @@ already use — no route path, request, or response shape changed.
   string, which can be a non-user integration account) — the Postgres path
   writes the caller's resolved email into it, the same identity mechanism
   `caseService.CreateCaseComment` uses (`x-user-id-token` → `emailFromJWT` →
-  `UserRepository.GetUserByEmail`).
+  `UserRepository.GetUserByEmail`). **`SearchComments` now also resolves a
+  display name for that email**, via the same `LEFT JOIN "user" ON
+  LOWER(email) = LOWER(created_by)` (wrapped in its own `DISTINCT ON`
+  subquery — email has no unique constraint) that `SearchCaseActivities`'s
+  own comment branch already used — found live as a real, visible bug: a
+  case's comment bubbles showed the commenter's raw email while that same
+  case's Lifecycle/Attachment entries, on the sibling `/activities/search`
+  endpoint, already showed a resolved name for the identical author, because
+  only that second endpoint ever did the join. `CommentRow.CreatedByName`
+  (`comment_repo.go`) is `""` for an address with no matching `"user"` row
+  (an integration/automation account like `github_pipeline` — a real,
+  legitimate case, not an error) — `commentRowToDomain` passes it through as
+  the `UserReference.Name`, and the webapp's own `authorDisplayName` already
+  falls back to the email whenever `Name` is empty, so this needed no
+  webapp change at all, only entity-service. `CreateComment`'s own
+  echoed-back response (`CaseCommentDetail.CreatedBy`) is a plain email
+  string with no name field on its wire contract at all — deliberately left
+  as-is; the webapp only reads a comment's display name from `SearchComments`
+  once the list is (re)fetched, never from the create response.
 - **Product vulnerabilities**: `SearchProductVulnerabilities`/
   `GetProductVulnerability`/`GetVulnerabilityMeta` are read-only queries
   against `product_vulnerability`, which mirrors ServiceNow's own
@@ -1744,13 +1764,16 @@ space-separated-title-case convention `taskSlaStageDisplay` already uses
 for a raw enum label) -- there's no field-name-to-display-label mapping
 anywhere else in this schema to defer to instead.
 
-## Instances and usage tracking (deployment_node, usage_count, daily_usage_summary, deployment_information)
+## Instances and usage tracking (deployment_node, hourly_usage_summary, daily_usage_summary, deployment_information)
 
-Migration 000054 added a 7-table cluster mirroring ServiceNow's product usage
-tracking (`deployment_node`, `deployment_information`, `usage_count`,
-`daily_usage_summary`, `monthly_usage_count`, `project_daily_summary`,
+Migration 000054 added a 6-table cluster mirroring ServiceNow's product usage
+tracking (`deployment_node`, `deployment_information`, `hourly_usage_summary`,
+`daily_usage_summary`, `monthly_usage_summary`,
 `product_usage_map`) -- see that migration's own doc comment for the full
-shape. This finally gives the previously ServiceNow-only "instance" concept
+shape. `project_daily_summary` was dropped from this cluster (it never had a
+consuming endpoint -- see the "not wired up" note below) to match the
+identically-named table's removal from `operations/csm-sync-service`'s own
+copy of this schema. This finally gives the previously ServiceNow-only "instance" concept
 (`InstanceService`, `POST /instances/*`) and the two
 `/deployed-products/{id}/metrics*` endpoints something to read on Postgres.
 `instance_repo.go`/`instance_service.go` are new; `deployed_product_repo.go`/
@@ -1809,12 +1832,12 @@ because only one of them carries what each endpoint needs:**
   `DeploymentMetadata`) reads `deployment_information` -- the only table
   with JDK version or the raw deployment-info JSON at all.
 - `SearchInstanceUsage`/`InstanceSummary` (an open `map[string]int` of count
-  types per day) reads `usage_count` -- per-node, per-day, per-count-type
+  types per day) reads `hourly_usage_summary` -- per-node, per-day, per-count-type
   facts (`count_type` in practice holds `CORES`/`TPS`/`MTX`/`MAU`, but
   nothing enforces that set; it stays a free string, same reasoning as the
   migration's own comment on that column).
 - `SearchInstanceUsageStats` reads `daily_usage_summary` instead of
-  `usage_count`, specifically because `daily_usage_summary` is the only one
+  `hourly_usage_summary`, specifically because `daily_usage_summary` is the only one
   of the two with a `data_source` column (`usage_data_source_enum`:
   `API_CALL`/`FILE_UPLOAD`) -- `InstanceStatsFilters.DataSource` (an int, 1
   or 2) only has something to filter against there.
@@ -1841,12 +1864,11 @@ possible upstream), `SearchInstances`' metadata lookup could attach the same
 latest snapshot to both. Not fixable within this schema: `deployment_information`
 has no other way to identify which specific node row it belongs to.
 
-**`monthly_usage_count` and `project_daily_summary` are not wired up.** No
-existing endpoint's response shape has a monthly-granularity or
-project-level rollup concept to serve from them; `product_usage_map` (a
-product-code -> display-unit lookup) has no consuming field either. Left
-unused rather than exposed speculatively, same as other tables with no
-current caller elsewhere in this file.
+**`monthly_usage_summary` is not wired up.** No existing endpoint's response
+shape has a monthly-granularity rollup concept to serve from it;
+`product_usage_map` (a product-code -> display-unit lookup) has no consuming
+field either. Left unused rather than exposed speculatively, same as other
+tables with no current caller elsewhere in this file.
 
 ## Service offerings and task SLAs
 
@@ -1984,20 +2006,34 @@ validator (`golang-jwt/jwt/v5` + `keyfunc/v3`, same versions), against
 **Asgardeo** (not Choreo). Two tokens can arrive on the same request:
 - `x-user-id-token`: the end user's ID token. Checked for signature, issuer,
   expiry, an `aud` among `AUTH_USER_TOKEN_AUDIENCES`, and an `email` claim.
-- `Authorization: Bearer`: the calling application's client-credentials access
-  token (every backend, including csm-integration-service, sends one -- it's
-  the only token a pure machine-to-machine caller ever sends). Checked for
-  signature/issuer/expiry; its `client_id` (else `azp`) claim is the client id.
-  No audience check -- the client id is what gets authorized.
+- `x-jwt-assertion`: the calling application's client-credentials assertion
+  (every backend, including csm-integration-service, sends one -- it's the
+  only token a pure machine-to-machine caller ever sends). **Decoded only,
+  never signature/issuer/expiry-verified** (`Validator.ExtractClientID`) --
+  its `client_id` (else `azp`) claim is trusted at face value as the client
+  id. This mirrors `apps/csm-portal/backend`'s own `x-jwt-assertion` handling,
+  which runs with signature verification off in every Choreo deployment, not
+  just locally: this token is minted by the gateway in front of the service
+  after it already authenticated the caller by its own means, over a path
+  this service already trusts. Re-verifying it against Asgardeo's JWKS was
+  tried first and caused a real outage -- a JWKS refresh rate-limit/lookup
+  failure rejected every internal caller -- and added no real security either,
+  since the client id is only ever checked against the deployment-controlled
+  `AUTH_INTERNAL_CLIENT_IDS` allow-list, never used as a capability grant
+  derived from an unproven claim. No audience check either way.
 
 **Always on -- there is no config flag to disable it.** `AUTH_ISSUER`/
 `AUTH_JWKS_URL`/`AUTH_USER_TOKEN_AUDIENCES` are required (`config.Validate`
-rejects startup without them). Only asymmetric algorithms are accepted (an
+rejects startup without them) and govern `x-user-id-token` validation; they
+play no part in reading `x-jwt-assertion`, which is never checked against
+them. Only asymmetric algorithms are accepted for `x-user-id-token` (an
 HS256 token "signed" with the public key is rejected -- there is a test). A
-token that is **present but invalid is always a 401 on every route**, never
-downgraded to "no token": that would turn a forged user token into an
-anonymous request. A request with no tokens at all passes through the
-middleware; whether that's acceptable is decided per endpoint (see below).
+`x-user-id-token` that is **present but invalid is always a 401 on every
+route**, never downgraded to "no token": that would turn a forged user token
+into an anonymous request. `x-jwt-assertion` is rejected only when it can't
+even be decoded, or carries neither a `client_id` nor an `azp` claim. A
+request with no tokens at all passes through the middleware; whether that's
+acceptable is decided per endpoint (see below).
 
 Two things learned the hard way, both mirrored from/corrected against the CSM
 backend: Asgardeo publishes JWKS `x5c` certs Go 1.23+ refuses to parse, so the
@@ -2014,7 +2050,7 @@ same way everywhere it's wired (see "Where this is actually enforced" below):
 | Request carries | Result |
 |---|---|
 | no verified identity (only possible if the auth middleware was left out of the chain -- a bug) | 503 -- never scope from an unverified token |
-| Bearer client id is in `AUTH_INTERNAL_CLIENT_IDS` | **everything, unconditionally** -- regardless of any `x-user-id-token` the same request also carries |
+| `x-jwt-assertion` client id is in `AUTH_INTERNAL_CLIENT_IDS` | **everything, unconditionally** -- regardless of any `x-user-id-token` the same request also carries |
 | not an internal client, user token, `user_type` INTERNAL (all active rows for the email) | everything |
 | not an internal client, user token, EXTERNAL (customer) | only projects where their email is a `REGISTERED` `project_contact`, and the cases in them; none registered = an empty result, never "no filter" |
 | not an internal client, user token, inactive / SYSTEM / NOT_AVAILABLE / unknown email | 403 |
@@ -2412,6 +2448,53 @@ profile's team block) and, for customers only (`user_type` EXTERNAL, emitted as
 - Enrichment failures are errors, not silently partial profiles (the ServiceNow adapter
   degrades to empty blocks; a database error here is a real fault).
 - Like the other user routes this does no per-caller scoping; the BFF gates it.
+
+## SearchDeployments crashed on any page containing a NULL deployment.type
+
+Reported live: `POST /deployments/search` failing with `cannot scan NULL into
+*string`. `deployment.type` (migration 000013) has no `NOT NULL` constraint —
+38 of 2859 rows are NULL on staging, checked live — but `DeploymentView.Type`
+is a required (non-pointer) `DeploymentType` field on the wire, and
+`deployment_repo.go`'s `SearchDeployments` scanned the column straight into
+it. Fixed the same way as `CaseView.InternalID` (see that section above):
+the wire contract stays a required string (every consumer already expects
+that), only the scan side changes — `d.type::TEXT` now scans into a `*string`
+local, and `stringOrEmpty(...)` (already used elsewhere in this file for the
+identical class of fix) converts a NULL to `""` instead of crashing the whole
+page. Verified directly against a real project with a NULL-type deployment on
+staging: the search now returns all of that project's deployments, the
+NULL-type ones as `"type": ""`.
+
+**`/cases/{id}/tasks/search` (and every other `TaskService` method) is not a
+bug — it's `unavailableTaskService`'s documented, deliberate 503** ("tasks
+are only supported for the ServiceNow data source"). Checked directly
+against staging: **no table matching `%task%` exists anywhere in the public
+schema** — there is no Postgres-backed task storage at all to have a data bug
+in. Implementing this would be a genuinely new feature (a migration + a real
+`task_repo.go`), not a fix to something already wired up incorrectly — same
+class of gap as `GlobalService.GlobalSearch`'s own "no Postgres
+implementation" note elsewhere in this file.
+
+## Case feedback silently 404'd on the Postgres data source instead of a documented 503
+
+Reported live: a case's Activity timeline always showed "Could not load Case
+Feedback" — on every case, every time. Unlike tasks (previous section) and
+every other ServiceNow-only entity in this codebase, `routes.go` only
+constructed `feedbackHandler` when `cfg.DataSource ==
+config.DataSourceServiceNow`, leaving it `nil` (and, with the surrounding
+`if feedbackHandler != nil` guard, both `POST /cases/feedback/search` and
+`/aggregate` entirely **unregistered**) on Postgres — a silent 404, even
+though `openapi.yaml` already documents a `503` `ErrorResponse` for both
+paths. No feedback table exists anywhere in `migrations/` either, so this is
+genuinely ServiceNow-only, same as tasks — the bug was purely in *how* that
+was expressed. Fixed by adding `unavailableFeedbackService`
+(`feedback_service.go`), an exact mirror of `unavailableTaskService`: every
+method returns the documented `*apierror.ServiceUnavailableError`. `routes.go`
+now always constructs `feedbackHandler` (Postgres gets the unavailable
+stand-in, same `if cfg.DataSource == ... else ...` shape as `activeTaskSvc`
+above) and always registers both routes unconditionally — a real, documented
+503 instead of an undocumented 404 callers can't distinguish from a
+genuinely missing resource.
 
 ## Adding a new entity
 

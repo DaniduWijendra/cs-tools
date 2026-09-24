@@ -34,7 +34,7 @@ const (
 	DataSourcePostgres DataSource = "postgres"
 	// DataSourceServiceNow uses the Choreo ServiceNow API.
 	DataSourceServiceNow DataSource = "servicenow"
-	// DataSourcePostgresPrimarySNFallback serves every read and write from
+	// DataSourcePostgresServiceNowDualWrite serves every read and write from
 	// PostgreSQL (authoritative, same as DataSourcePostgres) and additionally
 	// best-effort mirrors writes to ServiceNow afterward, so that ServiceNow
 	// stays a genuine rollback target rather than going silently stale ahead
@@ -43,7 +43,7 @@ const (
 	// authoritative, and a failed mirror write is recorded (see
 	// SNWritebackFailureRepository) rather than retried or surfaced to the
 	// caller. Piloted on the account entity only — see routes.go.
-	DataSourcePostgresPrimarySNFallback DataSource = "postgres-primary-sn-fallback"
+	DataSourcePostgresServiceNowDualWrite DataSource = "postgres-servicenow-dual-write"
 )
 
 // Config holds all environment-driven settings for the service.
@@ -124,15 +124,11 @@ type Config struct {
 	// CSMPortalBaseURL builds the link back to a change request in comments
 	// posted to GitHub. Empty omits the link rather than rendering a broken one.
 	CSMPortalBaseURL string
-	// GitHub label vocabulary overrides. Empty keeps ServiceNow's value.
-	GithubLabelChangeRequest     string
-	GithubLabelTypePrefix        string
-	GithubLabelScopePrefix       string
-	GithubLabelsScope            string
-	GithubLabelsImpact           string
-	GithubLabelsLikelihood       string
-	GithubLabelsState            string
-	GithubLabelsStrippedOnCreate string
+	// GitHub label vocabulary overrides. Empty keeps .github/labels.yml's value.
+	GithubLabelTypeIncident       string
+	GithubLabelTypeServiceRequest string
+	GithubLabelsClass             string
+	GithubLabelStatusAssigned     string
 
 	// CRNoticesEnabled turns on the change-request notice drainer: the poller
 	// that reads event_outbox and asks csm-notification-service to send the
@@ -246,14 +242,10 @@ func Load() *Config {
 		GithubIntegrationLogin:                   os.Getenv("GITHUB_INTEGRATION_LOGIN"),
 		GithubOutboundInterval:                   envDuration("GITHUB_OUTBOUND_INTERVAL", 15*time.Second),
 		CSMPortalBaseURL:                         os.Getenv("CSM_PORTAL_BASE_URL"),
-		GithubLabelChangeRequest:                 os.Getenv("GITHUB_LABEL_CHANGE_REQUEST"),
-		GithubLabelTypePrefix:                    os.Getenv("GITHUB_LABEL_TYPE_PREFIX"),
-		GithubLabelScopePrefix:                   os.Getenv("GITHUB_LABEL_SCOPE_PREFIX"),
-		GithubLabelsScope:                        os.Getenv("GITHUB_LABELS_SCOPE"),
-		GithubLabelsImpact:                       os.Getenv("GITHUB_LABELS_IMPACT"),
-		GithubLabelsLikelihood:                   os.Getenv("GITHUB_LABELS_LIKELIHOOD"),
-		GithubLabelsState:                        os.Getenv("GITHUB_LABELS_STATE"),
-		GithubLabelsStrippedOnCreate:             os.Getenv("GITHUB_LABELS_STRIPPED_ON_CREATE"),
+		GithubLabelTypeIncident:                  os.Getenv("GITHUB_LABEL_TYPE_INCIDENT"),
+		GithubLabelTypeServiceRequest:            os.Getenv("GITHUB_LABEL_TYPE_SERVICE_REQUEST"),
+		GithubLabelsClass:                        os.Getenv("GITHUB_LABELS_CLASS"),
+		GithubLabelStatusAssigned:                os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                         os.Getenv("CR_NOTICES_ENABLED") == "true",
 		SalesforceMembershipIngestEnabled:        os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
 		CREventHubTopic:                          getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
@@ -361,13 +353,13 @@ func (c *Config) Validate() error {
 	}
 
 	switch c.DataSource {
-	case DataSourcePostgres, DataSourceServiceNow, DataSourcePostgresPrimarySNFallback:
+	case DataSourcePostgres, DataSourceServiceNow, DataSourcePostgresServiceNowDualWrite:
 		// valid
 	default:
-		return fmt.Errorf("invalid DATA_SOURCE %q: must be %q, %q, or %q", c.DataSource, DataSourcePostgres, DataSourceServiceNow, DataSourcePostgresPrimarySNFallback)
+		return fmt.Errorf("invalid DATA_SOURCE %q: must be %q, %q, or %q", c.DataSource, DataSourcePostgres, DataSourceServiceNow, DataSourcePostgresServiceNowDualWrite)
 	}
 	// Postgres credentials are required for DATA_SOURCE=postgres and
-	// DATA_SOURCE=postgres-primary-sn-fallback — both serve every entity read
+	// DATA_SOURCE=postgres-servicenow-dual-write — both serve every entity read
 	// and write from the pool (the fallback mode's ServiceNow leg is a
 	// best-effort mirror on top, never a read source). servicenow mode skips
 	// the pool (db.NewPoolIfNeeded) so a local customer-portal can start
@@ -384,7 +376,7 @@ func (c *Config) Validate() error {
 	// with "DB_USER is required", which is what this branch exists to prevent.
 	dbSet := c.DBUser != "" || c.DBPassword != "" || c.DBName != ""
 	dbComplete := c.DBUser != "" && c.DBPassword != "" && c.DBName != ""
-	dbRequired := c.DataSource == DataSourcePostgres || c.DataSource == DataSourcePostgresPrimarySNFallback
+	dbRequired := c.DataSource == DataSourcePostgres || c.DataSource == DataSourcePostgresServiceNowDualWrite
 
 	if dbRequired && !dbComplete {
 		if c.DBUser == "" {
@@ -405,9 +397,9 @@ func (c *Config) Validate() error {
 	}
 	// ServiceNow integration service credentials are required for
 	// DATA_SOURCE=servicenow (reads go there) and also for
-	// DATA_SOURCE=postgres-primary-sn-fallback (the best-effort mirror write
+	// DATA_SOURCE=postgres-servicenow-dual-write (the best-effort mirror write
 	// goes there, via the same client — see SNWritebackDispatcher).
-	snRequired := c.DataSource == DataSourceServiceNow || c.DataSource == DataSourcePostgresPrimarySNFallback
+	snRequired := c.DataSource == DataSourceServiceNow || c.DataSource == DataSourcePostgresServiceNowDualWrite
 	if snRequired {
 		if c.ServiceNowIntegrationServiceBaseURL == "" {
 			return fmt.Errorf("SERVICENOW_INTEGRATION_SERVICE_BASE_URL is required when DATA_SOURCE=%s", c.DataSource)
