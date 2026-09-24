@@ -152,7 +152,17 @@ type SigningContext struct {
 	SecondarySecretKey string `json:"secondarySecretKey,omitempty"`
 	LicenseSecrets     string `json:"licenseSecrets,omitempty"`
 	DeploymentName     string `json:"deploymentName"`
-	SubscriptionKey    string `json:"subscriptionKey"`
+	// DeploymentNumber is the deployment's human-readable reference, e.g.
+	// "DEP000002183".
+	//
+	// It is the value that goes into the signed payload's deploymentId field --
+	// NOT the UUID from the request path. Verified against a licence issued
+	// live: the signature is computed over the number. While ServiceNow still
+	// issues licences the signer can read this from its response, but once
+	// signing moves off ServiceNow there is no such response to read, so it has
+	// to travel with the rest of the signing inputs.
+	DeploymentNumber string `json:"deploymentNumber,omitempty"`
+	SubscriptionKey  string `json:"subscriptionKey"`
 }
 
 // DeploymentLicenseRequest is the request body for

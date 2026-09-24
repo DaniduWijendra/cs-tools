@@ -464,7 +464,14 @@ func TestIntegration_GetSigningContext(t *testing.T) {
 		t.Fatalf("failed to update project credentials: %v", err)
 	}
 
-	ctx, err := repo.GetSigningContext(context.Background(), testIntegrationProjectID, "00000000-0000-0000-0000-000000000001")
+	// A real deployment on this project. It used to be enough to pass an id
+	// that matched nothing: the joins are LEFT joins, so the name and number
+	// came back as empty strings and the call succeeded. Both are part of the
+	// signed payload, so that produced a signable-but-wrong context, and
+	// GetSigningContext now refuses it.
+	seedDeployment(t, pool, testIntegrationDeploymentID, testIntegrationProjectID, "DEP000000001", "QA")
+
+	ctx, err := repo.GetSigningContext(context.Background(), testIntegrationProjectID, testIntegrationDeploymentID)
 	if err != nil {
 		t.Fatalf("GetSigningContext failed: %v", err)
 	}
@@ -489,4 +496,101 @@ func asNotFound(err error, target **apierror.NotFoundError) bool {
 		*target = v
 	}
 	return ok
+}
+
+// --- GetSigningContext ---------------------------------------------------
+//
+// These cover the two ways the query can hand the signer something unusable.
+// Both matter because deploymentName and deploymentNumber are part of the
+// signed licence payload, so a blank does not fail -- it produces a valid
+// signature over the wrong payload.
+
+const (
+	testIntegrationDeploymentID    = "33333333-3333-4333-8333-333333333333"
+	testIntegrationOtherProjectID  = "44444444-4444-4444-8444-444444444444"
+	testIntegrationOtherDeployment = "55555555-5555-4555-8555-555555555555"
+)
+
+// seedDeployment attaches a deployment to the given project.
+func seedDeployment(t *testing.T, pool *pgxpool.Pool, deploymentID, projectID, number, name string) {
+	t.Helper()
+	mustExec(t, pool, `
+		INSERT INTO deployment (id, created_on, updated_on, created_by, updated_by, number, name, is_active, project_id)
+		VALUES ($1, NOW(), NOW(), 'fixture', 'fixture', $3, $4, true, $2)
+		ON CONFLICT (id) DO UPDATE SET project_id = EXCLUDED.project_id, number = EXCLUDED.number, name = EXCLUDED.name`,
+		deploymentID, projectID, number, name)
+}
+
+// A fully provisioned project returns the deployment's NUMBER, not its id --
+// the signed payload's deploymentId field carries the number.
+func TestIntegration_SigningContextCarriesDeploymentNumber(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+	ctx := context.Background()
+
+	seedDeployment(t, pool, testIntegrationDeploymentID, testIntegrationProjectID, "DEP000000001", "QA")
+	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
+	advance(t, repo, domain.ConsumptionStatusSubscribed, &domain.ProjectConsumption{})
+	advance(t, repo, domain.ConsumptionStatusGeneratedCredentials, &domain.ProjectConsumption{
+		ConsumerKey:    ptr("consumer-key"),
+		ConsumerSecret: ptr("consumer-secret"),
+	})
+	advance(t, repo, domain.ConsumptionStatusGeneratedSecretKeys, &domain.ProjectConsumption{
+		PrimarySecretKey:   ptr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+		SecondarySecretKey: ptr("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
+	})
+
+	sc, err := repo.GetSigningContext(ctx, testIntegrationProjectID, testIntegrationDeploymentID)
+	if err != nil {
+		t.Fatalf("GetSigningContext: %v", err)
+	}
+	if sc.DeploymentNumber != "DEP000000001" {
+		t.Fatalf("deploymentNumber: got %q, want DEP000000001", sc.DeploymentNumber)
+	}
+	if sc.DeploymentName != "QA" {
+		t.Fatalf("deploymentName: got %q, want QA", sc.DeploymentName)
+	}
+	if sc.DeploymentNumber == testIntegrationDeploymentID {
+		t.Fatal("deploymentNumber must not be the deployment uuid")
+	}
+}
+
+// A deployment that belongs to a DIFFERENT project must not resolve. Before the
+// guard this returned empty strings for name and number, which are signable.
+func TestIntegration_SigningContextRejectsForeignDeployment(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+	ctx := context.Background()
+
+	mustExec(t, pool, `
+		INSERT INTO project (id, created_on, updated_on, created_by, updated_by, key, sf_id, name, account_id, start_date, end_date)
+		VALUES ($1, NOW(), NOW(), 'fixture', 'fixture', 'CONSUMPTION-FIXTURE-OTHER', 'SF-PROJ-CONSUMPTION-OTHER', 'Other Fixture Project', $2,
+		        NOW() - INTERVAL '1 day', NOW() + INTERVAL '365 days')
+		ON CONFLICT (id) DO NOTHING`, testIntegrationOtherProjectID, testIntegrationAccountID)
+	seedDeployment(t, pool, testIntegrationOtherDeployment, testIntegrationOtherProjectID, "DEP000000002", "Other")
+
+	_, err := repo.GetSigningContext(ctx, testIntegrationProjectID, testIntegrationOtherDeployment)
+	var notFound *apierror.NotFoundError
+	if !asNotFound(err, &notFound) {
+		t.Fatalf("got %v, want a NotFoundError for a deployment on another project", err)
+	}
+}
+
+// A project whose credentials are incomplete must error rather than return a
+// context with blanks in it -- the state 8 of 12 COMPLETED projects were
+// observed in on the dev database.
+func TestIntegration_SigningContextRejectsIncompleteCredentials(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+	ctx := context.Background()
+
+	seedDeployment(t, pool, testIntegrationDeploymentID, testIntegrationProjectID, "DEP000000001", "QA")
+	// Credentials but no secret keys.
+	advance(t, repo, domain.ConsumptionStatusCreated, &domain.ProjectConsumption{ChoreoApplicationID: ptr("app-1")})
+	advance(t, repo, domain.ConsumptionStatusSubscribed, &domain.ProjectConsumption{})
+	advance(t, repo, domain.ConsumptionStatusGeneratedCredentials, &domain.ProjectConsumption{
+		ConsumerKey:    ptr("consumer-key"),
+		ConsumerSecret: ptr("consumer-secret"),
+	})
+
+	if _, err := repo.GetSigningContext(ctx, testIntegrationProjectID, testIntegrationDeploymentID); err == nil {
+		t.Fatal("expected an error when the primary secret key is absent, got none")
+	}
 }

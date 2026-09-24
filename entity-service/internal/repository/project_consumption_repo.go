@@ -270,20 +270,24 @@ func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectI
 			COALESCE(p.secondary_secret_key, ''),
 			COALESCE(p.license_secrets::text, ''),
 			p.key,
-			COALESCE(d.name, dp.name, '') AS deployment_name
+			COALESCE(d.name, dp.name, '') AS deployment_name,
+			COALESCE(d.number, dp.number, '') AS deployment_number,
+			(d.id IS NOT NULL OR dp.id IS NOT NULL) AS deployment_matched
 		FROM project p
 		LEFT JOIN deployment d ON d.id::text = $2 AND d.project_id = p.id
 		LEFT JOIN deployed_product dp ON dp.id::text = $2 AND dp.project_id = p.id
 		WHERE p.id::text = $1`
 
 	var (
-		clientID        string
-		clientSecret    string
-		primaryKey      string
-		secondaryKey    string
-		licenseSecrets  string
-		subscriptionKey string
-		deploymentName  string
+		clientID          string
+		clientSecret      string
+		primaryKey        string
+		secondaryKey      string
+		licenseSecrets    string
+		subscriptionKey   string
+		deploymentName    string
+		deploymentNumber  string
+		deploymentMatched bool
 	)
 
 	err := r.db.QueryRow(ctx, query, projectID, deploymentID).Scan(
@@ -294,6 +298,8 @@ func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectI
 		&licenseSecrets,
 		&subscriptionKey,
 		&deploymentName,
+		&deploymentNumber,
+		&deploymentMatched,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, &apierror.NotFoundError{Msg: "project not found"}
@@ -305,6 +311,42 @@ func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectI
 	// Trim any enclosing quotes if license_secrets was stored in a JSONB column as a JSON string literal.
 	licenseSecrets = strings.Trim(licenseSecrets, "\"")
 
+	// Refuse rather than return a partial context. Both joins are LEFT joins
+	// scoped to this project, so a deployment that does not exist -- or that
+	// belongs to a DIFFERENT project -- simply produces no match, and the
+	// COALESCEs above would turn that into empty strings.
+	//
+	// That matters because deploymentName and deploymentNumber are part of the
+	// signed payload. Handing the signer a blank for either does not fail: it
+	// produces a valid signature over the wrong payload, which the customer's
+	// product then rejects, with nothing anywhere reporting a problem.
+	// ServiceNow refuses this case outright ("Deployment does not belong to
+	// project"), and so does this.
+	if !deploymentMatched {
+		return nil, &apierror.NotFoundError{Msg: "deployment not found for this project"}
+	}
+
+	// Same reasoning for the credentials. ServiceNow will not sign unless every
+	// one of them is present, so an incomplete set is never signable -- and a
+	// project can genuinely be in this state, e.g. one marked complete whose
+	// step-5 write never landed. Reported as an error so the caller falls back
+	// to the direct download instead of signing with blanks.
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"clientId", clientID},
+		{"clientSecret", clientSecret},
+		{"primarySecretKey", primaryKey},
+		{"deploymentName", deploymentName},
+		{"deploymentNumber", deploymentNumber},
+	} {
+		if f.value == "" {
+			// The field name is safe to report; no value is included.
+			return nil, fmt.Errorf("get signing context: %s is not set for this project", f.name)
+		}
+	}
+
 	return &domain.SigningContext{
 		ClientID:           clientID,
 		ClientSecret:       clientSecret,
@@ -312,6 +354,7 @@ func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectI
 		SecondarySecretKey: secondaryKey,
 		LicenseSecrets:     licenseSecrets,
 		DeploymentName:     deploymentName,
+		DeploymentNumber:   deploymentNumber,
 		SubscriptionKey:    subscriptionKey,
 	}, nil
 }
