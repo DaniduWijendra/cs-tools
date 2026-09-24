@@ -22,6 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
@@ -45,6 +48,7 @@ type projectConsumptionService struct {
 	choreoClient choreosubscription.Client
 	access       AccessService
 	dualWrite    bool
+	sf           singleflight.Group
 }
 
 // NewProjectConsumptionService constructs a ProjectConsumptionService backed by
@@ -238,12 +242,35 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 		return domain.License{}, errors.New("choreo subscription client not configured")
 	}
 
+	// Synchronize project provisioning transitions per projectID using singleflight
+	// so concurrent requests cannot race on status checks or create duplicate Choreo applications.
+	ch := s.sf.DoChan(projectID, func() (any, error) {
+		provisionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		return nil, s.ensureProjectProvisioned(provisionCtx, projectID, deploymentID, email)
+	})
+
+	select {
+	case <-ctx.Done():
+		return domain.License{}, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return domain.License{}, res.Err
+		}
+	}
+
+	return s.downloadDeploymentLicense(ctx, projectID, deploymentID, email)
+}
+
+// ensureProjectProvisioned advances a project through the 4 setup steps (statuses 1 -> 4 -> 5)
+// until it reaches ConsumptionStatusGeneratedSecretKeys. It is idempotent and safe for repeated calls.
+func (s *projectConsumptionService) ensureProjectProvisioned(ctx context.Context, projectID, deploymentID, email string) error {
 	statusRes, err := s.choreoClient.GetConsumptionStatus(ctx, projectID, choreosubscription.ConsumptionStatusRequest{
 		Email:        email,
 		DeploymentID: deploymentID,
 	})
 	if err != nil {
-		return domain.License{}, fmt.Errorf("choreosubscription: get consumption status: %w", err)
+		return fmt.Errorf("choreosubscription: get consumption status: %w", err)
 	}
 
 	if s.repo != nil {
@@ -264,14 +291,14 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 
 	if status == int(domain.ConsumptionStatusPending) {
 		if statusRes.Result.Name == nil || statusRes.Result.Description == nil {
-			return domain.License{}, fmt.Errorf("application is PENDING but the licensing service supplied no name/description for project %s", projectID)
+			return fmt.Errorf("application is PENDING but the licensing service supplied no name/description for project %s", projectID)
 		}
 		app, err := s.choreoClient.CreateApplication(ctx, choreosubscription.ApplicationCreateRequest{
 			Name:        *statusRes.Result.Name,
 			Description: *statusRes.Result.Description,
 		})
 		if err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: create application: %w", err)
+			return fmt.Errorf("choreosubscription: create application: %w", err)
 		}
 		applicationID = &app.ApplicationID
 
@@ -279,7 +306,7 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 			Status:        int(domain.ConsumptionStatusCreated),
 			ApplicationID: applicationID,
 		}); err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: update project status to created: %w", err)
+			return fmt.Errorf("choreosubscription: update project status to created: %w", err)
 		}
 
 		if s.dualWrite && s.repo != nil {
@@ -298,17 +325,17 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	}
 
 	if applicationID == nil {
-		return domain.License{}, fmt.Errorf("no application id for project %s after reaching status %d", projectID, status)
+		return fmt.Errorf("no application id for project %s after reaching status %d", projectID, status)
 	}
 
 	if status == int(domain.ConsumptionStatusCreated) {
 		if _, err := s.choreoClient.SubscribeApplication(ctx, *applicationID); err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: subscribe application: %w", err)
+			return fmt.Errorf("choreosubscription: subscribe application: %w", err)
 		}
 		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
 			Status: int(domain.ConsumptionStatusSubscribed),
 		}); err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: update project status to subscribed: %w", err)
+			return fmt.Errorf("choreosubscription: update project status to subscribed: %w", err)
 		}
 
 		if s.dualWrite && s.repo != nil {
@@ -328,14 +355,14 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	if status == int(domain.ConsumptionStatusSubscribed) {
 		creds, err := s.choreoClient.GenerateCredentials(ctx, *applicationID)
 		if err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: generate credentials: %w", err)
+			return fmt.Errorf("choreosubscription: generate credentials: %w", err)
 		}
 		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
 			Status:         int(domain.ConsumptionStatusGeneratedCredentials),
 			ConsumerKey:    &creds.ConsumerKey,
 			ConsumerSecret: &creds.ConsumerSecret,
 		}); err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: update project status to generated-credentials: %w", err)
+			return fmt.Errorf("choreosubscription: update project status to generated-credentials: %w", err)
 		}
 
 		if s.dualWrite && s.repo != nil {
@@ -357,14 +384,14 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	if status == int(domain.ConsumptionStatusGeneratedCredentials) {
 		keys, err := s.choreoClient.GenerateSecretKeys(ctx)
 		if err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: generate secret keys: %w", err)
+			return fmt.Errorf("choreosubscription: generate secret keys: %w", err)
 		}
 		if _, err := s.choreoClient.UpdateProjectStatus(ctx, projectID, choreosubscription.UpdateProjectStatusRequest{
 			Status:             int(domain.ConsumptionStatusGeneratedSecretKeys),
 			PrimarySecretKey:   &keys.PrimarySecretKey,
 			SecondarySecretKey: &keys.SecondarySecretKey,
 		}); err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: update project status to generated-secret-keys: %w", err)
+			return fmt.Errorf("choreosubscription: update project status to generated-secret-keys: %w", err)
 		}
 
 		if s.dualWrite && s.repo != nil {
@@ -383,59 +410,64 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 		status = int(domain.ConsumptionStatusGeneratedSecretKeys)
 	}
 
-	if status == int(domain.ConsumptionStatusGeneratedSecretKeys) {
-		req := domain.DeploymentLicenseRequest{
-			Email: email,
-		}
-		// The signing context is only safe to send when the Postgres mirror is
-		// authoritative for this project. GetSigningContext reads credentials
-		// by project id alone and does not look at status, so a mirror that is
-		// disabled, stale or diverged would otherwise hand the licensing
-		// operation keys that do not match the ones ServiceNow holds -- and it
-		// would sign with them rather than fail. Two conditions gate it:
-		// dual-write is on, so this service is actually maintaining the mirror;
-		// and the mirror has itself reached step 5, matching the ServiceNow
-		// status this branch was entered on. The status is re-read here rather
-		// than reused from the divergence check above, because the sequence
-		// advances the mirror during this same call.
-		//
-		// Failing either check is not an error: the direct download is the
-		// pre-existing path and still works.
-		if s.dualWrite && s.repo != nil {
-			pgState, _, _, getErr := s.repo.Get(ctx, projectID)
-			switch {
-			case getErr != nil:
-				slog.WarnContext(ctx, "could not read the postgres mirror for licence signing; falling back to direct download",
-					"projectId", projectID,
-					"deploymentId", deploymentID,
-					"err", getErr,
-				)
-			case pgState.Status != domain.ConsumptionStatusGeneratedSecretKeys:
-				slog.WarnContext(ctx, "postgres mirror is not at the generated-secret-keys step; falling back to direct download",
-					"projectId", projectID,
-					"deploymentId", deploymentID,
-					"postgresStatus", int(pgState.Status),
-				)
-			default:
-				signingCtx, err := s.repo.GetSigningContext(ctx, projectID, deploymentID)
-				if err != nil {
-					slog.WarnContext(ctx, "failed to load signing context for licence download; falling back to direct download",
-						"projectId", projectID,
-						"deploymentId", deploymentID,
-						"err", err,
-					)
-				} else if signingCtx != nil && signingCtx.PrimarySecretKey != "" {
-					req.SigningContext = signingCtx
-				}
-			}
-		}
-
-		license, err := s.choreoClient.GetDeploymentLicense(ctx, projectID, deploymentID, req)
-		if err != nil {
-			return domain.License{}, fmt.Errorf("choreosubscription: get deployment license: %w", err)
-		}
-		return license, nil
+	if status != int(domain.ConsumptionStatusGeneratedSecretKeys) {
+		return fmt.Errorf("application status %d is outside the set this flow handles", status)
 	}
 
-	return domain.License{}, fmt.Errorf("application status %d is outside the set this flow handles", status)
+	return nil
+}
+
+// downloadDeploymentLicense issues the signed deployment license for a fully provisioned project (status 5).
+func (s *projectConsumptionService) downloadDeploymentLicense(ctx context.Context, projectID, deploymentID, email string) (domain.License, error) {
+	req := domain.DeploymentLicenseRequest{
+		Email: email,
+	}
+	// The signing context is only safe to send when the Postgres mirror is
+	// authoritative for this project. GetSigningContext reads credentials
+	// by project id alone and does not look at status, so a mirror that is
+	// disabled, stale or diverged would otherwise hand the licensing
+	// operation keys that do not match the ones ServiceNow holds -- and it
+	// would sign with them rather than fail. Two conditions gate it:
+	// dual-write is on, so this service is actually maintaining the mirror;
+	// and the mirror has itself reached step 5, matching the ServiceNow
+	// status this branch was entered on. The status is re-read here rather
+	// than reused from the divergence check above, because the sequence
+	// advances the mirror during this same call.
+	//
+	// Failing either check is not an error: the direct download is the
+	// pre-existing path and still works.
+	if s.dualWrite && s.repo != nil {
+		pgState, _, _, getErr := s.repo.Get(ctx, projectID)
+		switch {
+		case getErr != nil:
+			slog.WarnContext(ctx, "could not read the postgres mirror for licence signing; falling back to direct download",
+				"projectId", projectID,
+				"deploymentId", deploymentID,
+				"err", getErr,
+			)
+		case pgState.Status != domain.ConsumptionStatusGeneratedSecretKeys:
+			slog.WarnContext(ctx, "postgres mirror is not at the generated-secret-keys step; falling back to direct download",
+				"projectId", projectID,
+				"deploymentId", deploymentID,
+				"postgresStatus", int(pgState.Status),
+			)
+		default:
+			signingCtx, err := s.repo.GetSigningContext(ctx, projectID, deploymentID)
+			if err != nil {
+				slog.WarnContext(ctx, "failed to load signing context for licence download; falling back to direct download",
+					"projectId", projectID,
+					"deploymentId", deploymentID,
+					"err", err,
+				)
+			} else if signingCtx != nil && signingCtx.PrimarySecretKey != "" {
+				req.SigningContext = signingCtx
+			}
+		}
+	}
+
+	license, err := s.choreoClient.GetDeploymentLicense(ctx, projectID, deploymentID, req)
+	if err != nil {
+		return domain.License{}, fmt.Errorf("choreosubscription: get deployment license: %w", err)
+	}
+	return license, nil
 }

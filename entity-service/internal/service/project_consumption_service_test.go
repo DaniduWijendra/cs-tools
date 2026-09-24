@@ -20,8 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/choreosubscription"
@@ -767,5 +770,170 @@ func TestProcessLicenseDownload_FallsBackGracefullyWhenSigningContextUnavailable
 	}
 	if choreo.lastLicenseReq.SigningContext != nil {
 		t.Errorf("expected signingContext to be nil on fallback, got %+v", choreo.lastLicenseReq.SigningContext)
+	}
+}
+
+type concurrentFakeChoreoClient struct {
+	onCreateApp  func()
+	onSubscribe  func()
+	onGenCreds   func()
+	onGenSecrets func()
+	onLicense    func()
+
+	appID        string
+	appName      string
+	appDesc      string
+	primaryKey   string
+	secondaryKey string
+
+	statusMu sync.Mutex
+	status   int
+}
+
+func (c *concurrentFakeChoreoClient) GetConsumptionStatus(_ context.Context, _ string, _ choreosubscription.ConsumptionStatusRequest) (choreosubscription.ConsumptionResult, error) {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	curr := c.status
+	if curr == 0 {
+		curr = 1 // PENDING
+	}
+	var res choreosubscription.ConsumptionResult
+	_ = json.Unmarshal([]byte(fmt.Sprintf(`{"result":{"status":%d,"applicationId":%q,"name":%q,"description":%q}}`, curr, c.appID, c.appName, c.appDesc)), &res)
+	return res, nil
+}
+
+func (c *concurrentFakeChoreoClient) CreateApplication(_ context.Context, _ choreosubscription.ApplicationCreateRequest) (choreosubscription.ApplicationCreateResponse, error) {
+	if c.onCreateApp != nil {
+		c.onCreateApp()
+	}
+	return choreosubscription.ApplicationCreateResponse{ApplicationID: c.appID}, nil
+}
+
+func (c *concurrentFakeChoreoClient) SubscribeApplication(_ context.Context, _ string) (choreosubscription.ApplicationSubscriptionResponse, error) {
+	if c.onSubscribe != nil {
+		c.onSubscribe()
+	}
+	return choreosubscription.ApplicationSubscriptionResponse{SubscriptionID: "sub-123"}, nil
+}
+
+func (c *concurrentFakeChoreoClient) GenerateCredentials(_ context.Context, _ string) (choreosubscription.ApplicationKeyGenerationResponse, error) {
+	if c.onGenCreds != nil {
+		c.onGenCreds()
+	}
+	return choreosubscription.ApplicationKeyGenerationResponse{ConsumerKey: "ck", ConsumerSecret: "cs"}, nil
+}
+
+func (c *concurrentFakeChoreoClient) GenerateSecretKeys(_ context.Context) (choreosubscription.SecretKeysResponse, error) {
+	if c.onGenSecrets != nil {
+		c.onGenSecrets()
+	}
+	return choreosubscription.SecretKeysResponse{PrimarySecretKey: c.primaryKey, SecondarySecretKey: c.secondaryKey}, nil
+}
+
+func (c *concurrentFakeChoreoClient) UpdateProjectStatus(_ context.Context, _ string, req choreosubscription.UpdateProjectStatusRequest) (choreosubscription.ConsumptionResult, error) {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	c.status = req.Status
+	return choreosubscription.ConsumptionResult{}, nil
+}
+
+func (c *concurrentFakeChoreoClient) GetDeploymentLicense(_ context.Context, _, _ string, _ domain.DeploymentLicenseRequest) (domain.License, error) {
+	if c.onLicense != nil {
+		c.onLicense()
+	}
+	return domain.License{Signature: "sig-valid"}, nil
+}
+
+func TestProcessLicenseDownload_ConcurrentPendingRequestsDeduplicated(t *testing.T) {
+	appID := "app-xyz"
+	appName := "ACME-APP"
+	appDesc := "Description"
+	primaryKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	secondaryKey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	var (
+		mu                  sync.Mutex
+		createAppCalls      int
+		subscribeCalls      int
+		generateCredsCalls  int
+		generateSecretCalls int
+		licenseCalls        int
+	)
+
+	client := &concurrentFakeChoreoClient{
+		onCreateApp: func() {
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			createAppCalls++
+			mu.Unlock()
+		},
+		onSubscribe: func() {
+			mu.Lock()
+			subscribeCalls++
+			mu.Unlock()
+		},
+		onGenCreds: func() {
+			mu.Lock()
+			generateCredsCalls++
+			mu.Unlock()
+		},
+		onGenSecrets: func() {
+			mu.Lock()
+			generateSecretCalls++
+			mu.Unlock()
+		},
+		onLicense: func() {
+			mu.Lock()
+			licenseCalls++
+			mu.Unlock()
+		},
+		appID:        appID,
+		appName:      appName,
+		appDesc:      appDesc,
+		primaryKey:   primaryKey,
+		secondaryKey: secondaryKey,
+	}
+
+	repo := &fakeProjectConsumptionRepo{}
+	svc := NewProjectConsumptionService(repo, client, alwaysUnrestrictedAccess{}, false)
+
+	const concurrency = 5
+	var wg sync.WaitGroup
+	errs := make([]error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "11111111-1111-1111-1111-111111111111", "test@wso2.com")
+			errs[idx] = err
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d failed: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if createAppCalls != 1 {
+		t.Fatalf("expected exactly 1 CreateApplication call, got %d", createAppCalls)
+	}
+	if subscribeCalls != 1 {
+		t.Fatalf("expected exactly 1 SubscribeApplication call, got %d", subscribeCalls)
+	}
+	if generateCredsCalls != 1 {
+		t.Fatalf("expected exactly 1 GenerateCredentials call, got %d", generateCredsCalls)
+	}
+	if generateSecretCalls != 1 {
+		t.Fatalf("expected exactly 1 GenerateSecretKeys call, got %d", generateSecretCalls)
+	}
+	if licenseCalls != concurrency {
+		t.Fatalf("expected %d GetDeploymentLicense calls, got %d", concurrency, licenseCalls)
 	}
 }
