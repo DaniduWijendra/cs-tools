@@ -3165,6 +3165,86 @@ func (s *snCaseService) patchCaseWatchList(ctx context.Context, caseID string, u
 	return result, nil
 }
 
+// patchCaseAssignee performs a bare ServiceNow PATCH setting assigneeEmail,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to AssigneeEmail for DATA_SOURCE=postgres-servicenow-dual-write's async
+// assignee mirror (see caseService.updateCaseAssignee's own doc comment).
+// The response is discarded -- the dispatcher only needs to know whether the
+// write succeeded.
+func (s *snCaseService) patchCaseAssignee(ctx context.Context, caseID, assigneeEmail string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{AssigneeEmail: &assigneeEmail})
+	return err
+}
+
+// patchCaseAcknowledge performs a bare ServiceNow PATCH setting acknowledge,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to Acknowledge for DATA_SOURCE=postgres-servicenow-dual-write's async
+// acknowledge mirror (see caseService.acknowledgeCase's own doc comment).
+// ServiceNow's own first-write-wins handling makes this safe to call even if
+// ServiceNow's copy was somehow already acknowledged by someone else.
+func (s *snCaseService) patchCaseAcknowledge(ctx context.Context, caseID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	acknowledge := true
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{Acknowledge: &acknowledge})
+	return err
+}
+
+// patchCaseParent performs a bare ServiceNow PATCH setting parentId, with
+// none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment,
+// extended to ParentID for DATA_SOURCE=postgres-servicenow-dual-write's
+// async parent mirror (see caseService.updateCaseParent's own doc comment).
+// parentID is a platform UUID, converted to ServiceNow's sysid before
+// dispatch (outbound rule, see this file's own conventions doc).
+func (s *snCaseService) patchCaseParent(ctx context.Context, caseID, parentID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	sysid := uuidToSysid(parentID)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{ParentID: &sysid})
+	return err
+}
+
+// patchCaseFieldsBundle performs a bare ServiceNow PATCH covering
+// UpdateCase's combinable "plain field" bundle (Subject/Description/
+// DeploymentID/DeployedProductID/BestCaseFixEta/MostLikelyFixEta/
+// WorstCaseFixEta/RelatedCaseID/WorkaroundProvided) in one round trip, with
+// none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment,
+// extended to this bundle for DATA_SOURCE=postgres-servicenow-dual-write's
+// async mirror (see caseService.updateCaseFields's own doc comment). Only
+// the fields req actually set are forwarded; DeploymentID/DeployedProductID/
+// RelatedCaseID are platform UUIDs, converted to ServiceNow sysids before
+// dispatch (outbound rule, see this file's own conventions doc). Subject
+// maps to the payload's own Title field -- the two are the same concept
+// under different names on either side of this data-source boundary.
+func (s *snCaseService) patchCaseFieldsBundle(ctx context.Context, caseID string, req domain.UpdateCaseRequest) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	payload := snUpdateCasePayload{
+		Title:              req.Subject,
+		Description:        req.Description,
+		BestCaseFixEta:     req.BestCaseFixEta,
+		MostLikelyFixEta:   req.MostLikelyFixEta,
+		WorstCaseFixEta:    req.WorstCaseFixEta,
+		WorkaroundProvided: req.WorkaroundProvided,
+	}
+	if req.DeploymentID != nil {
+		sysid := uuidToSysid(*req.DeploymentID)
+		payload.DeploymentID = &sysid
+	}
+	if req.DeployedProductID != nil {
+		sysid := uuidToSysid(*req.DeployedProductID)
+		payload.DeployedProductID = &sysid
+	}
+	if req.RelatedCaseID != nil {
+		sysid := uuidToSysid(*req.RelatedCaseID)
+		payload.RelatedCaseID = &sysid
+	}
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	return err
+}
+
 type snCreateAttachmentPayload struct {
 	ReferenceID   string  `json:"referenceId"`
 	ReferenceType string  `json:"referenceType"`

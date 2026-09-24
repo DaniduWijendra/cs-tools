@@ -1459,6 +1459,105 @@ helper: decodes `x-user-id-token`'s `email` claim without a `"user"` table
 lookup, since nothing on these paths needs the caller's platform id today,
 only their claimed email.
 
+## PATCH /cases/{id}: assignee, acknowledge, parent, and the combinable field bundle
+
+Found live: assigning a case ("Assign to me") and acknowledging one both
+400'd on this data source with a generic "Invalid request payload." (the
+CSM/customer portal backend's own catch-all for any upstream 400) --
+`AssigneeEmail` and `Acknowledge` were on `UpdateCase`'s unconditional
+"only supported for the ServiceNow data source" rejection list even though
+neither actually needs anything ServiceNow-specific: `work_item.
+assigned_to_id` (migration 000036) and `work_item.acknowledged_by_user_id`
+(migration 000016) are both real, direct columns, already read elsewhere
+(`assignedUserId` search filter, `GetCaseByID`'s own `AssignedEngineer`).
+Prompted by that bug report, this pass re-derived `UpdateCase`'s *entire*
+field-combination contract from `sn_case_service.go`'s own UpdateCase --
+the actual, currently-enforced source of truth for which fields may be
+combined -- rather than re-guessing it, since the Postgres and ServiceNow
+data sources must accept the same PATCH shapes.
+
+**The exclusive/combinable split now mirrors ServiceNow's exactly**, down to
+the variable names (`exclusiveCount`/`combinableCount` in both files' own
+`UpdateCase`):
+- **Exclusive** (at most one per request, and none may be combined with
+  anything else, including each other): `state`/`severity`/`workState` (one
+  of the three), `watchList`, `assigneeEmail`, `parentId`, `acknowledge`.
+  `parentId` joins this group for the first time here -- it was previously
+  rejected outright; `work_item.parent_id` (migration 000036) is the same
+  self-reference `GetCaseByID`'s own `ParentCase` already reads the other
+  direction, so `updateCaseParent`/`CaseRepository.UpdateCaseParent` wire it
+  up the same way `updateCaseAssignee` does.
+- **Combinable** (any subset, freely combined with each other, never with
+  the exclusive group): `subject`, `description`, `deploymentId`,
+  `deployedProductId`, `bestCaseFixEta`/`mostLikelyFixEta`/`worstCaseFixEta`,
+  `relatedCaseId`, `workaroundProvided` -- all newly wired up via
+  `updateCaseFields`/`CaseRepository.UpdateCaseFields`, one dynamic
+  `UPDATE ... SET` per table (`work_item` for most of these,
+  `"case"` for `relatedCaseId` alone) built from exactly the non-nil pointers
+  `req` carries. `UpdatedCase` only has an echo slot for the fix-ETA trio
+  (see each field's own doc comment, "Present only when the update set X");
+  every other field in this bundle follows ServiceNow's own "a plain field
+  write only returns `{id, updatedOn, updatedBy}`" contract -- the caller
+  re-reads via `GetCaseByID` to see the new value.
+- **`resolutionCode`/`cause`/`closeNotes` are deliberately NOT in either
+  group above.** `sn_case_service.go`'s own UpdateCase only allows them
+  alongside a `state` transition, and only to `closed` or
+  `solution_proposed` (`snResolutionStates`) -- so they ride inside the
+  existing `state`/`severity`/`workState` branch's own `"case"` `UPDATE`
+  (`updateCaseQuery`'s new `$5`/`$6`/`$7`), gated by the identical
+  restriction, rather than living in the free-standing combinable bundle.
+  `closeNotes` uses `COALESCE($7, close_notes)` rather than the other five
+  columns' `''`-sentinel trick, since `""` is itself a meaningful value to
+  write there (clearing existing notes), unlike an enum column where `''` is
+  never valid anyway.
+- **`issueType`/`engagementType`/`engagementPaymentType`/`catalogId`/
+  `catalogItemId`/`variables` stay rejected**, for the mirror-image reason:
+  `sn_case_service.go` only accepts them when `type` is also provided (a
+  full type transfer) -- `"engagementType, engagementPaymentType, issueType,
+  catalogId, catalogItemId, and variables are only allowed when type is also
+  provided"`. `type` itself has no Postgres implementation (a real type
+  transfer would mean moving a row between `"case"`/`engagement`/
+  `service_request`/etc, each a physically separate extension table --
+  genuinely larger, separate work, not attempted here), so none of its five
+  companions have anywhere to go either. `addPublicComment`/`product`/
+  `publicTicket` (the "Share Fix ETA" comment-posting side effect) and
+  `autocloseHoldUntil` (no backing column anywhere in this schema) remain
+  rejected too.
+
+**A real pre-existing read-side bug found while building the write side**:
+`GetCaseByID` cast `"case".resolution_code` straight into
+`domain.CaseResolutionCode` with no translation at all
+(`domain.CaseResolutionCode(*resolutionCode)`), but three of the sixteen
+`case_resolution_code_enum` labels don't match their domain constant by
+identity -- `CONSIDERED_FOR_ROADMAP_ALT`/`SOLVED_WORKAROUND_PROVIDED_ALT`
+are ServiceNow's own duplicate picklist entries for a concept the Postgres
+enum only has one canonical label for, and
+`AbruptlyClosedDueToNonResponsiveness` is missing the enum's own
+`_THROUGH_AUTO_CLOSURE` suffix. Every case resolved with that last code
+rendered a `resolutionCode` value no `domain.CaseResolutionCode` constant
+declares. `caseResolutionCodeToEnum`/`caseResolutionCodeFromEnum`
+(`case_repo.go`, next to `caseSeverityToEnum`'s own identical-shaped fix)
+hold the mapping both directions now, same "flag the mismatch explicitly
+rather than guess" precedent as severity's own S0..S4 mapping.
+
+**The SN-mirror-writeback pattern was extended to match**, so
+`DATA_SOURCE=postgres-servicenow-dual-write` doesn't drift on these fields
+either: `patchCaseAssignee`/`patchCaseAcknowledge`/`patchCaseParent`/
+`patchCaseFieldsBundle` (`sn_case_service.go`) are bare ServiceNow PATCHes
+with none of `UpdateCase`'s own enrichment reads or no-op detection --
+exactly `patchCaseFields`/`patchCaseWatchList`'s own established shape,
+reached through four new narrow interfaces
+(`snAssigneePatcher`/`snAcknowledgePatcher`/`snParentPatcher`/
+`snFieldsBundlePatcher`). `patchCaseFieldsBundle` forwards only the fields
+`req` actually set, converting `DeploymentID`/`DeployedProductID`/
+`RelatedCaseID` from platform UUIDs to ServiceNow sysids first (the
+standard outbound rule) -- `Subject` maps to the payload's own `Title`
+field, the two being the same concept under different names on either side
+of this boundary. The acknowledge mirror only fires when this call's own
+claim actually succeeded (`!alreadyAcknowledged`) -- a repeat
+`Acknowledge:true` against an already-acknowledged case changed nothing in
+Postgres, so there's nothing new to mirror.
+
 ## Change requests
 
 `change_request` (migration 000047) is a shared-PK extension of `work_item`,
