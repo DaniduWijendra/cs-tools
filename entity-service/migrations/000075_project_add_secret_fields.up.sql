@@ -14,10 +14,10 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
-ALTER TABLE project ADD COLUMN IF NOT EXISTS primary_secret_key VARCHAR(128);
-ALTER TABLE project ADD COLUMN IF NOT EXISTS secondary_secret_key VARCHAR(128);
+ALTER TABLE project ADD COLUMN IF NOT EXISTS product_consumption_primary_secret_key VARCHAR(128);
+ALTER TABLE project ADD COLUMN IF NOT EXISTS product_consumption_secondary_secret_key VARCHAR(128);
 
 -- u_license_secrets is a JSON-typed SN field (sys_dictionary: max length
 -- 65,000), extracted via type: json_string rather than type: json/JSONB -
--- see customer_project.yaml's license_secrets field.
-ALTER TABLE project ADD COLUMN IF NOT EXISTS license_secrets VARCHAR(65000);
+-- see customer_project.yaml's product_consumption_license_secrets field.
+ALTER TABLE project ADD COLUMN IF NOT EXISTS product_consumption_license_secrets VARCHAR(65000);

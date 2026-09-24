@@ -48,15 +48,22 @@ import (
 // for the mapping, including the four ChangeRequestType values added
 // alongside this that have no ServiceNow-data-source equivalent.
 //
-// The remaining fields on the request/response contract have no real
-// column anywhere in the migrations and are always left unset rather than
-// guessed at: ConfigurationItemID and GroupID (no CMDB/group tables exist
-// at all in this schema); AssignedTeamID (work_item has no team FK either
-// -- see the "Fixing case enum-casing..." section's own AssignedTeam note);
-// ApprovedBy/ApprovedOn/LegalNextStates on domain.ChangeRequest (there is a
-// summary change_request.approval enum but no approver/date columns, and
-// LegalNextStates is a ServiceNow workflow-engine computation with nothing
-// to derive it from here).
+// CustomerGroupID is backed by change_request.customer_group_id (migration
+// 000074, a FK into "group") -- written by CreateChangeRequestFromServiceNow
+// and read back by GetChangeRequestByID as domain.ChangeRequest.CustomerGroup
+// (see changeRequestDetailJoins/changeRequestDetailColumns).
+//
+// The remaining fields on the request/response contract have no
+// established mapping and are always left unset rather than guessed at:
+// ConfigurationItemID (no CMDB table exists at all in this schema); GroupID
+// and AssignedTeamID (distinct from CustomerGroupID -- these would need
+// work_item.assignment_group_id, migration 000074, which nothing in this
+// file joins or reads yet); ApprovedBy/ApprovedOn/LegalNextStates on
+// domain.ChangeRequest (there is a summary change_request.approval enum
+// but no approver/date columns, and LegalNextStates is a ServiceNow
+// workflow-engine computation with nothing to derive it from here);
+// Environments/DeploymentProducts/Labels/Deployments (no M2M join table
+// exists for any of the four).
 //
 // CreateChangeRequest has no Postgres implementation at all: work_item.number
 // has no DB default and no backing sequence anywhere in migrations/, the
@@ -501,46 +508,68 @@ func (r *changeRequestRepo) AggregateChangeRequests(ctx context.Context, req dom
 
 // changeRequestDetailColumns extends changeRequestSelectColumns with the
 // fields ChangeRequest carries beyond SearchChangeRequestView.
+//
+// The second block (implementation_plan through git_reference) is domain.
+// ChangeRequest's own "field-parity additions" (see that struct's doc
+// comment, Groups B/C1/C2/D) -- real change_request columns that
+// CreateChangeRequestFromServiceNow (Group B's four) already writes, or
+// that exist for a future write path (Groups C2/D, "read-through only"),
+// but that nothing read back here before this. requested_by_user_id and
+// customer_group_id are FKs (to "user"/"group" respectively), so they need
+// their own joins -- see changeRequestDetailJoins. Environments/
+// DeploymentProducts/Labels/Deployments (the four []EntityRef/[]string
+// fields in those same groups) are deliberately excluded: no M2M join
+// table for any of them exists anywhere in migrations/, so there is
+// nothing to select -- same "no real column" posture as ApprovedBy/
+// ApprovedOn/LegalNextStates already have (see this file's own package
+// doc comment).
 const changeRequestDetailColumns = `
 	wi.created_by, cr.justification, cr.impact_description, cr.service_outage_downtime,
 	cr.communication_plan, cr.rollback_process, cr.test_plan,
-	cr.is_customer_approved, cr.is_customer_reviewed`
+	cr.is_customer_approved, cr.is_customer_reviewed,
+	cr.implementation_plan, cr.priority::TEXT, cr.category::TEXT,
+	rb.id, COALESCE(rb.name, NULLIF(TRIM(CONCAT_WS(' ', rb.first_name, rb.last_name)), '')),
+	cr.affected_services, cr.affected_component, cr.rollback_duration,
+	cg.id, cg.name,
+	cr.change_request_type::TEXT, cr.likelihood::TEXT, cr.is_planning_visible_to_customers,
+	cr.customer_updated_date_confirmation::TEXT, cr.customer_updated_on,
+	cr.work_start_on, cr.work_end_on, cr.git_reference`
+
+// changeRequestDetailJoins adds the two FK joins changeRequestDetailColumns
+// needs beyond changeRequestFromJoins -- kept separate from (not folded
+// into) changeRequestFromJoins since RequestedBy/CustomerGroup are detail
+// -only fields (domain.ChangeRequest, not SearchChangeRequestView): folding
+// these into the shared joins would cost every SearchChangeRequests/
+// AggregateChangeRequests row two extra joins neither ever selects from.
+const changeRequestDetailJoins = `
+	LEFT JOIN "user" rb ON rb.id = cr.requested_by_user_id
+	LEFT JOIN "group" cg ON cg.id = cr.customer_group_id`
 
 // GetChangeRequestByID implements ChangeRequestRepository.
 func (r *changeRequestRepo) GetChangeRequestByID(ctx context.Context, id string) (domain.ChangeRequest, error) {
-	query := "SELECT " + changeRequestSelectColumns + ", " + changeRequestDetailColumns + " " + changeRequestFromJoins + " WHERE wi.id = $1 AND wi.type = 'CHANGE_REQUEST'"
+	query := "SELECT " + changeRequestSelectColumns + ", " + changeRequestDetailColumns + " " +
+		changeRequestFromJoins + " " + changeRequestDetailJoins + " WHERE wi.id = $1 AND wi.type = 'CHANGE_REQUEST'"
 
 	var cr domain.ChangeRequest
-	var (
-		isCustomerApproved, isCustomerReviewed *bool
-	)
 	row := r.db.QueryRow(ctx, query, id)
-	// scanChangeRequestView expects exactly its own column list; the detail
-	// columns are scanned separately via a small wrapper so the two column
-	// lists stay independently maintainable.
-	view, err := scanChangeRequestViewAndDetail(row, &cr.CreatedBy, &cr.Justification, &cr.ImpactDescription,
-		&cr.ServiceOutage, &cr.CommunicationPlan, &cr.RollbackPlan, &cr.TestPlan,
-		&isCustomerApproved, &isCustomerReviewed)
+	err := scanChangeRequestViewAndDetail(row, &cr)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ChangeRequest{}, &apierror.NotFoundError{Msg: "change request not found"}
 	}
 	if err != nil {
 		return domain.ChangeRequest{}, fmt.Errorf("get change request by id: %w", err)
 	}
-	cr.SearchChangeRequestView = view
-	cr.HasCustomerApproved = isCustomerApproved != nil && *isCustomerApproved
-	cr.HasCustomerReviewed = isCustomerReviewed != nil && *isCustomerReviewed
-	// ApprovedBy/ApprovedOn/LegalNextStates/Type have no real column -- see
-	// this file's own package doc comment.
+	// ApprovedBy/ApprovedOn/LegalNextStates/Environments/DeploymentProducts/
+	// Labels/Deployments have no real column -- see this file's own package
+	// doc comment.
 	return cr, nil
 }
 
 // scanChangeRequestViewAndDetail scans changeRequestSelectColumns followed
 // by changeRequestDetailColumns's targets in the same Scan call (a single
-// row's columns must be scanned together), returning the parsed view part
-// separately from the detail-only fields the caller already holds pointers
-// to.
-func scanChangeRequestViewAndDetail(row pgx.Row, createdBy *string, justification, impactDescription, serviceOutage, communicationPlan, rollbackPlan, testPlan **string, isCustomerApproved, isCustomerReviewed **bool) (domain.SearchChangeRequestView, error) {
+// row's columns must be scanned together), populating cr directly rather
+// than returning a long list of out-params.
+func scanChangeRequestViewAndDetail(row pgx.Row, cr *domain.ChangeRequest) error {
 	var v domain.SearchChangeRequestView
 	var (
 		projectID, projectName *string
@@ -555,6 +584,20 @@ func scanChangeRequestViewAndDetail(row pgx.Row, createdBy *string, justificatio
 		impact, state          *string
 		changeModel            *string
 		createdOn, updatedOn   time.Time
+
+		createdBy                                                          string
+		justification, impactDescription, serviceOutage                    *string
+		communicationPlan, rollbackPlan, testPlan                          *string
+		isCustomerApproved, isCustomerReviewed                             *bool
+		implementationPlan, priority, category                             *string
+		rbID, rbName                                                       *string
+		affectedServicesText, affectedComponentsText, rollbackDurationText *string
+		cgID, cgName                                                       *string
+		changeRequestType, likelihood                                      *string
+		isPlanningVisibleToCustomers                                       *bool
+		confirmCustomerUpdatedDate                                         *string
+		customerUpdatedOn, workStart, workEnd                              *time.Time
+		gitReference                                                       *string
 	)
 	err := row.Scan(
 		&v.ID, &v.Number, &v.Subject, &v.Description,
@@ -568,11 +611,18 @@ func scanChangeRequestViewAndDetail(row pgx.Row, createdBy *string, justificatio
 		&aeID, &aeName,
 		&startOn, &endOn, &impact, &state, &changeModel,
 		&createdOn, &updatedOn,
-		createdBy, justification, impactDescription, serviceOutage, communicationPlan, rollbackPlan, testPlan,
-		isCustomerApproved, isCustomerReviewed,
+		&createdBy, &justification, &impactDescription, &serviceOutage, &communicationPlan, &rollbackPlan, &testPlan,
+		&isCustomerApproved, &isCustomerReviewed,
+		&implementationPlan, &priority, &category,
+		&rbID, &rbName,
+		&affectedServicesText, &affectedComponentsText, &rollbackDurationText,
+		&cgID, &cgName,
+		&changeRequestType, &likelihood, &isPlanningVisibleToCustomers,
+		&confirmCustomerUpdatedDate, &customerUpdatedOn,
+		&workStart, &workEnd, &gitReference,
 	)
 	if err != nil {
-		return domain.SearchChangeRequestView{}, err
+		return err
 	}
 	if projectID != nil {
 		v.Project = domain.EntityRef{ID: *projectID, Name: stringOrEmpty(projectName)}
@@ -622,7 +672,63 @@ func scanChangeRequestViewAndDetail(row pgx.Row, createdBy *string, justificatio
 	}
 	v.CreatedOn = createdOn.UTC().Format(time.RFC3339)
 	v.UpdatedOn = updatedOn.UTC().Format(time.RFC3339)
-	return v, nil
+	cr.SearchChangeRequestView = v
+
+	cr.CreatedBy = createdBy
+	cr.Justification = justification
+	cr.ImpactDescription = impactDescription
+	cr.ServiceOutage = serviceOutage
+	cr.CommunicationPlan = communicationPlan
+	cr.RollbackPlan = rollbackPlan
+	cr.TestPlan = testPlan
+	cr.HasCustomerApproved = isCustomerApproved != nil && *isCustomerApproved
+	cr.HasCustomerReviewed = isCustomerReviewed != nil && *isCustomerReviewed
+
+	cr.ImplementationPlan = implementationPlan
+	if priority != nil {
+		lower := strings.ToLower(*priority)
+		cr.Priority = &lower
+	}
+	if category != nil {
+		lower := strings.ToLower(*category)
+		cr.Category = &lower
+	}
+	if rbID != nil {
+		cr.RequestedBy = &domain.EntityRef{ID: *rbID, Name: stringOrEmpty(rbName)}
+	}
+	cr.AffectedServicesText = affectedServicesText
+	cr.AffectedComponentsText = affectedComponentsText
+	cr.RollbackDurationText = rollbackDurationText
+	if cgID != nil {
+		cr.CustomerGroup = &domain.EntityRef{ID: *cgID, Name: stringOrEmpty(cgName)}
+	}
+	if changeRequestType != nil {
+		lower := strings.ToLower(*changeRequestType)
+		cr.ChangeRequestType = &lower
+	}
+	if likelihood != nil {
+		lower := strings.ToLower(*likelihood)
+		cr.Likelihood = &lower
+	}
+	cr.IsPlanningVisibleToCustomers = isPlanningVisibleToCustomers != nil && *isPlanningVisibleToCustomers
+	if confirmCustomerUpdatedDate != nil {
+		lower := strings.ToLower(*confirmCustomerUpdatedDate)
+		cr.ConfirmCustomerUpdatedDate = &lower
+	}
+	if customerUpdatedOn != nil {
+		s := customerUpdatedOn.UTC().Format(time.RFC3339)
+		cr.CustomerUpdatedOn = &s
+	}
+	if workStart != nil {
+		s := workStart.UTC().Format(time.RFC3339)
+		cr.WorkStart = &s
+	}
+	if workEnd != nil {
+		s := workEnd.UTC().Format(time.RFC3339)
+		cr.WorkEnd = &s
+	}
+	cr.GitReference = gitReference
+	return nil
 }
 
 // changeRequestPatchFKField maps work_item's FK constraints touched by
@@ -683,7 +789,7 @@ func (r *changeRequestRepo) PatchChangeRequest(ctx context.Context, id string, r
 	if req.AssignedEngineerID != nil {
 		addWI("assigned_to_id = $%d::uuid", *req.AssignedEngineerID)
 	}
-	// AssignedTeamID has no real column -- see this file's own package doc comment.
+	// AssignedTeamID has no wired mapping here -- see this file's own package doc comment.
 
 	wiArgs = append(wiArgs, id)
 	wiQuery := fmt.Sprintf(`UPDATE work_item SET %s WHERE id = $%d AND type = 'CHANGE_REQUEST' RETURNING id`, strings.Join(wiSets, ", "), wiIdx)

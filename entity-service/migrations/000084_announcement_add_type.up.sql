@@ -14,6 +14,10 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
-ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_primary_secret_key;
-ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_secondary_secret_key;
-ALTER TABLE project DROP COLUMN IF EXISTS product_consumption_license_secrets;
+-- Native enum: u_announcement_type is a 2-value SN choice field (General=1,
+-- Security=2), confirmed against the field's actual choice list.
+DO $$ BEGIN
+    CREATE TYPE announcement_type_enum AS ENUM ('GENERAL', 'SECURITY');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE announcement ADD COLUMN IF NOT EXISTS announcement_type announcement_type_enum NOT NULL DEFAULT 'GENERAL';
