@@ -455,6 +455,22 @@ func TestLoad_CSMMigrationPortalWritesEnabled(t *testing.T) {
 	}
 }
 
+// TestLoad_CSMMigrationMembershipRegistrationEnabled pins the same parse for
+// the registration kill switch. It gates POST /users/me/memberships/register,
+// which clears a contact's Salesforce lockout and flips the membership to
+// REGISTERED, so a "TRUE" or a "1" must leave the route unregistered rather
+// than half-enabling a path that writes to Salesforce.
+func TestLoad_CSMMigrationMembershipRegistrationEnabled(t *testing.T) {
+	for value, want := range map[string]bool{
+		"true": true, "TRUE": false, "True": false, "1": false, "yes": false, "": false, " true ": false,
+	} {
+		t.Setenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED", value)
+		if got := Load().CSMMigrationMembershipRegistrationEnabled; got != want {
+			t.Errorf("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED=%q -> %v, want %v", value, got, want)
+		}
+	}
+}
+
 // TestConfig_HasPortalMembershipWrites covers the whole gate, not just the
 // flag: the writes are a Postgres transaction whose other half is a
 // Salesforce call, so both the data source and a complete
