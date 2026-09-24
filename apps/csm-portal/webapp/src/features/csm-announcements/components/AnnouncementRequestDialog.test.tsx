@@ -25,6 +25,7 @@ import { useUpdateAnnouncementRequest } from "@features/csm-announcements/api/us
 import { useRecordAnnouncementRequestDryRun } from "@features/csm-announcements/api/useRecordAnnouncementRequestDryRun";
 import { useSubmitAnnouncementRequest } from "@features/csm-announcements/api/useSubmitAnnouncementRequest";
 import { useApproveAnnouncementRequest } from "@features/csm-announcements/api/useApproveAnnouncementRequest";
+import { useScheduleAnnouncementRequest } from "@features/csm-announcements/api/useScheduleAnnouncementRequest";
 import { usePublishAnnouncementRequest } from "@features/csm-announcements/api/usePublishAnnouncementRequest";
 import { useCreateAnnouncementRequestUpdate } from "@features/csm-announcements/api/useCreateAnnouncementRequestUpdate";
 import { useListAnnouncementRequestUpdates } from "@features/csm-announcements/api/useListAnnouncementRequestUpdates";
@@ -52,6 +53,10 @@ vi.mock("@features/csm-announcements/api/useSubmitAnnouncementRequest", () => ({
 }));
 vi.mock("@features/csm-announcements/api/useApproveAnnouncementRequest", () => ({
   useApproveAnnouncementRequest: vi.fn(),
+}));
+
+vi.mock("@features/csm-announcements/api/useScheduleAnnouncementRequest", () => ({
+  useScheduleAnnouncementRequest: vi.fn(),
 }));
 vi.mock("@features/csm-announcements/api/usePublishAnnouncementRequest", () => ({
   usePublishAnnouncementRequest: vi.fn(),
@@ -118,6 +123,7 @@ const mockedUpdate = vi.mocked(useUpdateAnnouncementRequest);
 const mockedRecordDryRun = vi.mocked(useRecordAnnouncementRequestDryRun);
 const mockedSubmit = vi.mocked(useSubmitAnnouncementRequest);
 const mockedApprove = vi.mocked(useApproveAnnouncementRequest);
+const mockedSchedule = vi.mocked(useScheduleAnnouncementRequest);
 const mockedPublish = vi.mocked(usePublishAnnouncementRequest);
 const mockedCreateUpdate = vi.mocked(useCreateAnnouncementRequestUpdate);
 const mockedListUpdates = vi.mocked(useListAnnouncementRequestUpdates);
@@ -162,6 +168,7 @@ beforeEach(() => {
   mockedRecordDryRun.mockReset();
   mockedSubmit.mockReset();
   mockedApprove.mockReset();
+  mockedSchedule.mockReset();
   mockedPublish.mockReset();
   mockedCreateUpdate.mockReset();
   mockedListUpdates.mockReset();
@@ -178,6 +185,7 @@ beforeEach(() => {
   mockedRecordDryRun.mockReturnValue(noopMutation() as ReturnType<typeof useRecordAnnouncementRequestDryRun>);
   mockedSubmit.mockReturnValue(noopMutation() as ReturnType<typeof useSubmitAnnouncementRequest>);
   mockedApprove.mockReturnValue(noopMutation() as ReturnType<typeof useApproveAnnouncementRequest>);
+  mockedSchedule.mockReturnValue(noopMutation() as ReturnType<typeof useScheduleAnnouncementRequest>);
   mockedDryRun.mockReturnValue({
     runningDryRun: false,
     dryRunResult: null,
@@ -191,6 +199,11 @@ beforeEach(() => {
     failedProjectIds: [],
     failedTagProjectIds: [],
     published: null,
+    readyToPublish: true,
+    hydratingDeliveries: false,
+    hydrationFailed: false,
+    retryHydration: vi.fn(),
+    publishGivingUpOnFailed: vi.fn(),
     handlePublish: vi.fn(),
   });
   mockedCreateUpdate.mockReturnValue(noopMutation() as ReturnType<typeof useCreateAnnouncementRequestUpdate>);
@@ -428,6 +441,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish,
     });
 
@@ -453,6 +471,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish: vi.fn(),
     });
 
@@ -474,6 +497,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish: vi.fn(),
     });
 
@@ -492,6 +520,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: ["p-2"],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish: vi.fn(),
     });
 
@@ -499,6 +532,97 @@ describe("AnnouncementRequestDialog — approved", () => {
     expect(screen.getByRole("button", { name: /retry failed projects/i })).toBeInTheDocument();
     expect(screen.getByText(/announcement sent with failures/i)).toBeInTheDocument();
     expect(screen.getByText("p-2")).toBeInTheDocument();
+    // The succeeded tally is deliberately hidden once there's an outstanding
+    // failure to retry -- it's either stale history (reopening a request
+    // with prior progress) or redundant with the retry flow itself; only
+    // the still-failing project needs attention.
+    expect(screen.queryByText(/\d+ succeeded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("1/2")).not.toBeInTheDocument();
+  });
+
+  it("offers Publish anyway for a partial failure, and confirming calls publishGivingUpOnFailed", async () => {
+    mockGet({ state: "approved", resolvedProjectIds: ["p-1", "p-2"], resolvedProjectCount: 2 });
+    const publishGivingUpOnFailed = vi.fn();
+    mockedPublish.mockReturnValue({
+      publishing: false,
+      progress: null,
+      succeededProjectIds: ["p-1"],
+      failedProjectIds: ["p-2"],
+      failedTagProjectIds: [],
+      published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed,
+      handlePublish: vi.fn(),
+    });
+
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    // Resolved to its real short key ("P-2", per this file's own
+    // useAuthApiClient mock returning key: id.toUpperCase()), not the raw
+    // frozen project id — both in the send-progress card's own chip and the
+    // confirmation dialog's list of what's about to be permanently skipped.
+    await vi.waitFor(() => expect(screen.getByText("P-2")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /publish anyway/i }));
+    expect(screen.getByText(/publish without the failed projects/i)).toBeInTheDocument();
+    await vi.waitFor(() => expect(screen.getAllByText("P-2").length).toBeGreaterThan(1));
+    expect(screen.queryByText("p-2")).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^publish anyway$/i }));
+    });
+    expect(publishGivingUpOnFailed).toHaveBeenCalled();
+  });
+
+  it("does not offer Publish anyway while a security-tag attach is still failing", () => {
+    mockGet({
+      state: "approved",
+      resolvedProjectIds: ["p-1", "p-2"],
+      resolvedProjectCount: 2,
+      isSecurityAnnouncement: true,
+    });
+    mockedPublish.mockReturnValue({
+      publishing: false,
+      progress: null,
+      succeededProjectIds: ["p-1", "p-2"],
+      failedProjectIds: [],
+      failedTagProjectIds: ["p-2"],
+      published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
+      handlePublish: vi.fn(),
+    });
+
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /publish anyway/i })).not.toBeInTheDocument();
+  });
+
+  it("still shows the full succeeded tally once every project has been delivered", () => {
+    mockGet({ state: "approved", resolvedProjectIds: ["p-1", "p-2"], resolvedProjectCount: 2 });
+    mockedPublish.mockReturnValue({
+      publishing: false,
+      progress: null,
+      succeededProjectIds: ["p-1", "p-2"],
+      failedProjectIds: [],
+      failedTagProjectIds: [],
+      published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
+      handlePublish: vi.fn(),
+    });
+
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    expect(screen.getByText(/^announcement sent$/i)).toBeInTheDocument();
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+    expect(screen.getByText(/2 succeeded/i)).toBeInTheDocument();
   });
 
   it("locks content while a failed-project retry is pending, so the retry can't diverge from what already succeeded", () => {
@@ -510,6 +634,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: ["p-2"],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish: vi.fn(),
     });
 
@@ -545,6 +674,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish,
     });
     render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
@@ -571,6 +705,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish,
     });
     render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
@@ -599,6 +738,11 @@ describe("AnnouncementRequestDialog — approved", () => {
       failedProjectIds: [],
       failedTagProjectIds: [],
       published: null,
+      readyToPublish: true,
+      hydratingDeliveries: false,
+      hydrationFailed: false,
+      retryHydration: vi.fn(),
+      publishGivingUpOnFailed: vi.fn(),
       handlePublish,
     });
     render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
@@ -609,6 +753,65 @@ describe("AnnouncementRequestDialog — approved", () => {
 
     fireEvent.click(publishBtn);
     expect(handlePublish).not.toHaveBeenCalled();
+  });
+
+  it("shows the due date when set", () => {
+    mockGet({
+      state: "approved",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      dueOn: "2026-08-01T00:00:00Z",
+    });
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    expect(screen.getByText(/^Due /)).toBeInTheDocument();
+  });
+
+  it("shows the scheduled time with a Cancel schedule action when scheduledFor is set", () => {
+    mockGet({
+      state: "approved",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      scheduledFor: "2026-08-01T00:00:00Z",
+    });
+    const mutate = vi.fn();
+    mockedSchedule.mockReturnValue({
+      mutate,
+      mutateAsync: vi.fn(),
+      isPending: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useScheduleAnnouncementRequest>);
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.getByText(/^Scheduled to publish on /)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Schedule for later…" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel schedule" }));
+    expect(mutate).toHaveBeenCalledWith({ id: "req-1", scheduledFor: null });
+  });
+
+  it("offers a Schedule for later control when no schedule is set, opening a picker with Confirm disabled until a time is entered", () => {
+    mockGet({ state: "approved", resolvedProjectIds: ["p-1"], resolvedProjectCount: 1 });
+    const mutate = vi.fn();
+    mockedSchedule.mockReturnValue({
+      mutate,
+      mutateAsync: vi.fn(),
+      isPending: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof useScheduleAnnouncementRequest>);
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/^Scheduled to publish on /)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Schedule for later…" }));
+
+    expect(screen.getAllByLabelText(/Publish at/)[0]).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /confirm schedule/i })).toBeDisabled();
+    expect(mutate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: /confirm schedule/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Schedule for later…" })).toBeInTheDocument();
   });
 });
 
@@ -627,6 +830,51 @@ describe("AnnouncementRequestDialog — published", () => {
     expect(screen.queryByRole("button", { name: /submit for approval/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /mark as approved/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^publish$/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a Delivered to list with each project's own case number when caseMembers is passed (e.g. opened from a batch row)", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1", "p-2"],
+      resolvedProjectCount: 2,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      publishedCaseIds: ["case-1", "case-2"],
+    });
+    render(
+      <AnnouncementRequestDialog
+        requestId="req-1"
+        onClose={vi.fn()}
+        caseMembers={[
+          { caseId: "case-1", caseNumber: "CS0001", wso2CaseId: "ACME-1", projectName: "Acme" },
+          { caseId: "case-2", caseNumber: "CS0002", wso2CaseId: "BOLT-1", projectName: "Bolt" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Delivered to 2 projects")).toBeInTheDocument();
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.getByText("CS0001")).toBeInTheDocument();
+    expect(screen.getByText("Bolt")).toBeInTheDocument();
+    expect(screen.getByText("CS0002")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Acme.*CS0001/s })).toHaveAttribute(
+      "href",
+      "/announcements/case-1",
+    );
+  });
+
+  it("shows no Delivered to section when caseMembers is empty (e.g. opened from the Pending tab)", () => {
+    mockGet({
+      state: "published",
+      resolvedProjectIds: ["p-1"],
+      resolvedProjectCount: 1,
+      publishedBy: "jane@example.com",
+      publishedAt: "2026-07-03T10:00:00Z",
+      publishedCaseIds: ["case-1"],
+    });
+    render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/^delivered to/i)).not.toBeInTheDocument();
   });
 
   it("posting an update records it, then fans out a comment to every published case, via a confirmation popup", async () => {

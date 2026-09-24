@@ -124,6 +124,31 @@ func (c *CustomerEntityClient) PatchUserMe(ctx context.Context, body []byte) ([]
 	return c.do(ctx, http.MethodPatch, "/users/me", body)
 }
 
+// ListSavedFilterViews calls GET /users/me/saved-filter-views on the entity service.
+func (c *CustomerEntityClient) ListSavedFilterViews(ctx context.Context, listKey string) ([]byte, error) {
+	q := url.Values{}
+	q.Set("listKey", listKey)
+	return c.do(ctx, http.MethodGet, "/users/me/saved-filter-views?"+q.Encode(), nil)
+}
+
+// SaveSavedFilterView calls PATCH /users/me/saved-filter-views on the entity service.
+func (c *CustomerEntityClient) SaveSavedFilterView(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPatch, "/users/me/saved-filter-views", body)
+}
+
+// DeleteSavedFilterView calls DELETE /users/me/saved-filter-views on the entity service.
+func (c *CustomerEntityClient) DeleteSavedFilterView(ctx context.Context, listKey, name string) ([]byte, error) {
+	q := url.Values{}
+	q.Set("listKey", listKey)
+	q.Set("name", name)
+	return c.do(ctx, http.MethodDelete, "/users/me/saved-filter-views?"+q.Encode(), nil)
+}
+
+// ReorderSavedFilterView calls POST /users/me/saved-filter-views/reorder on the entity service.
+func (c *CustomerEntityClient) ReorderSavedFilterView(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/users/me/saved-filter-views/reorder", body)
+}
+
 // SearchUsers calls POST /users/search on the entity service.
 // Response is returned as raw JSON; field filtering to the portal shape is deferred.
 func (c *CustomerEntityClient) SearchUsers(ctx context.Context, body []byte) ([]byte, error) {
@@ -725,6 +750,12 @@ func (c *CustomerEntityClient) ApproveAnnouncementRequest(ctx context.Context, i
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/announcement-requests/%s/approve", url.PathEscape(id)), body)
 }
 
+// ScheduleAnnouncementRequest calls POST /announcement-requests/{id}/schedule on the entity service.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *CustomerEntityClient) ScheduleAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/announcement-requests/%s/schedule", url.PathEscape(id)), body)
+}
+
 // PublishAnnouncementRequest calls POST /announcement-requests/{id}/publish on the entity service.
 // Response is returned as raw JSON; typed response structs are deferred.
 func (c *CustomerEntityClient) PublishAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error) {
@@ -741,4 +772,16 @@ func (c *CustomerEntityClient) CreateAnnouncementRequestUpdate(ctx context.Conte
 // Response is returned as raw JSON; typed response structs are deferred.
 func (c *CustomerEntityClient) ListAnnouncementRequestUpdates(ctx context.Context, id string) ([]byte, error) {
 	return c.do(ctx, http.MethodGet, fmt.Sprintf("/announcement-requests/%s/updates", url.PathEscape(id)), nil)
+}
+
+// RecordAnnouncementRequestDeliveries calls POST /announcement-requests/{id}/deliveries on the entity service.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *CustomerEntityClient) RecordAnnouncementRequestDeliveries(ctx context.Context, id string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/announcement-requests/%s/deliveries", url.PathEscape(id)), body)
+}
+
+// ListAnnouncementRequestDeliveries calls GET /announcement-requests/{id}/deliveries on the entity service.
+// Response is returned as raw JSON; typed response structs are deferred.
+func (c *CustomerEntityClient) ListAnnouncementRequestDeliveries(ctx context.Context, id string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, fmt.Sprintf("/announcement-requests/%s/deliveries", url.PathEscape(id)), nil)
 }

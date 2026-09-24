@@ -41,9 +41,12 @@ type entityAnnouncementRequestClient interface {
 	RecordAnnouncementRequestDryRun(ctx context.Context, id string, body []byte) ([]byte, error)
 	SubmitAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error)
 	ApproveAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error)
+	ScheduleAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error)
 	PublishAnnouncementRequest(ctx context.Context, id string, body []byte) ([]byte, error)
 	CreateAnnouncementRequestUpdate(ctx context.Context, id string, body []byte) ([]byte, error)
 	ListAnnouncementRequestUpdates(ctx context.Context, id string) ([]byte, error)
+	RecordAnnouncementRequestDeliveries(ctx context.Context, id string, body []byte) ([]byte, error)
+	ListAnnouncementRequestDeliveries(ctx context.Context, id string) ([]byte, error)
 }
 
 // AnnouncementRequestHandler handles HTTP requests for the Phase 2
@@ -333,6 +336,59 @@ func (h *AnnouncementRequestHandler) ApproveAnnouncementRequest(w http.ResponseW
 	h.actorOnlyTransition(w, r, "approve", h.entity.ApproveAnnouncementRequest, "Failed to approve the announcement request.")
 }
 
+// ScheduleAnnouncementRequest handles
+// POST /announcement-requests/{id}/schedule. Sets or clears (a null/omitted
+// scheduledFor clears it) an approved request's automatic-publish time —
+// once set, operations/csm-scheduled-tasks' publish_scheduled_announcements
+// sub-cron publishes it automatically once that time arrives, the same way
+// the manual Publish button does today. actorId is always the authenticated
+// caller, never read from the request body — same restriction as Publish
+// (scheduling is choosing when Publish happens).
+func (h *AnnouncementRequestHandler) ScheduleAnnouncementRequest(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		ScheduledFor *string `json:"scheduledFor"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	upstreamBody, err := json.Marshal(struct {
+		ActorID      string  `json:"actorId"`
+		ScheduledFor *string `json:"scheduledFor"`
+		ActorEmail   string  `json:"actorEmail,omitempty"`
+	}{ActorID: user.UserID, ScheduledFor: req.ScheduledFor, ActorEmail: user.Email})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return
+	}
+
+	result, err := h.entity.ScheduleAnnouncementRequest(r.Context(), id, upstreamBody)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ScheduleAnnouncementRequest failed", "userID", user.UserID, "id", id, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to schedule the announcement request.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // PublishAnnouncementRequest handles
 // POST /announcement-requests/{id}/publish. Unlike Approve, this does take
 // a body: caseIds, the real case id created for each project in the
@@ -465,6 +521,101 @@ func (h *AnnouncementRequestHandler) ListAnnouncementRequestUpdates(w http.Respo
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity ListAnnouncementRequestUpdates failed", "userID", user.UserID, "id", id, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to list updates for the announcement request.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// announcementRequestDeliveryInput mirrors entity-service's
+// RecordAnnouncementRequestDeliveryInput — decoded here only to validate
+// shape before forwarding (projectId/status required), not reshaped.
+type announcementRequestDeliveryInput struct {
+	ProjectID    string  `json:"projectId"`
+	CaseID       *string `json:"caseId,omitempty"`
+	Status       string  `json:"status"`
+	ErrorMessage *string `json:"errorMessage,omitempty"`
+}
+
+// RecordAnnouncementRequestDeliveries handles
+// POST /announcement-requests/{id}/deliveries. deliveries is the caller's
+// own Publish fan-out pass result, one entry per project attempted in that
+// pass; actorId is always the authenticated caller, never client-supplied —
+// same restriction as publish, since this is bookkeeping for the same real
+// send only the request's own creator can drive.
+func (h *AnnouncementRequestHandler) RecordAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Deliveries []announcementRequestDeliveryInput `json:"deliveries"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	if len(req.Deliveries) == 0 {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	for _, d := range req.Deliveries {
+		if d.ProjectID == "" || d.Status == "" {
+			writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+			return
+		}
+	}
+
+	upstreamBody, err := json.Marshal(struct {
+		ActorID    string                             `json:"actorId"`
+		Deliveries []announcementRequestDeliveryInput `json:"deliveries"`
+	}{ActorID: user.UserID, Deliveries: req.Deliveries})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return
+	}
+
+	result, err := h.entity.RecordAnnouncementRequestDeliveries(r.Context(), id, upstreamBody)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity RecordAnnouncementRequestDeliveries failed", "userID", user.UserID, "id", id, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to record the delivery status.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ListAnnouncementRequestDeliveries handles
+// GET /announcement-requests/{id}/deliveries — a plain passthrough, no
+// actor injection needed for a read.
+func (h *AnnouncementRequestHandler) ListAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	result, err := h.entity.ListAnnouncementRequestDeliveries(r.Context(), id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ListAnnouncementRequestDeliveries failed", "userID", user.UserID, "id", id, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to list deliveries for the announcement request.")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

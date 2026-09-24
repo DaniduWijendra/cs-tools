@@ -29,6 +29,14 @@ import type { AnnouncementFilters } from "@features/csm-announcements/types/csmA
  *   (anything sent before this workflow existed, or via any other path) —
  *   shown individually, exactly as the old flat list did.
  */
+/** One project's own case within a "batch" row. */
+export interface AnnouncementRegistryCaseMember {
+  caseId: string;
+  caseNumber: string;
+  wso2CaseId: string;
+  projectName: string;
+}
+
 export interface AnnouncementRegistryRow {
   kind: "batch" | "case";
   subject: string;
@@ -40,6 +48,8 @@ export interface AnnouncementRegistryRow {
   announcementRequestId?: string;
   /** Set for kind="batch" only. */
   projectCount?: number;
+  /** Every member case this batch's request published, one per project. Set for kind="batch" only. */
+  cases?: AnnouncementRegistryCaseMember[];
 
   /** Set for kind="case" only. */
   caseId?: string;

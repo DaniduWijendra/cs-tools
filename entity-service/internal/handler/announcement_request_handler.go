@@ -140,6 +140,35 @@ func (h *AnnouncementRequestHandler) ApproveAnnouncementRequest(w http.ResponseW
 	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
 }
 
+// ScheduleAnnouncementRequest handles
+// POST /announcement-requests/{id}/schedule.
+func (h *AnnouncementRequestHandler) ScheduleAnnouncementRequest(w http.ResponseWriter, r *http.Request) {
+	var req domain.ScheduleAnnouncementRequestRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	resp, err := h.svc.Schedule(r.Context(), r.PathValue("id"), req.ActorID, req.ActorEmail, req.ScheduledFor)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
+
+// AutoPublishAnnouncementRequest handles
+// POST /announcement-requests/{id}/auto-publish. Internal-caller-only (see
+// AnnouncementRequestService.AutoPublish's own doc comment) — takes no
+// body at all, unlike every other action here: there is no actor to
+// authenticate, since this is never called by a browser.
+func (h *AnnouncementRequestHandler) AutoPublishAnnouncementRequest(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.AutoPublish(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
+
 // PublishAnnouncementRequest handles
 // POST /announcement-requests/{id}/publish.
 func (h *AnnouncementRequestHandler) PublishAnnouncementRequest(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +203,32 @@ func (h *AnnouncementRequestHandler) CreateAnnouncementRequestUpdate(w http.Resp
 // GET /announcement-requests/{id}/updates.
 func (h *AnnouncementRequestHandler) ListAnnouncementRequestUpdates(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.svc.ListUpdates(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
+
+// RecordAnnouncementRequestDeliveries handles
+// POST /announcement-requests/{id}/deliveries.
+func (h *AnnouncementRequestHandler) RecordAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	var req domain.RecordAnnouncementRequestDeliveriesRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	resp, err := h.svc.RecordDeliveries(r.Context(), r.PathValue("id"), req.ActorID, req.Deliveries)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeAnnouncementRequestJSON(w, http.StatusOK, resp)
+}
+
+// ListAnnouncementRequestDeliveries handles
+// GET /announcement-requests/{id}/deliveries.
+func (h *AnnouncementRequestHandler) ListAnnouncementRequestDeliveries(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.ListDeliveries(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

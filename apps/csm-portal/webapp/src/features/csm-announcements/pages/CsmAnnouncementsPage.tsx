@@ -59,7 +59,10 @@ import {
   DEFAULT_ANNOUNCEMENT_FILTERS,
   type AnnouncementFilters,
 } from "@features/csm-announcements/types/csmAnnouncements";
-import type { AnnouncementRegistryRow } from "@features/csm-announcements/types/announcementRegistry";
+import type {
+  AnnouncementRegistryCaseMember,
+  AnnouncementRegistryRow,
+} from "@features/csm-announcements/types/announcementRegistry";
 import type { AnnouncementRequestState } from "@features/csm-announcements/types/announcementRequests";
 import { announcementStateRole } from "@features/csm-announcements/utils/announcementState";
 import { STATE_LABEL } from "@features/csm-dashboard/utils/abtDashboard";
@@ -247,9 +250,26 @@ export default function CsmAnnouncementsPage(): JSX.Element {
   const [pendingState, setPendingState] = useState<AnnouncementRequestState>("pending_approval");
   const [pendingPage, setPendingPage] = useState(0);
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  // Only ever populated by clicking a batch row below — the registry search
+  // result is the one place this data exists (see AnnouncementRegistryRow's
+  // own doc comment); a dialog opened from the Pending tab has none, and the
+  // dialog itself already treats an empty/undefined list as "nothing to
+  // show" the same way it already does for a legacy published request with
+  // no publishedCaseIds at all.
+  const [selectedCaseMembers, setSelectedCaseMembers] = useState<AnnouncementRegistryCaseMember[]>([]);
   const pendingSearch = useSearchAnnouncementRequests(pendingState, pendingPage, PENDING_ROWS_PER_PAGE);
   const pendingRequests = pendingSearch.data?.requests ?? [];
   const pendingTotal = pendingSearch.data?.total ?? 0;
+
+  const openBatchRow = (row: AnnouncementRegistryRow): void => {
+    if (!row.announcementRequestId) return;
+    setSelectedCaseMembers(row.cases ?? []);
+    setSelectedRequestId(row.announcementRequestId);
+  };
+  const openPendingRow = (id: string): void => {
+    setSelectedCaseMembers([]);
+    setSelectedRequestId(id);
+  };
 
   const columnOptions = useMemo<ColumnOption[]>(
     () => ANNOUNCEMENT_COLUMNS.map(({ id, label }) => ({ id, label })),
@@ -482,11 +502,11 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                     <TableRow
                       key={`batch-${row.announcementRequestId}`}
                       hover
-                      onClick={() => setSelectedRequestId(row.announcementRequestId ?? null)}
+                      onClick={() => openBatchRow(row)}
                       onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setSelectedRequestId(row.announcementRequestId ?? null);
+                          openBatchRow(row);
                         }
                       }}
                       tabIndex={0}
@@ -613,11 +633,11 @@ export default function CsmAnnouncementsPage(): JSX.Element {
                       <TableRow
                         key={r.id}
                         hover
-                        onClick={() => setSelectedRequestId(r.id)}
+                        onClick={() => openPendingRow(r.id)}
                         onKeyDown={(e: KeyboardEvent<HTMLTableRowElement>) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            setSelectedRequestId(r.id);
+                            openPendingRow(r.id);
                           }
                         }}
                         tabIndex={0}
@@ -670,6 +690,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
       {selectedRequestId && (
         <AnnouncementRequestDialog
           requestId={selectedRequestId}
+          caseMembers={selectedCaseMembers}
           onClose={() => setSelectedRequestId(null)}
         />
       )}

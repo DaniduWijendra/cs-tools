@@ -43,6 +43,10 @@ type entityUserClient interface {
 	PatchUserMe(ctx context.Context, body []byte) ([]byte, error)
 	SearchUsers(ctx context.Context, body []byte) ([]byte, error)
 	GetUser(ctx context.Context, id string) ([]byte, error)
+	ListSavedFilterViews(ctx context.Context, listKey string) ([]byte, error)
+	SaveSavedFilterView(ctx context.Context, body []byte) ([]byte, error)
+	DeleteSavedFilterView(ctx context.Context, listKey, name string) ([]byte, error)
+	ReorderSavedFilterView(ctx context.Context, body []byte) ([]byte, error)
 }
 
 // UsersHandler handles HTTP requests for user-related operations.
@@ -357,4 +361,100 @@ func (h *UsersHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	enriched = h.withExternalAccountStatus(r.Context(), enriched, user.UserID)
 
 	writeJSON(w, http.StatusOK, enriched)
+}
+
+// ListSavedFilterViews handles GET /users/me/saved-filter-views.
+func (h *UsersHandler) ListSavedFilterViews(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	listKey := r.URL.Query().Get("listKey")
+	if listKey == "" {
+		writeError(w, http.StatusBadRequest, "listKey is required.")
+		return
+	}
+
+	result, err := h.entity.ListSavedFilterViews(r.Context(), listKey)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ListSavedFilterViews failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to list saved filter views.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// SaveSavedFilterView handles PATCH /users/me/saved-filter-views.
+func (h *UsersHandler) SaveSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.entity.SaveSavedFilterView(r.Context(), body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity SaveSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to save the filter view.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// DeleteSavedFilterView handles DELETE /users/me/saved-filter-views.
+func (h *UsersHandler) DeleteSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	q := r.URL.Query()
+	listKey := q.Get("listKey")
+	name := q.Get("name")
+	if listKey == "" || name == "" {
+		writeError(w, http.StatusBadRequest, "listKey and name are required.")
+		return
+	}
+
+	result, err := h.entity.DeleteSavedFilterView(r.Context(), listKey, name)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity DeleteSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to delete the filter view.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ReorderSavedFilterView handles POST /users/me/saved-filter-views/reorder.
+func (h *UsersHandler) ReorderSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.entity.ReorderSavedFilterView(r.Context(), body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ReorderSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to reorder saved filter views.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }

@@ -80,7 +80,7 @@ func TestLogger_CallerID(t *testing.T) {
 		"iss": testIssuer, "aud": []string{"spa-client-id"}, "sub": "session-scoped-id",
 		"userid": "asgardeo-uuid-1", "email": "jane@example.com", "exp": time.Now().Add(time.Hour).Unix(),
 	})
-	bearerToken := sign(t, key, jwt.MapClaims{
+	clientAssertion := sign(t, key, jwt.MapClaims{
 		"iss": testIssuer, "aud": []string{"m2m"}, "sub": "m2m-sub", "client_id": "integration-client-id",
 		"exp": time.Now().Add(time.Hour).Unix(),
 	})
@@ -100,7 +100,7 @@ func TestLogger_CallerID(t *testing.T) {
 	t.Run("a human caller logs the stable userid claim, not sub", func(t *testing.T) {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/search", nil)
 		out := chain(httptest.NewRecorder(), req, map[string]string{
-			"Authorization": "Bearer " + bearerToken, "x-user-id-token": userToken,
+			"x-jwt-assertion": clientAssertion, "x-user-id-token": userToken,
 		})
 		if !strings.Contains(out, "callerId=asgardeo-uuid-1") {
 			t.Fatalf("access log missing the user's stable id, got: %s", out)
@@ -112,7 +112,7 @@ func TestLogger_CallerID(t *testing.T) {
 
 	t.Run("a pure M2M caller logs the client id", func(t *testing.T) {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/search", nil)
-		out := chain(httptest.NewRecorder(), req, map[string]string{"Authorization": "Bearer " + bearerToken})
+		out := chain(httptest.NewRecorder(), req, map[string]string{"x-jwt-assertion": clientAssertion})
 		if !strings.Contains(out, "callerId=integration-client-id") {
 			t.Fatalf("access log missing the M2M caller's client id, got: %s", out)
 		}

@@ -134,15 +134,25 @@ func (r *deploymentRepo) SearchDeployments(ctx context.Context, req domain.Searc
 		result := make([]domain.DeploymentView, 0, req.Pagination.Limit)
 		for rows.Next() {
 			var d domain.DeploymentView
+			var deploymentType *string
 			var creatorID, creatorName *string
 			if err := rows.Scan(
-				&d.ID, &d.Number, &d.Name, &d.Type, &d.Description,
+				&d.ID, &d.Number, &d.Name, &deploymentType, &d.Description,
 				&d.CreatedOn, &d.UpdatedOn,
 				&creatorID, &creatorName,
 				&d.Project.ID, &d.Project.Name,
 			); err != nil {
 				return fmt.Errorf("scan deployment: %w", err)
 			}
+			// deployment.type (migration 000013) has no NOT NULL constraint --
+			// 38 of 2859 rows are NULL on staging, checked live -- but
+			// DeploymentView.Type is a required (non-pointer) field on the
+			// wire, matching the OpenAPI contract every consumer already
+			// expects. Same "keep the wire type required, fix the scan side
+			// only" precedent as CaseView.InternalID (see this file's own
+			// history for why a pointer wire type isn't the answer here
+			// either): default to "" rather than crashing the whole search.
+			d.Type = domain.DeploymentType(stringOrEmpty(deploymentType))
 			if creatorID != nil {
 				name := ""
 				if creatorName != nil {

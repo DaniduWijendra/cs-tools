@@ -130,15 +130,11 @@ type Config struct {
 	// CSMPortalBaseURL builds the link back to a change request in comments
 	// posted to GitHub. Empty omits the link rather than rendering a broken one.
 	CSMPortalBaseURL string
-	// GitHub label vocabulary overrides. Empty keeps ServiceNow's value.
-	GithubLabelChangeRequest     string
-	GithubLabelTypePrefix        string
-	GithubLabelScopePrefix       string
-	GithubLabelsScope            string
-	GithubLabelsImpact           string
-	GithubLabelsLikelihood       string
-	GithubLabelsState            string
-	GithubLabelsStrippedOnCreate string
+	// GitHub label vocabulary overrides. Empty keeps .github/labels.yml's value.
+	GithubLabelTypeIncident       string
+	GithubLabelTypeServiceRequest string
+	GithubLabelsClass             string
+	GithubLabelStatusAssigned     string
 
 	// CRNoticesEnabled turns on the change-request notice drainer: the poller
 	// that reads event_outbox and asks csm-notification-service to send the
@@ -252,17 +248,12 @@ func Load() *Config {
 		GithubIntegrationLogin:                    os.Getenv("GITHUB_INTEGRATION_LOGIN"),
 		GithubOutboundInterval:                    envDuration("GITHUB_OUTBOUND_INTERVAL", 15*time.Second),
 		CSMPortalBaseURL:                          os.Getenv("CSM_PORTAL_BASE_URL"),
-		GithubLabelChangeRequest:                  os.Getenv("GITHUB_LABEL_CHANGE_REQUEST"),
-		GithubLabelTypePrefix:                     os.Getenv("GITHUB_LABEL_TYPE_PREFIX"),
-		GithubLabelScopePrefix:                    os.Getenv("GITHUB_LABEL_SCOPE_PREFIX"),
-		GithubLabelsScope:                         os.Getenv("GITHUB_LABELS_SCOPE"),
-		GithubLabelsImpact:                        os.Getenv("GITHUB_LABELS_IMPACT"),
-		GithubLabelsLikelihood:                    os.Getenv("GITHUB_LABELS_LIKELIHOOD"),
-		GithubLabelsState:                         os.Getenv("GITHUB_LABELS_STATE"),
-		GithubLabelsStrippedOnCreate:              os.Getenv("GITHUB_LABELS_STRIPPED_ON_CREATE"),
+		GithubLabelTypeIncident:                   os.Getenv("GITHUB_LABEL_TYPE_INCIDENT"),
+		GithubLabelTypeServiceRequest:             os.Getenv("GITHUB_LABEL_TYPE_SERVICE_REQUEST"),
+		GithubLabelsClass:                         os.Getenv("GITHUB_LABELS_CLASS"),
+		GithubLabelStatusAssigned:                 os.Getenv("GITHUB_LABEL_STATUS_ASSIGNED"),
 		CRNoticesEnabled:                          os.Getenv("CR_NOTICES_ENABLED") == "true",
 		SalesforceMembershipIngestEnabled:         os.Getenv("SALESFORCE_MEMBERSHIP_INGEST_ENABLED") == "true",
-		CSMMigrationMembershipRegistrationEnabled: os.Getenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED") == "true",
 		CREventHubTopic:                           getEnvOrDefault("CR_EVENT_HUB_TOPIC", "cr-events"),
 		CRNoticePollInterval:                      envDuration("CR_NOTICE_POLL_INTERVAL", 5*time.Second),
 		AuthIssuer:                                os.Getenv("AUTH_ISSUER"),
@@ -276,6 +267,7 @@ func Load() *Config {
 		SalesEntityClientID:                       os.Getenv("SALES_ENTITY_CLIENT_ID"),
 		SalesEntityClientSecret:                   os.Getenv("SALES_ENTITY_CLIENT_SECRET"),
 		SalesEntityScopes:                         os.Getenv("SALES_ENTITY_SCOPES"),
+		CSMMigrationMembershipRegistrationEnabled: os.Getenv("CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED") == "true",
 	}
 	cfg.AuthInternalClientIDs = ParseInternalClientIDs(cfg.AuthInternalClientIDsRaw)
 	return cfg

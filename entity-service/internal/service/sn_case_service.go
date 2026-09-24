@@ -4391,6 +4391,122 @@ func snCaseStateLabelToEnum(state *snCaseState) (domain.CaseState, error) {
 	return "", fmt.Errorf("unknown case state %q from ServiceNow", state.Label)
 }
 
+// snAnnouncementStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for an announcement-typed case -- see
+// TestSNCaseService_CreateCase_Announcement's fixture, which returns
+// {"label": "Open"} for a fresh announcement, the same label case uses)
+// to announcement_state_enum's own literal values. Deliberately its own map
+// rather than reusing snCaseStateMap: announcement_state_enum only has two
+// values (OPEN/CLOSE, migration 000019) and spells the closed one CLOSE, not
+// CLOSED -- the same kind of label/enum spelling mismatch already handled
+// for case (CANCELLED->CANCELED) and incident (SITE_247->SITE_24_7), so this
+// is resolved by an explicit table instead of assumed to line up.
+var snAnnouncementStateMap = map[string]string{
+	"open":   "OPEN",
+	"closed": "CLOSE",
+}
+
+// snAnnouncementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created announcement into announcement_state_enum's
+// literal value, for CreateCaseFromServiceNow's announcement branch. Returns
+// an error rather than defaulting to "OPEN" for anything unrecognized: a
+// fresh announcement landing in neither OPEN nor CLOSE means ServiceNow
+// returned a label this integration doesn't understand yet, which should
+// fail loudly rather than silently mis-record the state.
+func snAnnouncementStateToEnum(label string) (string, error) {
+	if v, ok := snAnnouncementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown announcement state %q from ServiceNow", label)
+}
+
+// snCaseLikeStateLabels is the SN raw-label vocabulary this integration
+// understands for every case-like work_item type (case/service_request/
+// engagement/security_report_analysis) whose own state enum -- migrations
+// 000018 (case_state_enum) and 000019 (service_request_state_enum,
+// engagement_state_enum, security_report_analysis_state_enum) -- is spelled
+// identically: WORK_IN_PROGRESS, AWAITING_INFO, SOLUTION_PROPOSED, CLOSED,
+// OPEN, WAITING_ON_WSO2, REOPENED. ServiceNow's create-case response carries
+// state as the same generic {label} shape regardless of case type (see
+// CreateCase's shared stateLabel extraction above), so the raw label set
+// SN can return is the same set snCaseStateMap already documents for "case".
+// Deliberately its own map per type rather than one shared map, per this
+// change's own design brief -- but the source of truth is identical to
+// snCaseStateMap by construction: keep any future addition/edit to one in
+// sync with the others (announcement is the one exception -- its state enum
+// only has OPEN/CLOSE, see snAnnouncementStateMap).
+//
+// Unlike snCaseStateMap, "reopened" maps to its own literal (REOPENED) here
+// rather than to WAITING_ON_WSO2 -- snCaseStateMap's mapping of "reopened" to
+// WaitingOnWSO2 looks like a pre-existing bug in the case path, not
+// intentional behavior worth propagating into these three new maps.
+var snCaseLikeStateLabels = map[string]string{
+	"open":              "OPEN",
+	"work in progress":  "WORK_IN_PROGRESS",
+	"waiting on wso2":   "WAITING_ON_WSO2",
+	"awaiting info":     "AWAITING_INFO",
+	"reopened":          "REOPENED",
+	"solution proposed": "SOLUTION_PROPOSED",
+	"closed":            "CLOSED",
+}
+
+// snServiceRequestStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for a service_request-typed case) to
+// service_request_state_enum's own literal values (migration 000019) --
+// see snCaseLikeStateLabels's own doc comment for why this table is
+// identical to that one.
+var snServiceRequestStateMap = snCaseLikeStateLabels
+
+// snServiceRequestStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created service_request into service_request_state_enum's
+// literal value, for CreateCaseFromServiceNow's service_request branch.
+// Returns an error rather than defaulting to "OPEN" for anything unrecognized
+// -- same fail-closed discipline as snAnnouncementStateToEnum/
+// snCaseStateLabelToEnum.
+func snServiceRequestStateToEnum(label string) (string, error) {
+	if v, ok := snServiceRequestStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown service_request state %q from ServiceNow", label)
+}
+
+// snEngagementStateMap maps ServiceNow's raw state label to
+// engagement_state_enum's own literal values (migration 000019) -- see
+// snCaseLikeStateLabels's own doc comment for why this table is identical to
+// that one.
+var snEngagementStateMap = snCaseLikeStateLabels
+
+// snEngagementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created engagement into engagement_state_enum's literal
+// value, for CreateCaseFromServiceNow's engagement branch. Returns an error
+// rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snEngagementStateToEnum(label string) (string, error) {
+	if v, ok := snEngagementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown engagement state %q from ServiceNow", label)
+}
+
+// snSecurityReportAnalysisStateMap maps ServiceNow's raw state label to
+// security_report_analysis_state_enum's own literal values (migration
+// 000019) -- see snCaseLikeStateLabels's own doc comment for why this table
+// is identical to that one.
+var snSecurityReportAnalysisStateMap = snCaseLikeStateLabels
+
+// snSecurityReportAnalysisStateToEnum converts ServiceNow's raw
+// create-response state label for a newly created security_report_analysis
+// into security_report_analysis_state_enum's literal value, for
+// CreateCaseFromServiceNow's security_report_analysis branch. Returns an
+// error rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snSecurityReportAnalysisStateToEnum(label string) (string, error) {
+	if v, ok := snSecurityReportAnalysisStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown security_report_analysis state %q from ServiceNow", label)
+}
+
 // snSeverityLabel extracts the priority word from SN severity labels like
 // "Low (P4)", "2 - High", "3 - Moderate" → "low", "high", "medium".
 var snSeverityLabelMap = map[string]domain.CaseSeverity{

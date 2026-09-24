@@ -108,6 +108,20 @@ type registryAnnouncementRequestSearchResponse struct {
 	Limit    int                               `json:"limit"`
 }
 
+// registryCaseMember is one project's case within a "batch" row. Grouping
+// already has to inspect every matching case (see fetchAllMatchingCases), so
+// surfacing per-project detail is usually free — there is no per-case lookup
+// by id to fall back on either, since case search has no "id in [...]"
+// filter. The one case that isn't free is a filter that hides a displayed
+// batch's own members; registryCaseLookup covers that with a second,
+// unfiltered pass, and only then.
+type registryCaseMember struct {
+	CaseID      string `json:"caseId"`
+	CaseNumber  string `json:"caseNumber"`
+	WSO2CaseID  string `json:"wso2CaseId"`
+	ProjectName string `json:"projectName"`
+}
+
 // registryRow is one row of the grouped registry — either a "batch" (a
 // published announcement_request, representing every case in its own
 // PublishedCaseIDs as one row) or a "case" (an announcement-type case with
@@ -123,8 +137,9 @@ type registryRow struct {
 	UpdatedOn string `json:"updatedOn,omitempty"`
 
 	// Batch-only.
-	AnnouncementRequestID string `json:"announcementRequestId,omitempty"`
-	ProjectCount          int    `json:"projectCount,omitempty"`
+	AnnouncementRequestID string               `json:"announcementRequestId,omitempty"`
+	ProjectCount          int                  `json:"projectCount,omitempty"`
+	Cases                 []registryCaseMember `json:"cases,omitempty"`
 
 	// Case-only.
 	CaseID      string `json:"caseId,omitempty"`
@@ -241,6 +256,44 @@ func (h *AnnouncementRegistryHandler) fetchAllPublishedRequests(ctx context.Cont
 	return nil, fmt.Errorf("too many published announcement requests to build the registry safely (exceeded %d pages of %d)", maxRegistryPages, registryPageLimit)
 }
 
+// registryCaseLookup returns a caseId -> case map that resolves every id in
+// needed, which the caller supplies as the member ids of the batch rows on
+// the page it is about to return.
+//
+// filtered is the caller's own filtered case set, keyed by id. Usually it
+// already covers needed and is returned untouched — that holds for every
+// unfiltered request, and also for a filtered one whose filter didn't
+// happen to split a batch (a search term matching the shared subject, or a
+// state every member shares, keeps all of them in the matching set). Only
+// when the filter really did hide a member of a displayed batch is a second
+// fetch worth its cost, and only then is one issued: every filter cleared
+// (type=announcement only, same as fetchAllMatchingCases' own hardcoded
+// filter) so every member becomes resolvable. Scoping the check to the
+// page's own members, rather than to "did the caller pass any filter at
+// all", is what keeps the common interactive search down to a single pass
+// over the case list.
+func (h *AnnouncementRegistryHandler) registryCaseLookup(ctx context.Context, filtered map[string]registryCaseView, needed []string) (map[string]registryCaseView, error) {
+	complete := true
+	for _, id := range needed {
+		if _, ok := filtered[id]; !ok {
+			complete = false
+			break
+		}
+	}
+	if complete {
+		return filtered, nil
+	}
+	all, err := h.fetchAllMatchingCases(ctx, registrySearchRequest{})
+	if err != nil {
+		return nil, err
+	}
+	lookup := make(map[string]registryCaseView, len(all))
+	for _, c := range all {
+		lookup[c.ID] = c
+	}
+	return lookup, nil
+}
+
 // SearchAnnouncementRegistry handles POST /announcements/registry/search —
 // the Announcements tab's own list, grouped by announcement instead of
 // repeating the same subject once per project (Phase 3's "registry groups
@@ -297,6 +350,10 @@ func (h *AnnouncementRegistryHandler) SearchAnnouncementRegistry(w http.Response
 		mapUpstreamErrorGeneric(w, err, "Failed to search announcements.")
 		return
 	}
+	filteredByID := make(map[string]registryCaseView, len(cases))
+	for _, c := range cases {
+		filteredByID[c.ID] = c
+	}
 
 	caseToRequest := make(map[string]*registryAnnouncementRequestView, len(requests))
 	for i := range requests {
@@ -305,18 +362,24 @@ func (h *AnnouncementRegistryHandler) SearchAnnouncementRegistry(w http.Response
 		}
 	}
 
+	// Member lists are deliberately left empty here and filled in after
+	// pagination below: a row that this request won't return doesn't need
+	// its members resolved, and whether resolving them costs a second fetch
+	// at all depends on which members the returned page actually asks for.
 	var rows []registryRow
-	emittedRequestIDs := make(map[string]bool, len(requests))
+	memberIDsByRow := make(map[int][]string)
+	rowAddedForRequestID := make(map[string]bool, len(requests))
 	for _, c := range cases {
 		if reqView, ok := caseToRequest[c.ID]; ok {
-			if emittedRequestIDs[reqView.ID] {
+			if rowAddedForRequestID[reqView.ID] {
 				continue
 			}
-			emittedRequestIDs[reqView.ID] = true
 			projectCount := len(reqView.PublishedCaseIDs)
 			if reqView.ResolvedProjectCount != nil {
 				projectCount = *reqView.ResolvedProjectCount
 			}
+			rowAddedForRequestID[reqView.ID] = true
+			memberIDsByRow[len(rows)] = reqView.PublishedCaseIDs
 			rows = append(rows, registryRow{
 				Kind:                  "batch",
 				Subject:               reqView.Subject,
@@ -372,6 +435,47 @@ func (h *AnnouncementRegistryHandler) SearchAnnouncementRegistry(w http.Response
 	if end > total {
 		end = total
 	}
+	var needed []string
+	for i := start; i < end; i++ {
+		needed = append(needed, memberIDsByRow[i]...)
+	}
+	// A batch's member list must be resolved independently of req's own
+	// search/states/projectIds filters: those filters correctly decide which
+	// rows appear at all (a batch shows up if just one of its cases matches),
+	// but every member case still needs to be listed once it does — dropping
+	// the members that didn't happen to match would understate "Delivered to
+	// N projects" and omit their CS numbers entirely.
+	memberLookup, err := h.registryCaseLookup(r.Context(), filteredByID, needed)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "fetch unfiltered cases for registry batch members failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to search announcements.")
+		return
+	}
+	for i := start; i < end; i++ {
+		ids := memberIDsByRow[i]
+		if len(ids) == 0 {
+			continue
+		}
+		members := make([]registryCaseMember, 0, len(ids))
+		for _, cid := range ids {
+			cv, ok := memberLookup[cid]
+			if !ok {
+				continue
+			}
+			projectName := ""
+			if cv.Project != nil {
+				projectName = cv.Project.Name
+			}
+			members = append(members, registryCaseMember{
+				CaseID:      cv.ID,
+				CaseNumber:  cv.Number,
+				WSO2CaseID:  cv.InternalID,
+				ProjectName: projectName,
+			})
+		}
+		rows[i].Cases = members
+	}
+
 	page := rows[start:end]
 	if page == nil {
 		page = []registryRow{}

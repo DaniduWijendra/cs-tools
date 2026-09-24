@@ -47,7 +47,7 @@ func (h *SavedFilterViewHandler) List(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// Save handles PUT /users/me/saved-filter-views.
+// Save handles PATCH /users/me/saved-filter-views.
 func (h *SavedFilterViewHandler) Save(w http.ResponseWriter, r *http.Request) {
 	var req domain.SaveSavedFilterViewRequest
 	if !decodeRequest(w, r, &req) {

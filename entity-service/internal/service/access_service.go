@@ -18,6 +18,7 @@ package service
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
@@ -134,4 +135,32 @@ func resolveScopeForID(ctx context.Context, access AccessService, id string) (Ac
 		return AccessScope{}, err
 	}
 	return access.ResolveScope(ctx)
+}
+
+// authorizeProject refuses a caller who may not see projectID.
+//
+// Endpoints that return data for one project named in the path need this:
+// the id is caller-controlled, so validating only that the project EXISTS
+// lets anyone read any project's data by id (an IDOR). Scoped list endpoints
+// get this for free by folding the scope into their WHERE clause; a
+// by-id read has no such clause, so the check has to be explicit.
+//
+// An out-of-scope project is reported as NotFound, never Forbidden, matching
+// GetProjectByID/GetCaseByID: a 403 would confirm the project exists to
+// someone not entitled to know that. Scope is resolved before any existence
+// lookup, so a caller cannot distinguish the two cases by timing either.
+func authorizeProject(ctx context.Context, access AccessService, projectID string) error {
+	scope, err := access.ResolveScope(ctx)
+	if err != nil {
+		return err
+	}
+	if scope.Unrestricted {
+		return nil
+	}
+	for _, id := range scope.ProjectIDs {
+		if strings.EqualFold(id, projectID) {
+			return nil
+		}
+	}
+	return &apierror.NotFoundError{Msg: "project not found"}
 }
