@@ -132,6 +132,114 @@ func TestSNWritebackDispatcher_DoesNotBlockCallerOnSlowWrite(t *testing.T) {
 	close(release)
 }
 
+// TestSNWritebackDispatcher_SerializesSameEntityInDispatchOrder proves the
+// fix for the case WatchList reordering finding: two writeback jobs for the
+// same entity ("case:case-1") are dispatched in order A-then-B, with A's
+// mirror write artificially delayed so that, absent per-entity
+// serialization, B (on a different worker) would finish first and A's stale
+// write would land afterward and clobber it. With the fix, B must not start
+// until A has completed, so the final mirrored state always reflects B.
+func TestSNWritebackDispatcher_SerializesSameEntityInDispatchOrder(t *testing.T) {
+	failures := &recordingSNWritebackFailures{}
+	d := NewSNWritebackDispatcher(failures)
+
+	var mu sync.Mutex
+	var applied []string   // order values were applied to the "mirror" in
+	var started []string   // order writeFns actually started running in
+	aStarted := make(chan struct{})
+	done := make(chan struct{}, 2)
+
+	// A: dispatched first, but its write is slow -- long enough that, without
+	// per-entity serialization, B would race ahead of it on another worker.
+	d.Dispatch(context.Background(), "case", "case-1", "update", map[string]string{"watchList": "A"}, func(context.Context) error {
+		mu.Lock()
+		started = append(started, "A")
+		mu.Unlock()
+		close(aStarted)
+		time.Sleep(100 * time.Millisecond)
+		mu.Lock()
+		applied = append(applied, "A")
+		mu.Unlock()
+		done <- struct{}{}
+		return nil
+	})
+
+	// B: dispatched immediately after A, with a fast write. If B ran
+	// concurrently with A on a different worker, it would finish well before
+	// A's 100ms sleep elapses, and A's later completion would overwrite B's
+	// result -- the exact drift CodeRabbit flagged.
+	d.Dispatch(context.Background(), "case", "case-1", "update", map[string]string{"watchList": "B"}, func(context.Context) error {
+		mu.Lock()
+		started = append(started, "B")
+		applied = append(applied, "B")
+		mu.Unlock()
+		done <- struct{}{}
+		return nil
+	})
+
+	<-aStarted
+	// Give a would-be concurrent B a generous window to have started and
+	// finished if serialization were missing.
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	startedSoFar := append([]string(nil), started...)
+	mu.Unlock()
+	if len(startedSoFar) != 1 || startedSoFar[0] != "A" {
+		t.Fatalf("expected only A to have started while A's write is in flight, got %v", startedSoFar)
+	}
+
+	<-done
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := append([]string(nil), started...); len(got) != 2 || got[0] != "A" || got[1] != "B" {
+		t.Fatalf("expected writeFns to start in dispatch order [A B], got %v", got)
+	}
+	if got := append([]string(nil), applied...); len(got) != 2 || got[0] != "A" || got[1] != "B" {
+		t.Fatalf("final mirrored state must reflect the newer write B applied last, got %v", got)
+	}
+}
+
+// TestSNWritebackDispatcher_DifferentEntitiesRunConcurrently guards against
+// an over-broad fix: serializing per-entity must not collapse into global
+// serialization. Two jobs for different entities, both blocked on the same
+// gate, must both be able to start before either releases -- proving they
+// run on separate workers concurrently rather than queued behind each other.
+func TestSNWritebackDispatcher_DifferentEntitiesRunConcurrently(t *testing.T) {
+	failures := &recordingSNWritebackFailures{}
+	d := NewSNWritebackDispatcher(failures)
+
+	var mu sync.Mutex
+	startedCount := 0
+	bothStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	makeWriteFn := func() func(context.Context) error {
+		return func(context.Context) error {
+			mu.Lock()
+			startedCount++
+			n := startedCount
+			mu.Unlock()
+			if n == 2 {
+				close(bothStarted)
+			}
+			<-release
+			return nil
+		}
+	}
+
+	d.Dispatch(context.Background(), "case", "case-A", "update", map[string]string{}, makeWriteFn())
+	d.Dispatch(context.Background(), "case", "case-B", "update", map[string]string{}, makeWriteFn())
+
+	select {
+	case <-bothStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected both different-entity jobs to start concurrently; per-entity serialization must not become global serialization")
+	}
+	close(release)
+}
+
 func TestSNWritebackDispatcher_DetachesFromCallerContext(t *testing.T) {
 	failures := &recordingSNWritebackFailures{}
 	d := NewSNWritebackDispatcher(failures)
