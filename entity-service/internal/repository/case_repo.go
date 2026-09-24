@@ -63,6 +63,72 @@ var caseSeverityFromEnum = map[string]domain.CaseSeverity{
 	"S4": domain.CaseSeverityLow,
 }
 
+// caseResolutionCodeToEnum maps domain.CaseResolutionCode (verified against
+// ServiceNow's live resolution-code picklist -- see that type's own doc
+// comment) to "case".resolution_code's real case_resolution_code_enum
+// labels (migration 000018). All but three match by identity once compared
+// side by side; those three don't, and are spelled out explicitly rather
+// than guessed:
+//   - ConsideredForRoadmapAlt/SolvedWorkaroundProvidedAlt are ServiceNow's
+//     own duplicate picklist entries for the same underlying meaning (two
+//     sys_ids, one concept) -- the Postgres enum only has one canonical
+//     label for each, so both map to it.
+//   - AbruptlyClosedDueToNonResponsiveness (domain) is
+//     ABRUPTLY_CLOSED_DUE_TO_NON_RESPONSIVENESS_THROUGH_AUTO_CLOSURE in the
+//     Postgres enum -- a longer label for the identical concept.
+//
+// Without this, GetCaseByID's read side (which used to cast the stored enum
+// label straight into domain.CaseResolutionCode with no mapping at all)
+// rendered the long-form label back to callers verbatim -- not a value any
+// domain.CaseResolutionCode constant declares -- for every case resolved as
+// "abruptly closed due to non-responsiveness". See caseResolutionCodeFromEnum
+// for the read-side fix this same map now also makes possible.
+var caseResolutionCodeToEnum = map[domain.CaseResolutionCode]string{
+	domain.CaseResolutionCodeSolvedFixedBySupportGuidanceProvided: "SOLVED_FIXED_BY_SUPPORT_GUIDANCE_PROVIDED",
+	domain.CaseResolutionCodeSolvedFixedByClosingRelatedIncident:  "SOLVED_FIXED_BY_CLOSING_RELATED_INCIDENT",
+	domain.CaseResolutionCodeSolvedFixedByClosingRelatedRDTicket:  "SOLVED_FIXED_BY_CLOSING_RELATED_RD_TICKET",
+	domain.CaseResolutionCodeSolvedWorkaroundProvided:             "SOLVED_WORKAROUND_PROVIDED",
+	domain.CaseResolutionCodeSolvedByCustomer:                     "SOLVED_BY_CUSTOMER",
+	domain.CaseResolutionCodeConsideredForRoadmap:                 "CONSIDERED_FOR_ROADMAP",
+	domain.CaseResolutionCodeInconclusiveOutOfScope:               "INCONCLUSIVE_OUT_OF_SCOPE",
+	domain.CaseResolutionCodeInconclusiveCannotReproduce:          "INCONCLUSIVE_CANNOT_REPRODUCE",
+	domain.CaseResolutionCodeInconclusiveNoWorkaround:             "INCONCLUSIVE_NO_WORKAROUND",
+	domain.CaseResolutionCodeDuplicateIssue:                       "DUPLICATE_ISSUE",
+	domain.CaseResolutionCodeVoidedCanceled:                       "VOIDED_CANCELED",
+	domain.CaseResolutionCodeOnHold:                               "ON_HOLD",
+	domain.CaseResolutionCodeConsideredForRoadmapAlt:              "CONSIDERED_FOR_ROADMAP",
+	domain.CaseResolutionCodeSolvedFixedTheIssue:                  "SOLVED_FIXED_THE_ISSUE",
+	domain.CaseResolutionCodeSolvedWorkaroundProvidedAlt:          "SOLVED_WORKAROUND_PROVIDED",
+	domain.CaseResolutionCodeSolvedByContributor:                  "SOLVED_BY_CONTRIBUTOR",
+	domain.CaseResolutionCodeSolvedByNovera:                       "SOLVED_BY_NOVERA",
+	domain.CaseResolutionCodeAbruptlyClosedDueToNonResponsiveness: "ABRUPTLY_CLOSED_DUE_TO_NON_RESPONSIVENESS_THROUGH_AUTO_CLOSURE",
+}
+
+// caseResolutionCodeFromEnum is caseResolutionCodeToEnum's inverse for reads
+// (GetCaseByID). The two Alt domain values and the long-form
+// THROUGH_AUTO_CLOSURE label have no distinct inverse -- a stored row only
+// ever needs to render whichever single canonical domain value its enum
+// label maps back to, never the ServiceNow-side duplicate a caller might
+// have written it through.
+var caseResolutionCodeFromEnum = map[string]domain.CaseResolutionCode{
+	"SOLVED_FIXED_BY_SUPPORT_GUIDANCE_PROVIDED": domain.CaseResolutionCodeSolvedFixedBySupportGuidanceProvided,
+	"SOLVED_FIXED_BY_CLOSING_RELATED_INCIDENT":  domain.CaseResolutionCodeSolvedFixedByClosingRelatedIncident,
+	"SOLVED_FIXED_BY_CLOSING_RELATED_RD_TICKET": domain.CaseResolutionCodeSolvedFixedByClosingRelatedRDTicket,
+	"SOLVED_WORKAROUND_PROVIDED":                domain.CaseResolutionCodeSolvedWorkaroundProvided,
+	"SOLVED_BY_CUSTOMER":                        domain.CaseResolutionCodeSolvedByCustomer,
+	"CONSIDERED_FOR_ROADMAP":                    domain.CaseResolutionCodeConsideredForRoadmap,
+	"INCONCLUSIVE_OUT_OF_SCOPE":                 domain.CaseResolutionCodeInconclusiveOutOfScope,
+	"INCONCLUSIVE_CANNOT_REPRODUCE":             domain.CaseResolutionCodeInconclusiveCannotReproduce,
+	"INCONCLUSIVE_NO_WORKAROUND":                domain.CaseResolutionCodeInconclusiveNoWorkaround,
+	"DUPLICATE_ISSUE":                           domain.CaseResolutionCodeDuplicateIssue,
+	"VOIDED_CANCELED":                           domain.CaseResolutionCodeVoidedCanceled,
+	"ON_HOLD":                                   domain.CaseResolutionCodeOnHold,
+	"SOLVED_FIXED_THE_ISSUE":                    domain.CaseResolutionCodeSolvedFixedTheIssue,
+	"SOLVED_BY_CONTRIBUTOR":                     domain.CaseResolutionCodeSolvedByContributor,
+	"SOLVED_BY_NOVERA":                          domain.CaseResolutionCodeSolvedByNovera,
+	"ABRUPTLY_CLOSED_DUE_TO_NON_RESPONSIVENESS_THROUGH_AUTO_CLOSURE": domain.CaseResolutionCodeAbruptlyClosedDueToNonResponsiveness,
+}
+
 // caseLikeWorkItemTypes is validCaseType's (case_service.go) five values,
 // spelled as the real work_item_type_enum labels: the work_item types
 // GetCaseByID/SearchCases treat as "a case" -- each is a shared-PK
@@ -238,6 +304,44 @@ type CaseRepository interface {
 	// slice rather than an error: this is a default watch list, not a
 	// requirement.
 	AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error)
+	// UpdateCaseAssignee sets work_item.assigned_to_id to userID -- already
+	// resolved and validated as a real "user" row by the caller (CaseService.
+	// updateCaseAssignee, via GetUserByEmail) -- and bumps updated_on/updated_by.
+	// Returns the new updated_on. Returns a NotFoundError if caseID does not exist.
+	UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error)
+	// AcknowledgeCase atomically claims the case for actorID if nobody has
+	// acknowledged it yet (work_item.acknowledged_by_user_id IS NULL), or
+	// leaves it untouched if someone already has -- the same idempotent
+	// "claim once" semantics domain.UpdateCaseRequest.Acknowledge's own doc
+	// comment documents for the ServiceNow data source. Returns whether the
+	// case was already acknowledged before this call, a reference to whoever
+	// holds the acknowledgement now (this call's actor if newly claimed, else
+	// whoever claimed it first), the case's number, and updated_on (only
+	// bumped when this call did the claiming). Returns a NotFoundError if
+	// caseID does not exist.
+	AcknowledgeCase(ctx context.Context, caseID, actorID, actorEmail string) (alreadyAcknowledged bool, acknowledgedBy domain.AssignedEngineerRef, number string, updatedOn time.Time, err error)
+	// UpdateCaseParent sets work_item.parent_id (migration 000036, a generic
+	// work_item self-reference), already read the other direction by
+	// GetCaseByID's own ParentCase. In its own dedicated method, not the
+	// field bundle below, because sn_case_service.go's own UpdateCase keeps
+	// parentId fully exclusive of every other field in the same request --
+	// mirrored here so the two data sources accept the same combinations.
+	// Returns the new updated_on. Returns a NotFoundError if caseID does not
+	// exist, a ValidationError if parentID does not.
+	UpdateCaseParent(ctx context.Context, caseID, parentID, callerEmail string) (time.Time, error)
+	// UpdateCaseFields writes any subset of the "plain field" PATCH fields
+	// CaseService.UpdateCase's combinable-field-bundle branch accepts --
+	// exactly the columns req's own non-nil pointers name, split across
+	// work_item (Subject/Description/DeploymentID/DeployedProductID/
+	// BestCaseFixEta/MostLikelyFixEta/WorstCaseFixEta/WorkaroundProvided) and
+	// "case" (RelatedCaseID only -- see this method's own comment for why
+	// ResolutionCode/Cause/CloseNotes/IssueType are deliberately not among
+	// them). actorID/actorEmail are only used when req.WorkaroundProvided is
+	// non-nil, to stamp who (re)marked it. work_item.updated_on/updated_by
+	// are always bumped, even when only "case" columns changed, matching
+	// every sibling UpdateCase branch. Returns a NotFoundError if req.ID does
+	// not exist.
+	UpdateCaseFields(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
 	// SearchCaseActivities returns a paginated, newest-first feed combining
 	// the case's comments (comment, migration 000037) and complete
 	// attachments (case_attachment, migration 000043) into one merged
@@ -812,7 +916,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		cv.CloseNotes = closeNotes
 	}
 	if resolutionCode != nil {
-		rc := domain.CaseResolutionCode(*resolutionCode)
+		rc := caseResolutionCodeFromEnum[*resolutionCode]
 		cv.ResolutionCode = &rc
 	}
 	if escalationLevel != nil {
@@ -1120,13 +1224,25 @@ func (r *caseRepo) SearchCaseComments(ctx context.Context, req domain.SearchCase
 // labels by UpdateCase below (state/work_state upper-cased, severity mapped
 // through caseSeverityToEnum) -- case_state_enum's "CLOSED" is what $2 = ”
 // compares a non-empty state against here, not the domain value "closed".
+// $5/$6/$7 (resolutionCode/cause/closeNotes) are only ever non-empty/non-nil
+// when req.State is also set to closed/solution_proposed -- CaseService.
+// UpdateCase enforces that gate before this query ever runs, mirroring
+// sn_case_service.go's own identical restriction ("resolutionCode, cause,
+// and closeNotes are only allowed when state is closed or
+// solution_proposed"). closeNotes uses COALESCE rather than the ”-sentinel
+// trick the other five use, since "" is itself a meaningful value to write
+// there (clearing existing notes), not a stand-in for "not provided" --
+// unlike an enum column, where ” is never a valid domain value anyway.
 const updateCaseQuery = `
 	WITH updated_case AS (
 		UPDATE "case"
-		SET state      = CASE WHEN $2 <> '' THEN $2::case_state_enum ELSE state END,
-		    severity   = CASE WHEN $3 <> '' THEN $3::case_severity_enum ELSE severity END,
-		    work_state = CASE WHEN $4 <> '' THEN $4::case_work_state_enum ELSE work_state END,
-		    closed_on  = CASE WHEN $2 = 'CLOSED' THEN NOW() WHEN $2 <> '' AND $2 <> 'CLOSED' THEN NULL ELSE closed_on END
+		SET state           = CASE WHEN $2 <> '' THEN $2::case_state_enum ELSE state END,
+		    severity        = CASE WHEN $3 <> '' THEN $3::case_severity_enum ELSE severity END,
+		    work_state      = CASE WHEN $4 <> '' THEN $4::case_work_state_enum ELSE work_state END,
+		    closed_on       = CASE WHEN $2 = 'CLOSED' THEN NOW() WHEN $2 <> '' AND $2 <> 'CLOSED' THEN NULL ELSE closed_on END,
+		    resolution_code = CASE WHEN $5 <> '' THEN $5::case_resolution_code_enum ELSE resolution_code END,
+		    cause           = CASE WHEN $6 <> '' THEN $6::case_cause_enum ELSE cause END,
+		    close_notes     = COALESCE($7, close_notes)
 		WHERE id = $1
 		RETURNING id, severity, issue_type, state, work_state, closed_on
 	),
@@ -1191,11 +1307,23 @@ func (r *caseRepo) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest)
 	if req.WorkState != nil {
 		workState = strings.ToUpper(string(*req.WorkState))
 	}
+	resolutionCode := ""
+	if req.ResolutionCode != nil {
+		enumVal, ok := caseResolutionCodeToEnum[*req.ResolutionCode]
+		if !ok {
+			return domain.Case{}, nil, &apierror.ValidationError{Msg: "resolutionCode contains invalid value: " + string(*req.ResolutionCode)}
+		}
+		resolutionCode = enumVal
+	}
+	cause := ""
+	if req.Cause != nil {
+		cause = string(*req.Cause)
+	}
 
 	// req.Severity == nil: severity can't change, so there's nothing to
 	// race on — skip the transaction/lock overhead entirely.
 	if req.Severity == nil {
-		c, err := scanUpdatedCase(r.db.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState))
+		c, err := scanUpdatedCase(r.db.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState, resolutionCode, cause, req.CloseNotes))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Case{}, nil, &apierror.NotFoundError{Msg: "case not found"}
 		}
@@ -1223,7 +1351,7 @@ func (r *caseRepo) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest)
 		return domain.Case{}, nil, fmt.Errorf("update case: lock row: %w", err)
 	}
 
-	c, err := scanUpdatedCase(tx.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState))
+	c, err := scanUpdatedCase(tx.QueryRow(ctx, updateCaseQuery, req.ID, state, severity, workState, resolutionCode, cause, req.CloseNotes))
 	if err != nil {
 		return domain.Case{}, nil, fmt.Errorf("update case: %w", err)
 	}
@@ -1969,6 +2097,208 @@ func (r *caseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID strin
 		ids = append(ids, *id)
 	}
 	return ids, nil
+}
+
+// UpdateCaseAssignee implements CaseRepository.
+func (r *caseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+	var updatedOn time.Time
+	err := r.db.QueryRow(ctx,
+		`UPDATE work_item SET assigned_to_id = $2, updated_on = NOW(), updated_by = $3 WHERE id = $1 RETURNING updated_on`,
+		caseID, userID, callerEmail,
+	).Scan(&updatedOn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("update case assignee: %w", err)
+	}
+	return updatedOn, nil
+}
+
+// UpdateCaseParent implements CaseRepository.
+func (r *caseRepo) UpdateCaseParent(ctx context.Context, caseID, parentID, callerEmail string) (time.Time, error) {
+	var updatedOn time.Time
+	err := r.db.QueryRow(ctx,
+		`UPDATE work_item SET parent_id = $2::uuid, updated_on = NOW(), updated_by = $3 WHERE id = $1 RETURNING updated_on`,
+		caseID, parentID, callerEmail,
+	).Scan(&updatedOn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+	}
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return time.Time{}, &apierror.ValidationError{Msg: "parentId does not exist: " + pgErr.Detail}
+		}
+		return time.Time{}, fmt.Errorf("update case parent: %w", err)
+	}
+	return updatedOn, nil
+}
+
+// AcknowledgeCase implements CaseRepository. The claim itself
+// (work_item.acknowledged_by_user_id IS NULL) and the read of whoever ends up
+// holding it run in one transaction with a row lock, so two concurrent
+// Acknowledge calls on the same case can't both believe they were first.
+func (r *caseRepo) AcknowledgeCase(ctx context.Context, caseID, actorID, actorEmail string) (bool, domain.AssignedEngineerRef, string, time.Time, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, domain.AssignedEngineerRef{}, "", time.Time{}, fmt.Errorf("acknowledge case: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var existingAckID *string
+	err = tx.QueryRow(ctx, `SELECT acknowledged_by_user_id FROM work_item WHERE id = $1 FOR UPDATE`, caseID).Scan(&existingAckID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, domain.AssignedEngineerRef{}, "", time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+	}
+	if err != nil {
+		return false, domain.AssignedEngineerRef{}, "", time.Time{}, fmt.Errorf("acknowledge case: lock work_item: %w", err)
+	}
+
+	alreadyAcknowledged := existingAckID != nil
+	if !alreadyAcknowledged {
+		if _, err := tx.Exec(ctx,
+			`UPDATE work_item SET acknowledged_by_user_id = $2, updated_on = NOW(), updated_by = $3 WHERE id = $1`,
+			caseID, actorID, actorEmail,
+		); err != nil {
+			return false, domain.AssignedEngineerRef{}, "", time.Time{}, fmt.Errorf("acknowledge case: claim: %w", err)
+		}
+	}
+
+	// Read back from the row regardless of which branch above ran, so the
+	// acknowledger's name/email always come from the same "user" join --
+	// whoever holds the claim now, not necessarily this call's actor.
+	var number string
+	var updatedOn time.Time
+	var ackID, ackName, ackEmail *string
+	err = tx.QueryRow(ctx, `
+		SELECT wi.number, wi.updated_on, u.id, COALESCE(u.name, NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), '')), u.email
+		FROM work_item wi
+		LEFT JOIN "user" u ON u.id = wi.acknowledged_by_user_id
+		WHERE wi.id = $1`, caseID,
+	).Scan(&number, &updatedOn, &ackID, &ackName, &ackEmail)
+	if err != nil {
+		return false, domain.AssignedEngineerRef{}, "", time.Time{}, fmt.Errorf("acknowledge case: read back: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, domain.AssignedEngineerRef{}, "", time.Time{}, fmt.Errorf("acknowledge case: commit tx: %w", err)
+	}
+
+	ackBy := domain.AssignedEngineerRef{ID: stringOrEmpty(ackID), Name: stringOrEmpty(ackName), Email: ackEmail}
+	return alreadyAcknowledged, ackBy, number, updatedOn, nil
+}
+
+// UpdateCaseFields implements CaseRepository. "case" is updated first (if it
+// has any columns to touch), so a nonexistent id or a related_case_id
+// foreign-key violation is caught before work_item's own row is touched at
+// all -- if req names no "case" column, work_item's own UPDATE...WHERE
+// alone still correctly reports not-found via zero rows.
+func (r *caseRepo) UpdateCaseFields(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("update case fields: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// resolutionCode/cause/closeNotes are deliberately NOT handled here, even
+	// though they also live on "case" -- sn_case_service.go's own UpdateCase
+	// only allows them alongside state (and only when transitioning to
+	// closed/solution_proposed), so they're written by CaseRepository.
+	// UpdateCase's own "case" branch, not this generic field bundle. issueType
+	// is ALSO not handled here for the mirror-image reason: on that same SN
+	// contract it's accepted only as part of a type transfer ("type" itself
+	// has no Postgres implementation), never as a standalone field.
+	var caseSets []string
+	caseArgs := []any{req.ID}
+	idx := 2
+	if req.RelatedCaseID != nil {
+		caseSets = append(caseSets, fmt.Sprintf("related_case_id = $%d::uuid", idx))
+		caseArgs = append(caseArgs, *req.RelatedCaseID)
+		idx++
+	}
+	if len(caseSets) > 0 {
+		tag, err := tx.Exec(ctx, `UPDATE "case" SET `+strings.Join(caseSets, ", ")+` WHERE id = $1`, caseArgs...)
+		if err != nil {
+			if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return time.Time{}, &apierror.ValidationError{Msg: "relatedCaseId does not exist: " + pgErr.Detail}
+			}
+			return time.Time{}, fmt.Errorf("update case fields: case: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+		}
+	}
+
+	// work_item.updated_on/updated_by are bumped unconditionally, matching
+	// every sibling UpdateCase branch, even when only "case" columns above
+	// changed.
+	wiSets := []string{"updated_on = NOW()", "updated_by = $2"}
+	wiArgs := []any{req.ID, actorEmail}
+	widx := 3
+	if req.Subject != nil {
+		wiSets = append(wiSets, fmt.Sprintf("subject = $%d", widx))
+		wiArgs = append(wiArgs, *req.Subject)
+		widx++
+	}
+	if req.Description != nil {
+		wiSets = append(wiSets, fmt.Sprintf("description = $%d", widx))
+		wiArgs = append(wiArgs, *req.Description)
+		widx++
+	}
+	if req.DeploymentID != nil {
+		wiSets = append(wiSets, fmt.Sprintf("deployment_id = $%d::uuid", widx))
+		wiArgs = append(wiArgs, *req.DeploymentID)
+		widx++
+	}
+	if req.DeployedProductID != nil {
+		wiSets = append(wiSets, fmt.Sprintf("deployed_product_id = $%d::uuid", widx))
+		wiArgs = append(wiArgs, *req.DeployedProductID)
+		widx++
+	}
+	if req.BestCaseFixEta != nil {
+		wiSets = append(wiSets, fmt.Sprintf("best_case_eta = $%d::date", widx))
+		wiArgs = append(wiArgs, *req.BestCaseFixEta)
+		widx++
+	}
+	if req.MostLikelyFixEta != nil {
+		wiSets = append(wiSets, fmt.Sprintf("most_likely_eta = $%d::date", widx))
+		wiArgs = append(wiArgs, *req.MostLikelyFixEta)
+		widx++
+	}
+	if req.WorstCaseFixEta != nil {
+		wiSets = append(wiSets, fmt.Sprintf("worst_case_eta = $%d::date", widx))
+		wiArgs = append(wiArgs, *req.WorstCaseFixEta)
+		widx++
+	}
+	if req.WorkaroundProvided != nil {
+		if *req.WorkaroundProvided {
+			wiSets = append(wiSets, fmt.Sprintf("workaround_provided_on = NOW(), workaround_provided_by_user_id = $%d::uuid", widx))
+			wiArgs = append(wiArgs, actorID)
+			widx++
+		} else {
+			// Recalling the workaround clears both fields -- see
+			// domain.UpdateCaseRequest.WorkaroundProvided's own doc comment:
+			// unlike Acknowledge, false is a meaningful, accepted value here.
+			wiSets = append(wiSets, "workaround_provided_on = NULL, workaround_provided_by_user_id = NULL")
+		}
+	}
+
+	var updatedOn time.Time
+	err = tx.QueryRow(ctx, `UPDATE work_item SET `+strings.Join(wiSets, ", ")+` WHERE id = $1 RETURNING updated_on`, wiArgs...).Scan(&updatedOn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+	}
+	if err != nil {
+		if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return time.Time{}, &apierror.ValidationError{Msg: "one or more referenced IDs do not exist: " + pgErr.Detail}
+		}
+		return time.Time{}, fmt.Errorf("update case fields: work_item: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return time.Time{}, fmt.Errorf("update case fields: commit tx: %w", err)
+	}
+	return updatedOn, nil
 }
 
 // scanTag scans a single (id, name) row into a domain.Tag. tag has no

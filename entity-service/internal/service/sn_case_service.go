@@ -3165,6 +3165,80 @@ func (s *snCaseService) patchCaseWatchList(ctx context.Context, caseID string, u
 	return result, nil
 }
 
+// patchCaseAssignee performs a bare ServiceNow PATCH setting assigneeEmail,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to AssigneeEmail for DATA_SOURCE=postgres-servicenow-dual-write's async
+// assignee mirror (see caseService.updateCaseAssignee's own doc comment).
+// The response is discarded -- the dispatcher only needs to know whether the
+// write succeeded.
+func (s *snCaseService) patchCaseAssignee(ctx context.Context, caseID, assigneeEmail string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{AssigneeEmail: &assigneeEmail})
+	return err
+}
+
+// patchCaseAcknowledge performs a bare ServiceNow PATCH setting acknowledge,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to Acknowledge for DATA_SOURCE=postgres-servicenow-dual-write's async
+// acknowledge mirror (see caseService.acknowledgeCase's own doc comment).
+// ServiceNow's own first-write-wins handling makes this safe to call even if
+// ServiceNow's copy was somehow already acknowledged by someone else.
+func (s *snCaseService) patchCaseAcknowledge(ctx context.Context, caseID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	acknowledge := true
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{Acknowledge: &acknowledge})
+	return err
+}
+
+// patchCaseParent performs a bare ServiceNow PATCH setting parentId, with
+// none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment,
+// extended to ParentID for DATA_SOURCE=postgres-servicenow-dual-write's
+// async parent mirror (see caseService.updateCaseParent's own doc comment).
+// parentID is a platform UUID, converted to ServiceNow's sysid before
+// dispatch (outbound rule, see this file's own conventions doc).
+func (s *snCaseService) patchCaseParent(ctx context.Context, caseID, parentID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	sysid := uuidToSysid(parentID)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{ParentID: &sysid})
+	return err
+}
+
+// patchCaseFieldsBundle performs a bare ServiceNow PATCH covering the part
+// of UpdateCase's combinable "plain field" bundle the backing service
+// actually implements today -- BestCaseFixEta/MostLikelyFixEta/
+// WorstCaseFixEta/WorkaroundProvided -- with none of UpdateCase's
+// enrichment reads, no-op detection, or event publishing -- same reasoning
+// as patchCaseFields's own doc comment, extended to this bundle for
+// DATA_SOURCE=postgres-servicenow-dual-write's async mirror (see
+// caseService.updateCaseFields's own doc comment).
+//
+// Subject/Description/DeploymentID/DeployedProductID/RelatedCaseID are
+// deliberately never sent here, even though CaseRepository.UpdateCaseFields
+// happily writes all of them to Postgres: snUpdateCasePayload's own field
+// comments say Title/Description/DeploymentID/DeployedProductID/
+// RelatedCaseID are "not yet available in the backing service" -- sending
+// them would either be silently ignored or fail the whole PATCH, and either
+// way would leave ServiceNow's copy no better off than not mirroring them
+// at all. Returns nil without a PATCH call when req sets none of the four
+// supported fields, rather than sending an empty no-op request.
+func (s *snCaseService) patchCaseFieldsBundle(ctx context.Context, caseID string, req domain.UpdateCaseRequest) error {
+	if req.BestCaseFixEta == nil && req.MostLikelyFixEta == nil && req.WorstCaseFixEta == nil && req.WorkaroundProvided == nil {
+		return nil
+	}
+	token := middleware.UserIDTokenFromContext(ctx)
+	payload := snUpdateCasePayload{
+		BestCaseFixEta:     req.BestCaseFixEta,
+		MostLikelyFixEta:   req.MostLikelyFixEta,
+		WorstCaseFixEta:    req.WorstCaseFixEta,
+		WorkaroundProvided: req.WorkaroundProvided,
+	}
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	return err
+}
+
 type snCreateAttachmentPayload struct {
 	ReferenceID   string  `json:"referenceId"`
 	ReferenceType string  `json:"referenceType"`
