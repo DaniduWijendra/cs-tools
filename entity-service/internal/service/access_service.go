@@ -118,7 +118,7 @@ func (s *accessService) scopeForUser(ctx context.Context, email string) (AccessS
 		if err != nil {
 			return AccessScope{}, err
 		}
-		return AccessScope{ProjectIDs: ids}, nil
+		return AccessScope{ProjectIDs: ids, ViewerEmail: email}, nil
 	case internal && !other:
 		return AccessScope{Unrestricted: true}, nil
 	default:

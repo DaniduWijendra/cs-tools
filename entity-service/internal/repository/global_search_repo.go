@@ -53,9 +53,21 @@ func caseTypeRef(workItemType string) domain.ReferenceTableItem {
 // SearchScope restricts a search to some projects. Unrestricted means all of
 // them; otherwise only ProjectIDs, and an empty list matches nothing (it is
 // never treated as "no filter").
+//
+// ViewerEmail is the resolved caller's own email (populated alongside
+// ProjectIDs in AccessService.scopeForUser) -- set here rather than
+// re-derived from auth.IdentityFromContext at the repository layer, so
+// identity resolution stays in the one place resolveScopeForID's own doc
+// comment already designates for it. Only announcement-visibility reads
+// (case_repo.go's setAnnouncementVisibility) currently use it; every other
+// scoped query still only reads Unrestricted/ProjectIDs. It is left empty
+// for an Unrestricted caller resolved from an internal client credential
+// with no attached user token -- safe, since Unrestricted alone already
+// grants that path full access regardless of email.
 type SearchScope struct {
 	Unrestricted bool
 	ProjectIDs   []string
+	ViewerEmail  string
 }
 
 // scopePredicate is the single place the "row belongs to one of the caller's

@@ -664,6 +664,36 @@ func (r *caseRepo) CreateCaseFromServiceNow(ctx context.Context, req domain.Crea
 // other extension table has them); state/cause/close_notes/resolved_on/
 // closed_on are COALESCEd across whichever extension table actually matches
 // wi.type (caseLike*Column consts) since exactly one ever does.
+// setAnnouncementVisibility sets the two session-local GUCs the announcement
+// table's row-level-security policy (migration 000085) reads: app.is_internal
+// (Unrestricted -- true bypasses the restriction entirely, matching every
+// other scoped read's own all-access meaning for that flag) and
+// app.viewer_email (scope.ViewerEmail -- ignored by the policy once
+// is_internal is true, so it is never required to be non-empty here).
+//
+// tx must be the SAME transaction the caller runs its announcement-touching
+// query in, and this must be called before that query. Postgres's
+// set_config(..., true) ("LOCAL" scoping) only takes effect for the
+// remainder of the CURRENT transaction and reverts automatically at
+// COMMIT/ROLLBACK -- called as a bare statement outside a transaction, or in
+// a different transaction than the query that depends on it, it silently
+// has no effect on that query (confirmed empirically, not just reasoned
+// about, while building this policy). Calling it as its own statement ahead
+// of the query -- never inlined into the query's own WHERE clause -- is
+// also required: the query planner is free to evaluate the RLS policy's
+// qual before a non-leakproof function call like set_config() and was
+// observed doing exactly that under an index scan, silently using
+// whatever value the GUC held before this call ran.
+func setAnnouncementVisibility(ctx context.Context, tx pgx.Tx, scope SearchScope) error {
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.is_internal', $1, true)", fmt.Sprintf("%t", scope.Unrestricted)); err != nil {
+		return fmt.Errorf("set announcement visibility: is_internal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.viewer_email', $1, true)", scope.ViewerEmail); err != nil {
+		return fmt.Errorf("set announcement visibility: viewer_email: %w", err)
+	}
+	return nil
+}
+
 func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope) (domain.CaseView, error) {
 	var cv domain.CaseView
 	var (
@@ -703,7 +733,21 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		scopeClause = " AND " + scopePredicate("wi.project_id", 2)
 		scopeArgs = append(scopeArgs, scope.ProjectIDs)
 	}
-	err := r.db.QueryRow(ctx,
+
+	// A transaction, not a bare r.db.QueryRow, is required here purely so
+	// setAnnouncementVisibility's set_config calls and this SELECT share one
+	// transaction -- see that function's own comment for why. This read
+	// itself is not otherwise transactional.
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return domain.CaseView{}, fmt.Errorf("get case by id: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setAnnouncementVisibility(ctx, tx, scope); err != nil {
+		return domain.CaseView{}, fmt.Errorf("get case by id: %w", err)
+	}
+
+	err = tx.QueryRow(ctx,
 		`SELECT wi.id, wi.number, wi.wso2_id, wi.type::TEXT,
 		        wi.description, c.severity::TEXT, c.issue_type::TEXT, c.work_state::TEXT,
 		        `+caseLikeStateColumn+`, `+caseLikeCauseColumn+`, `+caseLikeCloseNotesColumn+`,
@@ -733,7 +777,13 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		 LEFT JOIN work_item pw ON pw.id = wi.parent_id
 		 LEFT JOIN "case" rc ON rc.id = c.related_case_id
 		 LEFT JOIN work_item rc_wi ON rc_wi.id = rc.id
-		 WHERE wi.id = $1 AND wi.type = ANY(`+caseLikeWorkItemTypes+`)`+scopeClause, scopeArgs...,
+		 -- The AND NOT (...) excludes an ANNOUNCEMENT row the caller can't
+		 -- see under migration 000085's RLS policy: without it, ann.* alone
+		 -- would come back null while wi.subject/wi.description (an
+		 -- unprotected, separate table) still leaked through. See
+		 -- SearchCases's identical condition for the fuller comment.
+		 WHERE wi.id = $1 AND wi.type = ANY(`+caseLikeWorkItemTypes+`)
+		   AND NOT (wi.type = 'ANNOUNCEMENT' AND ann.id IS NULL)`+scopeClause, scopeArgs...,
 	).Scan(
 		&cv.ID, &cv.Number, &internalID, &caseType,
 		&description, &severity, &issueType, &workState,
@@ -756,6 +806,9 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 	}
 	if err != nil {
 		return domain.CaseView{}, fmt.Errorf("get case by id: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.CaseView{}, fmt.Errorf("get case by id: commit: %w", err)
 	}
 	cv.InternalID = stringOrEmpty(internalID)
 	// work_item.description (migration 000035) has no NOT NULL constraint,
@@ -1489,6 +1542,19 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		argIdx++
 	}
 
+	// The announcement RLS policy (migration 000085) only hides ann.* --
+	// work_item itself (subject, description, existence) is a completely
+	// separate, unprotected table, so an ANNOUNCEMENT-typed work_item whose
+	// announcement row was filtered out would otherwise still surface here
+	// with those two fields intact and only its state/cause/close_notes/etc.
+	// nulled out. This excludes it from the result (and from the COUNT
+	// below, via the identical countQuery WHERE) entirely, rather than
+	// leaking a partially-redacted row. Every other case-like type is
+	// unaffected: none of them use a policy that could make ann.id (or
+	// their own extension row) legitimately absent for a row that should
+	// still be visible.
+	where += " AND NOT (wi.type = 'ANNOUNCEMENT' AND ann.id IS NULL)"
+
 	// Fields shared with anyOf branches are built by one function so the two
 	// cannot drift apart (see caseFieldPredicates for the column notes).
 	fieldPreds, fieldArgs, nextIdx, err := caseFieldPredicates(caseFieldSet{
@@ -1686,15 +1752,41 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 
 	eg, egCtx := errgroup.WithContext(ctx)
 
+	// COUNT and SELECT each open their own transaction (rather than sharing
+	// one) specifically so they can still run concurrently on separate pool
+	// connections, same as before this change -- a pgx.Tx is bound to a
+	// single connection, so one shared transaction across both goroutines
+	// would have serialized them. setAnnouncementVisibility's set_config
+	// calls must be repeated per transaction; there is no way to set them
+	// once and have both connections see it.
 	eg.Go(func() error {
-		if err := r.db.QueryRow(egCtx, countQuery, filterArgs...).Scan(&total); err != nil {
+		tx, err := r.db.Begin(egCtx)
+		if err != nil {
+			return fmt.Errorf("count cases: begin tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback(egCtx) }()
+		if err := setAnnouncementVisibility(egCtx, tx, scope); err != nil {
 			return fmt.Errorf("count cases: %w", err)
+		}
+		if err := tx.QueryRow(egCtx, countQuery, filterArgs...).Scan(&total); err != nil {
+			return fmt.Errorf("count cases: %w", err)
+		}
+		if err := tx.Commit(egCtx); err != nil {
+			return fmt.Errorf("count cases: commit: %w", err)
 		}
 		return nil
 	})
 
 	eg.Go(func() error {
-		rows, err := r.db.Query(egCtx, dataQuery, dataArgs...)
+		tx, err := r.db.Begin(egCtx)
+		if err != nil {
+			return fmt.Errorf("query cases: begin tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback(egCtx) }()
+		if err := setAnnouncementVisibility(egCtx, tx, scope); err != nil {
+			return fmt.Errorf("query cases: %w", err)
+		}
+		rows, err := tx.Query(egCtx, dataQuery, dataArgs...)
 		if err != nil {
 			return fmt.Errorf("query cases: %w", err)
 		}
@@ -1794,6 +1886,13 @@ func (r *caseRepo) SearchCases(ctx context.Context, req domain.SearchCasesReques
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("iterate cases: %w", err)
+		}
+		// Rows must be fully consumed and closed before Commit -- the
+		// deferred rows.Close() above only fires on this closure's own
+		// return, which is after Commit in program order.
+		rows.Close()
+		if err := tx.Commit(egCtx); err != nil {
+			return fmt.Errorf("query cases: commit: %w", err)
 		}
 		cases = result
 		return nil
