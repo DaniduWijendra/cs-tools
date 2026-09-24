@@ -52,11 +52,34 @@ var commentEnumToType = map[string]domain.CommentType{
 type commentService struct {
 	repo     repository.CommentRepository
 	userRepo repository.UserRepository
+	// snWriteback/snMirror back CreateComment's best-effort, asynchronous
+	// ServiceNow mirror write under DATA_SOURCE=postgres-servicenow-dual-write
+	// -- both nil in every other mode. Set only via
+	// NewCommentServiceWithSNWriteback. snMirror is the ServiceNow-backed
+	// CommentService (from NewServiceNowCommentService); its CreateComment is
+	// already a bare POST with no GET-before-write or notification side
+	// effects (unlike case's own comment mirror, which needed a dedicated
+	// CreateBareCaseComment for exactly that reason -- see that method's own
+	// doc comment), so it is called directly here rather than through a
+	// narrower interface.
+	snWriteback *SNWritebackDispatcher
+	snMirror    CommentService
 }
 
 // NewCommentService constructs a CommentService backed by Postgres.
 func NewCommentService(repo repository.CommentRepository, userRepo repository.UserRepository) CommentService {
 	return &commentService{repo: repo, userRepo: userRepo}
+}
+
+// NewCommentServiceWithSNWriteback is NewCommentService plus the wiring
+// DATA_SOURCE=postgres-servicenow-dual-write needs: CreateComment dispatches
+// a best-effort, asynchronous ServiceNow mirror write onto mirror after the
+// Postgres write commits -- see CreateComment's own doc comment. A separate
+// constructor rather than extending NewCommentService's own signature, same
+// reasoning as NewCaseServiceWithSNWriteback's own doc comment: every other
+// call site keeps working completely unchanged.
+func NewCommentServiceWithSNWriteback(repo repository.CommentRepository, userRepo repository.UserRepository, dispatcher *SNWritebackDispatcher, mirror CommentService) CommentService {
+	return &commentService{repo: repo, userRepo: userRepo, snWriteback: dispatcher, snMirror: mirror}
 }
 
 func commentRowToDomain(row repository.CommentRow) domain.Comment {
@@ -173,6 +196,26 @@ func (s *commentService) CreateComment(ctx context.Context, req domain.CreateCom
 	row, err := s.repo.CreateComment(ctx, req.ReferenceID, req.ReferenceType, enumType, req.Content, createdBy)
 	if err != nil {
 		return domain.CreateCommentResponse{}, err
+	}
+
+	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
+	// only (snWriteback/snMirror are both nil otherwise -- see
+	// NewCommentServiceWithSNWriteback's own doc comment). Postgres has
+	// already committed by this point and is fully authoritative for the
+	// comment -- this mirror's only job is making sure ServiceNow's copy of
+	// the comment text exists too. req.Type == CommentTypeActivity can never
+	// reach here (rejected above), so unlike case's comment mirror there is
+	// no type to skip dispatch for.
+	if s.snWriteback != nil {
+		mirrorReq := req
+		mirrorReq.CreatedBy = createdBy
+		s.snWriteback.Dispatch(ctx, "comment", req.ReferenceID, "create",
+			map[string]any{"referenceId": req.ReferenceID, "referenceType": req.ReferenceType, "type": req.Type, "content": req.Content},
+			func(writeCtx context.Context) error {
+				_, err := s.snMirror.CreateComment(writeCtx, mirrorReq)
+				return err
+			},
+		)
 	}
 
 	return domain.CreateCommentResponse{

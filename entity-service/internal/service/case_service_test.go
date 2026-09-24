@@ -60,7 +60,8 @@ type stubCaseRepo struct {
 	createCaseComment        func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
 	createCase               func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
 	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
-	setCaseWatchList         func(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error)
+	addCaseTag               func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
+	setCaseWatchList         func(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error)
 	accountDefaultWatcherIDs func(ctx context.Context, projectID string) ([]string, error)
 }
 
@@ -142,7 +143,10 @@ func (s *stubCaseRepo) ConfirmCaseAttachment(ctx context.Context, id string) (do
 	}
 	panic("not implemented")
 }
-func (s *stubCaseRepo) AddCaseTag(context.Context, string, string, string) (domain.Tag, error) {
+func (s *stubCaseRepo) AddCaseTag(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+	if s.addCaseTag != nil {
+		return s.addCaseTag(ctx, caseID, label, actorEmail)
+	}
 	panic("not implemented")
 }
 func (s *stubCaseRepo) RemoveCaseTag(context.Context, string, string, string) error {
@@ -151,9 +155,9 @@ func (s *stubCaseRepo) RemoveCaseTag(context.Context, string, string, string) er
 func (s *stubCaseRepo) SearchTags(context.Context, string, string, int) ([]domain.Tag, error) {
 	panic("not implemented")
 }
-func (s *stubCaseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, callerEmail string) ([]domain.WatchListUser, time.Time, error) {
+func (s *stubCaseRepo) SetCaseWatchList(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error) {
 	if s.setCaseWatchList != nil {
-		return s.setCaseWatchList(ctx, caseID, userIDs, callerEmail)
+		return s.setCaseWatchList(ctx, caseID, userIDs, actorEmail)
 	}
 	panic("not implemented")
 }
@@ -249,7 +253,6 @@ func TestCaseService_SearchCases_RejectsUnsupportedPostgresFields(t *testing.T) 
 		name   string
 		filter domain.CaseFieldFilter
 	}{
-		{name: "parentId", filter: domain.CaseFieldFilter{Field: "parentId", Op: "eq", Values: []string{"00000000-0000-0000-0000-000000000000"}}},
 		{name: "product", filter: domain.CaseFieldFilter{Field: "product", Op: "in", Values: []string{"API Manager"}}},
 		{name: "projectType", filter: domain.CaseFieldFilter{Field: "projectType", Op: "in", Values: []string{"Subscription"}}},
 		{name: "creTeam", filter: domain.CaseFieldFilter{Field: "creTeam", Op: "in", Values: []string{"00000000-0000-0000-0000-000000000000"}}},
@@ -304,6 +307,7 @@ func TestCaseService_SearchCases_SupportedFieldsStillReachRepository(t *testing.
 		{name: "projectOnboardingStatus notIn", filter: domain.CaseFieldFilter{Field: "projectOnboardingStatus", Op: "notIn", Values: []string{"In-Progress"}}},
 		{name: "taskSLABusinessElapsedPercent gte", filter: domain.CaseFieldFilter{Field: "taskSLABusinessElapsedPercent", Op: "gte", Values: []string{"80"}}},
 		{name: "taskSLABusinessElapsedPercent lte 0", filter: domain.CaseFieldFilter{Field: "taskSLABusinessElapsedPercent", Op: "lte", Values: []string{"0"}}},
+		{name: "parentId eq", filter: domain.CaseFieldFilter{Field: "parentId", Op: "eq", Values: []string{uuid1}}},
 	}
 
 	for _, tc := range cases {
@@ -623,6 +627,8 @@ type stubMirrorCaseService struct {
 	createCase            func(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error)
 	patchCaseFieldsFn     func(ctx context.Context, caseID string, state *domain.CaseState, severity *domain.CaseSeverity, workState *domain.CaseWorkState) (domain.UpdatedCase, error)
 	createBareCaseComment func(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error)
+	addCaseTagAsFn        func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
+	patchCaseWatchListFn  func(ctx context.Context, caseID string, userIDs []string) (domain.UpdatedCase, error)
 }
 
 func (s *stubMirrorCaseService) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
@@ -635,6 +641,14 @@ func (s *stubMirrorCaseService) patchCaseFields(ctx context.Context, caseID stri
 
 func (s *stubMirrorCaseService) CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error) {
 	return s.createBareCaseComment(ctx, caseID, commentType, content)
+}
+
+func (s *stubMirrorCaseService) AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+	return s.addCaseTagAsFn(ctx, caseID, label, actorEmail)
+}
+
+func (s *stubMirrorCaseService) patchCaseWatchList(ctx context.Context, caseID string, userIDs []string) (domain.UpdatedCase, error) {
+	return s.patchCaseWatchListFn(ctx, caseID, userIDs)
 }
 
 // TestCaseService_UpdateCase_MirrorsFieldToServiceNow is the pilot's core
@@ -1979,4 +1993,164 @@ func TestCaseService_CreateCase_Announcement_SNFailureLeavesPostgresUntouched(t 
 	if err == nil {
 		t.Fatal("expected an error when ServiceNow never accepts the announcement")
 	}
+}
+
+// TestCaseService_AddCaseTag_MirrorsToServiceNow covers the writeback wiring:
+// on a successful Postgres tag attach, the mirror's AddCaseTagAs is
+// dispatched asynchronously (by label, not the Postgres tag id -- see
+// addCaseTagAs's own doc comment) and does not block or affect the response.
+func TestCaseService_AddCaseTag_MirrorsToServiceNow(t *testing.T) {
+	called := make(chan struct {
+		caseID, label, actorEmail string
+	}, 1)
+	mirror := &stubMirrorCaseService{
+		addCaseTagAsFn: func(_ context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+			called <- struct{ caseID, label, actorEmail string }{caseID, label, actorEmail}
+			return domain.Tag{}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		addCaseTag: func(_ context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+			return domain.Tag{ID: "t-1", Label: label}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	userRepo := stubUserRepo{getUserByEmail: func(context.Context, string) (domain.User, error) {
+		return domain.User{ID: testDeploymentUUID, Email: "jane.doe@example.com"}, nil
+	}}
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.AddCaseTag(ctx, testDeploymentUUID, "patch-me"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case got := <-called:
+		if got.caseID != testDeploymentUUID || got.label != "patch-me" {
+			t.Errorf("mirror got %+v, want caseId=%q label=%q", got, testDeploymentUUID, "patch-me")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.AddCaseTagAs was never called")
+	}
+	if got := failures.count(); got != 0 {
+		t.Errorf("expected 0 sn_writeback_failures records for a successful mirror, got %d", got)
+	}
+}
+
+// TestCaseService_AddCaseTag_MirrorFailureRecordsWritebackFailure covers the
+// failure half: Postgres already succeeded, so the call must still report
+// success, but the mirror error lands in sn_writeback_failures for manual
+// backfill.
+func TestCaseService_AddCaseTag_MirrorFailureRecordsWritebackFailure(t *testing.T) {
+	mirror := &stubMirrorCaseService{
+		addCaseTagAsFn: func(context.Context, string, string, string) (domain.Tag, error) {
+			return domain.Tag{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubCaseRepo{
+		addCaseTag: func(_ context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+			return domain.Tag{ID: "t-1", Label: label}, nil
+		},
+		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			return domain.CaseView{}, nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	userRepo := stubUserRepo{getUserByEmail: func(context.Context, string) (domain.User, error) {
+		return domain.User{ID: testDeploymentUUID, Email: "jane.doe@example.com"}, nil
+	}}
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.AddCaseTag(ctx, testDeploymentUUID, "patch-me"); err != nil {
+		t.Fatalf("expected the Postgres-side success to be reported despite the mirror failure, got %v", err)
+	}
+
+	waitFor(t, func() bool { return failures.count() == 1 })
+}
+
+// TestCaseService_UpdateCase_WatchList_MirrorsToServiceNow covers the
+// writeback wiring for WatchList specifically: on a successful Postgres
+// watch-list replace, the mirror's patchCaseWatchList (the bare,
+// read-free/event-free PATCH -- see that method's own doc comment) is
+// dispatched asynchronously with the same user ids, and does not block or
+// affect the response.
+func TestCaseService_UpdateCase_WatchList_MirrorsToServiceNow(t *testing.T) {
+	userIDs := []string{testDeploymentUUID}
+
+	called := make(chan []string, 1)
+	mirror := &stubMirrorCaseService{
+		patchCaseWatchListFn: func(_ context.Context, caseID string, gotUserIDs []string) (domain.UpdatedCase, error) {
+			called <- gotUserIDs
+			return domain.UpdatedCase{}, nil
+		},
+	}
+	repo := &stubCaseRepo{
+		setCaseWatchList: func(_ context.Context, caseID string, gotUserIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error) {
+			return nil, time.Now(), nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	userRepo := stubUserRepo{getUserByEmail: func(context.Context, string) (domain.User, error) {
+		return domain.User{ID: testDeploymentUUID, Email: "jane.doe@example.com"}, nil
+	}}
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	req := domain.UpdateCaseRequest{ID: testDeploymentUUID, WatchList: &userIDs}
+	if _, err := svc.UpdateCase(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case got := <-called:
+		if len(got) != 1 || got[0] != testDeploymentUUID {
+			t.Errorf("mirror got %v, want %v", got, userIDs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.patchCaseWatchList was never called")
+	}
+	if got := failures.count(); got != 0 {
+		t.Errorf("expected 0 sn_writeback_failures records for a successful mirror, got %d", got)
+	}
+}
+
+// TestCaseService_UpdateCase_WatchList_MirrorFailureRecordsWritebackFailure
+// covers the failure half: Postgres already succeeded, so the call must
+// still report success, but the mirror error lands in sn_writeback_failures
+// for manual backfill.
+func TestCaseService_UpdateCase_WatchList_MirrorFailureRecordsWritebackFailure(t *testing.T) {
+	userIDs := []string{testDeploymentUUID}
+
+	mirror := &stubMirrorCaseService{
+		patchCaseWatchListFn: func(context.Context, string, []string) (domain.UpdatedCase, error) {
+			return domain.UpdatedCase{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubCaseRepo{
+		setCaseWatchList: func(context.Context, string, []string, string) ([]domain.WatchListUser, time.Time, error) {
+			return nil, time.Now(), nil
+		},
+	}
+	failures := &recordingSNWritebackFailures{}
+	dispatcher := NewSNWritebackDispatcher(failures)
+	userRepo := stubUserRepo{getUserByEmail: func(context.Context, string) (domain.User, error) {
+		return domain.User{ID: testDeploymentUUID, Email: "jane.doe@example.com"}, nil
+	}}
+	svc := NewCaseServiceWithSNWriteback(repo, userRepo, nil, alwaysUnrestrictedAccess{}, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	req := domain.UpdateCaseRequest{ID: testDeploymentUUID, WatchList: &userIDs}
+	if _, err := svc.UpdateCase(ctx, req); err != nil {
+		t.Fatalf("expected the Postgres-side success to be reported despite the mirror failure, got %v", err)
+	}
+
+	waitFor(t, func() bool { return failures.count() == 1 })
 }

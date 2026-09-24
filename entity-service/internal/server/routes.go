@@ -523,6 +523,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		snUserService = service.NewServiceNowUserService(serviceNowIntegrationServiceClient)
 	}
 
+	// snWriteback is the single shared SNWritebackDispatcher instance for
+	// DATA_SOURCE=postgres-servicenow-dual-write, backing every entity below
+	// that mirrors a Postgres write to ServiceNow asynchronously (case,
+	// call_request, time_card, comment, change_request, case tags/watch
+	// list). Constructed once here rather than once per entity so they all
+	// share one bounded worker pool and one sn_writeback_failures repository
+	// -- see SNWritebackDispatcher's own doc comment. nil in every other
+	// DataSource mode.
+	var snWriteback *service.SNWritebackDispatcher
+	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
+		snWriteback = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
+	}
+
 	caseRepo := repository.NewCaseRepository(db)
 	var activeCaseSvc service.CaseService
 	// caseAttachmentOverrideSvc, when non-nil, is the CaseService case
@@ -583,8 +596,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// and it is caseAttachmentOverrideSvc below, for case attachments
 		// specifically.
 		snCaseMirrorSvc := service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, nil, nil, snUserService, cfg.CustomerRoles)
-		caseWriteback := service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
-		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, caseWriteback, snCaseMirrorSvc)
+		activeCaseSvc = service.NewCaseServiceWithSNWriteback(caseRepo, userRepo, eventPublisher, accessSvc, snWriteback, snCaseMirrorSvc)
 		// Case ATTACHMENTS are ServiceNow-only in this mode, permanently —
 		// unlike case metadata (CREATE/UPDATE above), not a pilot scope
 		// decision but a hard requirement: the sftpgo-backed Postgres
@@ -629,9 +641,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// data source, so these routes are registered for both data sources.
 	callRequestRepo := repository.NewCallRequestRepository(db)
 	var activeCallRequestSvc service.CallRequestService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeCallRequestSvc = service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateCallRequest mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see callRequestService's own doc comment for why
+		// UpdateCallRequest does not (Postgres-first CREATE means
+		// customer_call.id has no ServiceNow counterpart to target).
+		snCallRequestMirrorSvc := service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
+		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, snWriteback, snCallRequestMirrorSvc)
+	default:
 		activeCallRequestSvc = service.NewCallRequestService(callRequestRepo, userRepo)
 	}
 	callRequestHandler := handler.NewCallRequestHandler(activeCallRequestSvc)
@@ -671,13 +691,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	case config.DataSourceServiceNow:
 		activeChangeRequestSvc = service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
 	case config.DataSourcePostgresServiceNowDualWrite:
-		// Pilot extension: change request CREATE only, same ServiceNow-first,
-		// synchronous shape as the case/incident pilots above -- see
-		// changeRequestService.createChangeRequestSNFirst's own doc comment.
-		// Reads stay on Postgres in this mode; snChangeRequestMirrorSvc's
-		// CreateChangeRequest is the only method of it this mode ever calls.
+		// Pilot extension: change request CREATE (ServiceNow-first,
+		// synchronous -- see changeRequestService.createChangeRequestSNFirst's
+		// own doc comment) plus PatchChangeRequest's best-effort, asynchronous
+		// ServiceNow mirror write (see that method's own doc comment). Reads
+		// stay on Postgres in this mode; snChangeRequestMirrorSvc's
+		// CreateChangeRequest/PatchChangeRequest are the only methods of it
+		// this mode ever calls.
 		snChangeRequestMirrorSvc := service.NewServiceNowChangeRequestService(serviceNowIntegrationServiceClient)
-		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNMirror(changeRequestRepo, snChangeRequestMirrorSvc)
+		activeChangeRequestSvc = service.NewChangeRequestServiceWithSNWriteback(changeRequestRepo, snChangeRequestMirrorSvc, snWriteback)
 	default:
 		activeChangeRequestSvc = service.NewChangeRequestService(changeRequestRepo)
 	}
@@ -685,9 +707,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 
 	timeCardRepo := repository.NewTimeCardRepository(db)
 	var activeTimeCardSvc service.TimeCardService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeTimeCardSvc = service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateTimeCard mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see timeCardService's own doc comment for why
+		// Update/DeleteTimeCard do not (Postgres-first CREATE means
+		// time_card.id has no ServiceNow counterpart to target).
+		snTimeCardMirrorSvc := service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
+		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, snWriteback, snTimeCardMirrorSvc)
+	default:
 		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
 	}
 	timeCardHandler := handler.NewTimeCardHandler(activeTimeCardSvc)
@@ -877,9 +907,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 
 	commentRepo := repository.NewCommentRepository(db)
 	var activeCommentSvc service.CommentService
-	if cfg.DataSource == config.DataSourceServiceNow {
+	switch cfg.DataSource {
+	case config.DataSourceServiceNow:
 		activeCommentSvc = service.NewServiceNowCommentService(serviceNowIntegrationServiceClient)
-	} else {
+	case config.DataSourcePostgresServiceNowDualWrite:
+		// CreateComment mirrors to ServiceNow, asynchronously, after
+		// Postgres -- see commentService's own doc comment. This is separate
+		// from case's own comment mirror (CreateCaseComment/CreateBareCaseComment),
+		// which backs the case-scoped comment routes, not these generic ones.
+		snCommentMirrorSvc := service.NewServiceNowCommentService(serviceNowIntegrationServiceClient)
+		activeCommentSvc = service.NewCommentServiceWithSNWriteback(commentRepo, userRepo, snWriteback, snCommentMirrorSvc)
+	default:
 		activeCommentSvc = service.NewCommentService(commentRepo, userRepo)
 	}
 	commentHandler := handler.NewCommentHandler(activeCommentSvc)
