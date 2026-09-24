@@ -53,6 +53,10 @@ type mockEmailSender struct {
 	// block, when non-nil, holds every send open until it is closed, so a
 	// test can have a second Handle call arrive mid-send.
 	block chan struct{}
+	// onSend, when set, runs as the send completes -- a seam for a test
+	// that needs something to happen between the e-mail going out and the
+	// step being recorded.
+	onSend func()
 }
 
 func (m *mockEmailSender) FromAddress() string { return "noreply@wso2.com" }
@@ -68,6 +72,9 @@ func (m *mockEmailSender) SendEmailFrom(ctx context.Context, from string, to, cc
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, sentEmail{from: from, to: to, bcc: bcc, subject: subject, htmlBody: htmlBody})
+	if m.onSend != nil {
+		m.onSend()
+	}
 	if m.errFor != nil {
 		return m.errFor(to)
 	}

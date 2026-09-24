@@ -19,6 +19,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -69,8 +70,12 @@ type mockStepRecorder struct {
 	emailAlreadySent bool
 	emailSentErr     error
 	emailSentChecks  int
-	mu               sync.Mutex
-	calls            []entity.OnboardingStepRequest
+	// requireLiveContext makes every write fail if its context has already
+	// been cancelled, which is how the detached-context test detects a
+	// regression rather than relying on timing.
+	requireLiveContext bool
+	mu                 sync.Mutex
+	calls              []entity.OnboardingStepRequest
 }
 
 // emailAlreadySent is what EmailAlreadySent answers; emailSentErr makes the
@@ -83,6 +88,11 @@ func (m *mockStepRecorder) EmailAlreadySent(context.Context, string) (bool, erro
 }
 
 func (m *mockStepRecorder) RecordOnboardingStep(ctx context.Context, req entity.OnboardingStepRequest) error {
+	if m.requireLiveContext {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("step write received a cancelled context: %w", err)
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, req)
@@ -640,4 +650,28 @@ func TestDispatcher_Handle_ProjectContactInvited_LedgerNotConsultedWhenEmailIsOf
 	if steps.emailSentChecks != 0 {
 		t.Errorf("ledger consulted %d times with the email step off, want 0", steps.emailSentChecks)
 	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation
+// pins the detached recording context. A shutdown cancels the handler's
+// context, and the EMAIL=SUCCEEDED write must still happen: losing it while
+// the offset commit is also lost is precisely how one invitation becomes
+// two.
+func TestDispatcher_Handle_ProjectContactInvited_LedgerWriteSurvivesCancellation(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{}, &mockEmailSender{}, &mockStepRecorder{}
+	steps.requireLiveContext = true
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancelled the instant the email is sent, standing in for a shutdown
+	// landing between the send and the write that records it.
+	email.onSend = cancel
+
+	if err := d.Handle(ctx, invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("emails sent = %d, want 1", len(email.calls))
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
 }

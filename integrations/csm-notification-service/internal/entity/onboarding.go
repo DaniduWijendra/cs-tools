@@ -65,12 +65,19 @@ type OnboardingStepRequest struct {
 	// EventType is the event this write is a reaction to —
 	// events.TypeProjectContactInvited for every write this service makes.
 	EventType string `json:"eventType"`
-	// EventModifiedOn is the version this write is based on. entity-service
-	// only lets a write move a row's status/lastError/eventType forward when
-	// its eventModifiedOn is not older than the stored one, so a caller must
-	// send a value that increases with each genuine reattempt — see
-	// dispatch.Dispatcher.recordOnboardingStep for why this service sends
-	// its processing time rather than a Salesforce timestamp.
+	// EventModifiedOn is the version this write is based on, and it is the
+	// wire contract with entity-service's upsert rule: a write only moves a
+	// row's status/lastError/eventType when its eventModifiedOn is **not
+	// older** than the stored one. Not-older, not newer — equal timestamps
+	// land, which is what lets a retry of the same version rewrite its own
+	// row.
+	//
+	// Send the Salesforce LastModifiedDate the event carries, never
+	// time.Now(): the timestamp identifies the membership version this
+	// outcome belongs to, so a delayed delivery of an older invitation is
+	// correctly rejected by entity-service instead of overwriting a newer
+	// result. dispatch.Dispatcher.recordOnboardingStep falls back to the
+	// processing time only when the payload carries no timestamp at all.
 	EventModifiedOn time.Time `json:"eventModifiedOn"`
 	Email           string    `json:"email"`
 	ContactSfID     string    `json:"contactSfId,omitempty"`

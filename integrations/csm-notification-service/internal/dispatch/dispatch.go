@@ -1623,7 +1623,15 @@ func (d *Dispatcher) recordOnboardingStep(ctx context.Context, p events.ProjectC
 	if lastErr != nil {
 		req.LastError = lastErr.Error()
 	}
-	recordCtx, cancel := context.WithTimeout(ctx, recordOnboardingStepTimeout)
+	// Detached from the handler's context on purpose. A shutdown or a
+	// consumer-group rebalance cancels ctx, and it would cancel this write
+	// too -- losing the EMAIL=SUCCEEDED row for an e-mail that has already
+	// gone out. The same shutdown is likely to lose the offset commit, so
+	// the record comes back on restart, finds no record of the send, and
+	// invites the person twice. One cause, both failures, which is exactly
+	// the coincidence the ledger check relies on being rare. The timeout
+	// still bounds it, so a hung ledger cannot hold the handler.
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordOnboardingStepTimeout)
 	defer cancel()
 	if err := d.onboarding.Steps.RecordOnboardingStep(recordCtx, req); err != nil {
 		slog.ErrorContext(ctx, "dispatch: failed to record onboarding step; continuing",
