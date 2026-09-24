@@ -842,6 +842,25 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 	if exclusiveCount > 1 || (exclusiveCount == 1 && combinableCount > 0) {
 		return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "state, severity, workState, watchList, assigneeEmail, parentId, and acknowledge cannot be combined with each other or with any other field in the same request"}
 	}
+	// resolutionCode/cause/closeNotes ride along with a state change only --
+	// same restriction sn_case_service.go's own UpdateCase enforces
+	// (snResolutionStates: closed or solution_proposed only). They have no
+	// meaning attached to a severity or workState change, and no meaning at
+	// all without a state change in the same request. This must run before
+	// the branch dispatch below: neither exclusiveCount nor combinableCount
+	// counts these three fields at all (found by CodeRabbit review on
+	// PR #1986), so a request like {assigneeEmail, resolutionCode} or
+	// {subject, closeNotes} would otherwise sail past both checks above and
+	// have its resolution fields silently dropped by whichever branch
+	// handles the other field, never validated or written.
+	if req.ResolutionCode != nil || req.Cause != nil || req.CloseNotes != nil {
+		if req.State == nil {
+			return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "resolutionCode, cause, and closeNotes are only allowed when state is also provided"}
+		}
+		if *req.State != domain.CaseStateClosed && *req.State != domain.CaseStateSolutionProposed {
+			return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "resolutionCode, cause, and closeNotes are only allowed when state is closed or solution_proposed"}
+		}
+	}
 
 	if req.WatchList != nil {
 		return s.updateCaseWatchList(ctx, req)
@@ -870,20 +889,6 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 	}
 	if req.WorkState != nil && !validCaseWorkState[*req.WorkState] {
 		return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(*req.WorkState)}
-	}
-	// resolutionCode/cause/closeNotes ride along with a state change only --
-	// same restriction sn_case_service.go's own UpdateCase enforces
-	// (snResolutionStates: closed or solution_proposed only). They have no
-	// meaning attached to a severity or workState change, and no meaning at
-	// all without a state change in the same request.
-	hasResolutionFields := req.ResolutionCode != nil || req.Cause != nil || req.CloseNotes != nil
-	if hasResolutionFields {
-		if req.State == nil {
-			return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "resolutionCode, cause, and closeNotes are only allowed when state is also provided"}
-		}
-		if *req.State != domain.CaseStateClosed && *req.State != domain.CaseStateSolutionProposed {
-			return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "resolutionCode, cause, and closeNotes are only allowed when state is closed or solution_proposed"}
-		}
 	}
 	if req.Cause != nil && !validCaseCause[*req.Cause] {
 		return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "cause contains invalid value: " + string(*req.Cause)}
@@ -1263,11 +1268,28 @@ func (s *caseService) updateCaseFields(ctx context.Context, req domain.UpdateCas
 	}
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
-	// only -- same Postgres-first/async posture as every sibling branch above.
+	// only -- same Postgres-first/async posture as every sibling branch
+	// above. The recorded payload carries the actual values patchCaseFieldsBundle
+	// forwards to ServiceNow (only the four fields that backing service
+	// actually supports -- see that method's own doc comment), not a fixed
+	// field-name placeholder, so a manual replay off sn_writeback_failures
+	// has something to replay.
 	if s.snWriteback != nil {
 		if patcher, ok := s.snMirror.(snFieldsBundlePatcher); ok {
-			s.snWriteback.Dispatch(ctx, "case", req.ID, "update",
-				map[string]any{"id": req.ID, "fields": "subject/description/deploymentId/deployedProductId/bestCaseFixEta/mostLikelyFixEta/worstCaseFixEta/relatedCaseId/workaroundProvided"},
+			writebackPayload := map[string]any{"id": req.ID}
+			if req.BestCaseFixEta != nil {
+				writebackPayload["bestCaseFixEta"] = *req.BestCaseFixEta
+			}
+			if req.MostLikelyFixEta != nil {
+				writebackPayload["mostLikelyFixEta"] = *req.MostLikelyFixEta
+			}
+			if req.WorstCaseFixEta != nil {
+				writebackPayload["worstCaseFixEta"] = *req.WorstCaseFixEta
+			}
+			if req.WorkaroundProvided != nil {
+				writebackPayload["workaroundProvided"] = *req.WorkaroundProvided
+			}
+			s.snWriteback.Dispatch(ctx, "case", req.ID, "update", writebackPayload,
 				func(writeCtx context.Context) error {
 					return patcher.patchCaseFieldsBundle(writeCtx, req.ID, req)
 				},

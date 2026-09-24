@@ -627,6 +627,13 @@ func TestCaseService_UpdateCase_RejectsExclusiveFieldCombinations(t *testing.T) 
 		{name: "acknowledge+subject", req: domain.UpdateCaseRequest{ID: testDeploymentUUID, Acknowledge: &ack, Subject: &subject}},
 		{name: "state+subject", req: domain.UpdateCaseRequest{ID: testDeploymentUUID, State: &open, Subject: &subject}},
 		{name: "nothing", req: domain.UpdateCaseRequest{ID: testDeploymentUUID}},
+		// Regression cases for a CodeRabbit finding on PR #1986:
+		// resolutionCode/cause/closeNotes aren't counted by exclusiveCount or
+		// combinableCount at all, so these used to sail past the mutual-
+		// exclusion check and get silently dropped by whichever branch
+		// handled the other field.
+		{name: "assigneeEmail+closeNotes", req: domain.UpdateCaseRequest{ID: testDeploymentUUID, AssigneeEmail: &email, CloseNotes: &subject}},
+		{name: "subject+closeNotes", req: domain.UpdateCaseRequest{ID: testDeploymentUUID, Subject: &subject, CloseNotes: &subject}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1548,15 +1548,41 @@ with none of `UpdateCase`'s own enrichment reads or no-op detection --
 exactly `patchCaseFields`/`patchCaseWatchList`'s own established shape,
 reached through four new narrow interfaces
 (`snAssigneePatcher`/`snAcknowledgePatcher`/`snParentPatcher`/
-`snFieldsBundlePatcher`). `patchCaseFieldsBundle` forwards only the fields
-`req` actually set, converting `DeploymentID`/`DeployedProductID`/
-`RelatedCaseID` from platform UUIDs to ServiceNow sysids first (the
-standard outbound rule) -- `Subject` maps to the payload's own `Title`
-field, the two being the same concept under different names on either side
-of this boundary. The acknowledge mirror only fires when this call's own
-claim actually succeeded (`!alreadyAcknowledged`) -- a repeat
+`snFieldsBundlePatcher`). The acknowledge mirror only fires when this call's
+own claim actually succeeded (`!alreadyAcknowledged`) -- a repeat
 `Acknowledge:true` against an already-acknowledged case changed nothing in
 Postgres, so there's nothing new to mirror.
+
+**`patchCaseFieldsBundle` mirrors only four of the nine combinable
+fields.** `snUpdateCasePayload`'s own field comments say
+`Title`/`Description`/`DeploymentID`/`DeployedProductID`/`RelatedCaseID`
+are each "not yet available in the backing service" -- a first version of
+this mirror sent them anyway (Subject onto the payload's `Title`,
+`DeploymentID`/`DeployedProductID`/`RelatedCaseID` converted to sysids),
+which a CodeRabbit review on PR #1986 caught: sending a field the backing
+service doesn't implement either gets silently ignored or fails the whole
+PATCH, neither of which leaves ServiceNow any better synced than not
+mirroring it. Only `BestCaseFixEta`/`MostLikelyFixEta`/`WorstCaseFixEta`/
+`WorkaroundProvided` are confirmed available (their own doc comments say
+so) and actually forwarded; the function returns `nil` without a PATCH
+call at all when a request sets none of those four, rather than sending an
+empty no-op. All nine fields still write to Postgres via
+`CaseRepository.UpdateCaseFields` regardless -- this only narrows what the
+*ServiceNow mirror* attempts. The `sn_writeback_failures` payload for this
+branch (`updateCaseFields`'s own `Dispatch` call) records the actual values
+of those same four fields, not a fixed field-name placeholder, so a failed
+mirror can actually be replayed by hand.
+
+**`resolutionCode`/`cause`/`closeNotes`'s state-gating check runs before
+the branch dispatch, not after.** The same CodeRabbit review caught that
+neither `exclusiveCount` nor `combinableCount` counts these three fields at
+all, so a request like `{assigneeEmail, resolutionCode}` or `{subject,
+closeNotes}` used to sail past the mutual-exclusion check, get dispatched
+to `updateCaseAssignee`/`updateCaseFields`, and return 200 with the
+resolution fields silently ignored -- never validated, never written. The
+check now runs immediately after the `exclusiveCount`/`combinableCount`
+validation and before any branch (`WatchList`/`AssigneeEmail`/`ParentID`/
+`Acknowledge`/the combinable bundle) gets a chance to return early.
 
 ## Change requests
 

@@ -3206,40 +3206,34 @@ func (s *snCaseService) patchCaseParent(ctx context.Context, caseID, parentID st
 	return err
 }
 
-// patchCaseFieldsBundle performs a bare ServiceNow PATCH covering
-// UpdateCase's combinable "plain field" bundle (Subject/Description/
-// DeploymentID/DeployedProductID/BestCaseFixEta/MostLikelyFixEta/
-// WorstCaseFixEta/RelatedCaseID/WorkaroundProvided) in one round trip, with
-// none of UpdateCase's enrichment reads, no-op detection, or event
-// publishing -- same reasoning as patchCaseFields's own doc comment,
-// extended to this bundle for DATA_SOURCE=postgres-servicenow-dual-write's
-// async mirror (see caseService.updateCaseFields's own doc comment). Only
-// the fields req actually set are forwarded; DeploymentID/DeployedProductID/
-// RelatedCaseID are platform UUIDs, converted to ServiceNow sysids before
-// dispatch (outbound rule, see this file's own conventions doc). Subject
-// maps to the payload's own Title field -- the two are the same concept
-// under different names on either side of this data-source boundary.
+// patchCaseFieldsBundle performs a bare ServiceNow PATCH covering the part
+// of UpdateCase's combinable "plain field" bundle the backing service
+// actually implements today -- BestCaseFixEta/MostLikelyFixEta/
+// WorstCaseFixEta/WorkaroundProvided -- with none of UpdateCase's
+// enrichment reads, no-op detection, or event publishing -- same reasoning
+// as patchCaseFields's own doc comment, extended to this bundle for
+// DATA_SOURCE=postgres-servicenow-dual-write's async mirror (see
+// caseService.updateCaseFields's own doc comment).
+//
+// Subject/Description/DeploymentID/DeployedProductID/RelatedCaseID are
+// deliberately never sent here, even though CaseRepository.UpdateCaseFields
+// happily writes all of them to Postgres: snUpdateCasePayload's own field
+// comments say Title/Description/DeploymentID/DeployedProductID/
+// RelatedCaseID are "not yet available in the backing service" -- sending
+// them would either be silently ignored or fail the whole PATCH, and either
+// way would leave ServiceNow's copy no better off than not mirroring them
+// at all. Returns nil without a PATCH call when req sets none of the four
+// supported fields, rather than sending an empty no-op request.
 func (s *snCaseService) patchCaseFieldsBundle(ctx context.Context, caseID string, req domain.UpdateCaseRequest) error {
+	if req.BestCaseFixEta == nil && req.MostLikelyFixEta == nil && req.WorstCaseFixEta == nil && req.WorkaroundProvided == nil {
+		return nil
+	}
 	token := middleware.UserIDTokenFromContext(ctx)
 	payload := snUpdateCasePayload{
-		Title:              req.Subject,
-		Description:        req.Description,
 		BestCaseFixEta:     req.BestCaseFixEta,
 		MostLikelyFixEta:   req.MostLikelyFixEta,
 		WorstCaseFixEta:    req.WorstCaseFixEta,
 		WorkaroundProvided: req.WorkaroundProvided,
-	}
-	if req.DeploymentID != nil {
-		sysid := uuidToSysid(*req.DeploymentID)
-		payload.DeploymentID = &sysid
-	}
-	if req.DeployedProductID != nil {
-		sysid := uuidToSysid(*req.DeployedProductID)
-		payload.DeployedProductID = &sysid
-	}
-	if req.RelatedCaseID != nil {
-		sysid := uuidToSysid(*req.RelatedCaseID)
-		payload.RelatedCaseID = &sysid
 	}
 	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
 	return err
