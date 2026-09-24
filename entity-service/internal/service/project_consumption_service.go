@@ -384,9 +384,23 @@ func (s *projectConsumptionService) ProcessLicenseDownload(ctx context.Context, 
 	}
 
 	if status == int(domain.ConsumptionStatusGeneratedSecretKeys) {
-		license, err := s.choreoClient.GetDeploymentLicense(ctx, projectID, deploymentID, domain.DeploymentLicenseRequest{
+		req := domain.DeploymentLicenseRequest{
 			Email: email,
-		})
+		}
+		if s.repo != nil {
+			signingCtx, err := s.repo.GetSigningContext(ctx, projectID, deploymentID)
+			if err != nil {
+				slog.WarnContext(ctx, "failed to load signing context for licence download; falling back to direct download",
+					"projectId", projectID,
+					"deploymentId", deploymentID,
+					"err", err,
+				)
+			} else if signingCtx != nil && signingCtx.PrimarySecretKey != "" {
+				req.SigningContext = signingCtx
+			}
+		}
+
+		license, err := s.choreoClient.GetDeploymentLicense(ctx, projectID, deploymentID, req)
 		if err != nil {
 			return domain.License{}, fmt.Errorf("choreosubscription: get deployment license: %w", err)
 		}

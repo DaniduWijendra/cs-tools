@@ -143,8 +143,21 @@ type License struct {
 	Signature        string          `json:"signature"`
 }
 
+// SigningContext holds the credentials and metadata required by the licensing
+// service to sign a deployment licence locally.
+type SigningContext struct {
+	ClientID           string `json:"clientId"`
+	ClientSecret       string `json:"clientSecret"`
+	PrimarySecretKey   string `json:"primarySecretKey"`
+	SecondarySecretKey string `json:"secondarySecretKey,omitempty"`
+	LicenseSecrets     string `json:"licenseSecrets,omitempty"`
+	DeploymentName     string `json:"deploymentName"`
+	SubscriptionKey    string `json:"subscriptionKey"`
+}
+
 // DeploymentLicenseRequest is the request body for
 // POST /projects/{id}/deployments/{deploymentId}/license.
 type DeploymentLicenseRequest struct {
-	Email string `json:"email"`
+	Email          string          `json:"email"`
+	SigningContext *SigningContext `json:"signingContext,omitempty"`
 }

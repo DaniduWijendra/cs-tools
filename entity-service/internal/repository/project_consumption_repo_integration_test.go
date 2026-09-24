@@ -447,6 +447,32 @@ func TestIntegration_UnknownProjectOnWriteIsNotFound(t *testing.T) {
 	}
 }
 
+func TestIntegration_GetSigningContext(t *testing.T) {
+	repo, pool := newIntegrationRepo(t)
+
+	// Set credentials on the test project
+	_, err := pool.Exec(context.Background(), `
+		UPDATE project
+		SET client_id = 'test-client-id',
+		    client_secret = 'test-client-secret',
+		    primary_secret_key = 'test-primary-key',
+		    secondary_secret_key = 'test-secondary-key',
+		    license_secrets = 'test-license-secrets'
+		WHERE id = $1
+	`, testIntegrationProjectID)
+	if err != nil {
+		t.Fatalf("failed to update project credentials: %v", err)
+	}
+
+	ctx, err := repo.GetSigningContext(context.Background(), testIntegrationProjectID, "00000000-0000-0000-0000-000000000001")
+	if err != nil {
+		t.Fatalf("GetSigningContext failed: %v", err)
+	}
+	if ctx.ClientID != "test-client-id" || ctx.PrimarySecretKey != "test-primary-key" || ctx.LicenseSecrets != "test-license-secrets" {
+		t.Fatalf("unexpected signing context values: %+v", ctx)
+	}
+}
+
 // advance moves the fixture project to the given status, failing the test if it
 // cannot — used to reach the state a test actually cares about.
 func advance(t *testing.T, repo ProjectConsumptionRepository, status domain.ConsumptionStatus, next *domain.ProjectConsumption) {

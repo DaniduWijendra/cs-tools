@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,6 +47,10 @@ type ProjectConsumptionRepository interface {
 	// ErrConsumptionStatusStale is returned if stored status is already at or
 	// beyond the requested status.
 	Upsert(ctx context.Context, projectID string, next domain.ProjectConsumption) (domain.ProjectConsumption, error)
+
+	// GetSigningContext returns the credentials and metadata needed to sign a deployment
+	// licence for projectID and deploymentID.
+	GetSigningContext(ctx context.Context, projectID, deploymentID string) (*domain.SigningContext, error)
 }
 
 // ErrConsumptionStatusStale reports that the stored provisioning status is
@@ -251,5 +256,62 @@ func (r *projectConsumptionRepo) Upsert(ctx context.Context, projectID string, n
 		ConsumerKey:         clientID,
 		CreatedOn:           createdOn,
 		UpdatedOn:           updatedOn,
+	}, nil
+}
+
+// GetSigningContext returns the credentials and metadata needed to sign a deployment
+// licence for projectID and deploymentID.
+func (r *projectConsumptionRepo) GetSigningContext(ctx context.Context, projectID, deploymentID string) (*domain.SigningContext, error) {
+	const query = `
+		SELECT
+			COALESCE(p.client_id, ''),
+			COALESCE(p.client_secret, ''),
+			COALESCE(p.primary_secret_key, ''),
+			COALESCE(p.secondary_secret_key, ''),
+			COALESCE(p.license_secrets::text, ''),
+			p.key,
+			COALESCE(d.name, dp.name, '') AS deployment_name
+		FROM project p
+		LEFT JOIN deployment d ON d.id::text = $2 AND d.project_id = p.id
+		LEFT JOIN deployed_product dp ON dp.id::text = $2 AND dp.project_id = p.id
+		WHERE p.id::text = $1`
+
+	var (
+		clientID        string
+		clientSecret    string
+		primaryKey      string
+		secondaryKey    string
+		licenseSecrets  string
+		subscriptionKey string
+		deploymentName  string
+	)
+
+	err := r.db.QueryRow(ctx, query, projectID, deploymentID).Scan(
+		&clientID,
+		&clientSecret,
+		&primaryKey,
+		&secondaryKey,
+		&licenseSecrets,
+		&subscriptionKey,
+		&deploymentName,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, &apierror.NotFoundError{Msg: "project not found"}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get signing context: %w", err)
+	}
+
+	// Trim any enclosing quotes if license_secrets was stored in a JSONB column as a JSON string literal.
+	licenseSecrets = strings.Trim(licenseSecrets, "\"")
+
+	return &domain.SigningContext{
+		ClientID:           clientID,
+		ClientSecret:       clientSecret,
+		PrimarySecretKey:   primaryKey,
+		SecondarySecretKey: secondaryKey,
+		LicenseSecrets:     licenseSecrets,
+		DeploymentName:     deploymentName,
+		SubscriptionKey:    subscriptionKey,
 	}, nil
 }

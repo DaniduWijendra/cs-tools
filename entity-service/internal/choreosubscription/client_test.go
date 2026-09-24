@@ -325,3 +325,49 @@ func TestClient_GetDeploymentLicense(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_GetDeploymentLicense_SendsSigningContextWhenPresent(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(withToken(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"result": {
+				"success": true,
+				"license": {
+					"subscriptionData": {"k": "v"},
+					"signature": "sig"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	req := domain.DeploymentLicenseRequest{
+		Email: "test@example.com",
+		SigningContext: &domain.SigningContext{
+			ClientID:         "client-123",
+			ClientSecret:     "secret-456",
+			PrimarySecretKey: "primary-key",
+			DeploymentName:   "Production",
+			SubscriptionKey:  "SUB-KEY-1",
+		},
+	}
+	_, err := c.GetDeploymentLicense(context.Background(), "proj-1", "dep-1", req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rawCtx, ok := capturedBody["signingContext"]
+	if !ok || rawCtx == nil {
+		t.Fatal("expected signingContext in request body")
+	}
+	signingCtxMap, ok := rawCtx.(map[string]any)
+	if !ok {
+		t.Fatalf("expected signingContext to be map, got %T", rawCtx)
+	}
+	if signingCtxMap["clientId"] != "client-123" || signingCtxMap["deploymentName"] != "Production" {
+		t.Errorf("unexpected signingContext in payload: %+v", signingCtxMap)
+	}
+}

@@ -40,8 +40,18 @@ type fakeProjectConsumptionRepo struct {
 	getErr    error
 	upsertErr error
 
+	signingCtx    *domain.SigningContext
+	signingCtxErr error
+
 	gotUpsert   domain.ProjectConsumption
 	upsertCalls int
+}
+
+func (f *fakeProjectConsumptionRepo) GetSigningContext(_ context.Context, _, _ string) (*domain.SigningContext, error) {
+	if f.signingCtxErr != nil {
+		return nil, f.signingCtxErr
+	}
+	return f.signingCtx, nil
 }
 
 func (f *fakeProjectConsumptionRepo) Get(_ context.Context, projectID string) (domain.ProjectConsumption, string, string, error) {
@@ -334,6 +344,7 @@ type fakeChoreoSubscriptionClient struct {
 	generateSecretCalls int
 	updateStatusCalls   []choreosubscription.UpdateProjectStatusRequest
 	licenseCalls        int
+	lastLicenseReq      domain.DeploymentLicenseRequest
 }
 
 func (f *fakeChoreoSubscriptionClient) GetConsumptionStatus(_ context.Context, _ string, _ choreosubscription.ConsumptionStatusRequest) (choreosubscription.ConsumptionResult, error) {
@@ -366,8 +377,9 @@ func (f *fakeChoreoSubscriptionClient) UpdateProjectStatus(_ context.Context, _ 
 	return f.updateStatusRes, f.updateStatusErr
 }
 
-func (f *fakeChoreoSubscriptionClient) GetDeploymentLicense(_ context.Context, _, _ string, _ domain.DeploymentLicenseRequest) (domain.License, error) {
+func (f *fakeChoreoSubscriptionClient) GetDeploymentLicense(_ context.Context, _, _ string, req domain.DeploymentLicenseRequest) (domain.License, error) {
 	f.licenseCalls++
+	f.lastLicenseReq = req
 	return f.licenseRes, f.licenseErr
 }
 
@@ -674,5 +686,86 @@ func assertNotFound(t *testing.T, err error) {
 	var nfe *apierror.NotFoundError
 	if !errors.As(err, &nfe) {
 		t.Fatalf("expected an *apierror.NotFoundError so existence is not revealed, got %v", err)
+	}
+}
+
+func TestProcessLicenseDownload_PopulatesSigningContextWhenAvailable(t *testing.T) {
+	appID := "app-xyz"
+	expectedCtx := &domain.SigningContext{
+		ClientID:         "client-123",
+		ClientSecret:     "secret-456",
+		PrimarySecretKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		DeploymentName:   "Production",
+		SubscriptionKey:  "SUB-KEY-1",
+	}
+
+	repo := &fakeProjectConsumptionRepo{
+		name:       "Acme",
+		key:        "ACME",
+		state:      domain.ProjectConsumption{Status: domain.ConsumptionStatusGeneratedSecretKeys},
+		signingCtx: expectedCtx,
+	}
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:        5,
+				ApplicationID: &appID,
+			},
+		},
+		licenseRes: domain.License{
+			SubscriptionData: []byte(`{"k":"v"}`),
+			Signature:        "sig",
+		},
+	}
+
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "22222222-3333-4444-5555-666666666666", "user@example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lic.Signature != "sig" {
+		t.Errorf("got signature %s, want sig", lic.Signature)
+	}
+	if choreo.lastLicenseReq.SigningContext == nil {
+		t.Fatal("expected signingContext to be populated on license request")
+	}
+	if choreo.lastLicenseReq.SigningContext.ClientID != "client-123" {
+		t.Errorf("got clientId %s, want client-123", choreo.lastLicenseReq.SigningContext.ClientID)
+	}
+}
+
+func TestProcessLicenseDownload_FallsBackGracefullyWhenSigningContextUnavailable(t *testing.T) {
+	appID := "app-xyz"
+	repo := &fakeProjectConsumptionRepo{
+		name:          "Acme",
+		key:           "ACME",
+		state:         domain.ProjectConsumption{Status: domain.ConsumptionStatusGeneratedSecretKeys},
+		signingCtxErr: errors.New("db connection failure"),
+	}
+	choreo := &fakeChoreoSubscriptionClient{
+		statusRes: choreosubscription.ConsumptionResult{
+			Result: choreosubscription.ConsumptionData{
+				Status:        5,
+				ApplicationID: &appID,
+			},
+		},
+		licenseRes: domain.License{
+			SubscriptionData: []byte(`{"k":"v"}`),
+			Signature:        "sig",
+		},
+	}
+
+	svc := NewProjectConsumptionService(repo, choreo, alwaysUnrestrictedAccess{}, true)
+
+	lic, err := svc.ProcessLicenseDownload(context.Background(), testConsumptionProjectID, "22222222-3333-4444-5555-666666666666", "user@example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lic.Signature != "sig" {
+		t.Errorf("got signature %s, want sig", lic.Signature)
+	}
+	if choreo.lastLicenseReq.SigningContext != nil {
+		t.Errorf("expected signingContext to be nil on fallback, got %+v", choreo.lastLicenseReq.SigningContext)
 	}
 }
