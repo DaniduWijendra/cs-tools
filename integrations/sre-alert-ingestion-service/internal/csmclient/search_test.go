@@ -35,7 +35,7 @@ func TestSearchServices_Success(t *testing.T) {
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"services":[{"id":"33333333-3333-3333-3333-333333333333","name":"Azure Monitoring"}],"total":1,"limit":1,"offset":0}`))
+		_, _ = w.Write([]byte(`{"services":[{"id":"33333333-3333-3333-3333-333333333333","name":"Azure Monitoring"}],"total":1,"limit":50,"offset":0}`))
 	}))
 	defer upstream.Close()
 
@@ -56,12 +56,72 @@ func TestSearchServices_Success(t *testing.T) {
 	if gotBody.Filters == nil || gotBody.Filters.SearchQuery != "Azure Monitoring" {
 		t.Errorf("request filters = %+v, want searchQuery=%q", gotBody.Filters, "Azure Monitoring")
 	}
-	if gotBody.Pagination.Limit != 1 {
-		t.Errorf("request pagination.limit = %d, want 1", gotBody.Pagination.Limit)
+	if gotBody.Pagination.Limit != servicesSearchPageSize {
+		t.Errorf("request pagination.limit = %d, want %d", gotBody.Pagination.Limit, servicesSearchPageSize)
 	}
 
 	if len(results) != 1 || results[0].ID != "33333333-3333-3333-3333-333333333333" {
 		t.Errorf("results = %+v, want one service with id 33333333-3333-3333-3333-333333333333", results)
+	}
+}
+
+// TestSearchServices_SubstringMatchIsNotAnExactMatch pins the fix for a real
+// bug: entity-service's own SearchITServices does a case-insensitive
+// substring match (name ILIKE '%<query>%'), not an exact match. A result
+// whose Name merely contains the label as a substring (but isn't equal to
+// it) must never be returned — only a case-insensitively exact Name match
+// counts, otherwise a label like "Azure" could resolve to an unrelated
+// service like "Azure Backup Services" and get cached against it.
+func TestSearchServices_SubstringMatchIsNotAnExactMatch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"services":[{"id":"44444444-4444-4444-4444-444444444444","name":"Azure Backup Services"}],"total":1,"limit":50,"offset":0}`))
+	}))
+	defer upstream.Close()
+
+	tokenSrv := tokenServer(t)
+	client := newClient(Config{BaseURL: upstream.URL, TokenURL: tokenSrv.URL, ClientID: "id", ClientSecret: "secret"}, true)
+
+	results, err := client.SearchServices(context.Background(), "Azure")
+	if err != nil {
+		t.Fatalf("SearchServices returned error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("results = %+v, want empty — the only hit is a substring match, not an exact one", results)
+	}
+}
+
+// TestSearchServices_ExactMatchOnALaterPage pins that SearchServices walks
+// every page rather than trusting the first page's ordering (entity-service
+// orders by created_on, not match quality, so an exact match is not
+// guaranteed to be on page one).
+func TestSearchServices_ExactMatchOnALaterPage(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req SearchITServicesRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.WriteHeader(http.StatusOK)
+		if req.Pagination.Offset == 0 {
+			_, _ = w.Write([]byte(`{"services":[{"id":"55555555-5555-5555-5555-555555555555","name":"Azure Backup Services"}],"total":2,"limit":1,"offset":0}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"services":[{"id":"33333333-3333-3333-3333-333333333333","name":"Azure Monitoring"}],"total":2,"limit":1,"offset":1}`))
+	}))
+	defer upstream.Close()
+
+	tokenSrv := tokenServer(t)
+	client := newClient(Config{BaseURL: upstream.URL, TokenURL: tokenSrv.URL, ClientID: "id", ClientSecret: "secret"}, true)
+
+	results, err := client.SearchServices(context.Background(), "Azure Monitoring")
+	if err != nil {
+		t.Fatalf("SearchServices returned error: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("results = %+v, want the exact match found on the second page", results)
+	}
+	if calls != 2 {
+		t.Errorf("upstream calls = %d, want 2 (one per page walked)", calls)
 	}
 }
 

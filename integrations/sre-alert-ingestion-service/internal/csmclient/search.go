@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -309,22 +310,33 @@ type searchITServicesResponse struct {
 // why that split exists, and internal/worker.resolveServiceID for the
 // caching/fallback logic built on top of this method).
 //
-// Limit is 1 deliberately: this service treats "the first match" and "the
-// only match worth acting on" as the same thing, mirroring the setLimit(1)
-// precedent an existing ServiceNow exact-match-on-cmdb_ci_service.name flow
-// uses for the same kind of lookup (see GroupTag's doc comment for the
-// "mirrors in spirit, not a port" caveat that applies here too). This method
-// builds no fuzzy/partial matching of its own on top of that — searchQuery
-// is passed through verbatim, so whatever matching behavior
-// entity-service's own ServiceNow-backed operation implements is exactly
-// what's honored here.
+// entity-service's own SearchITServices does NOT do an exact match on
+// name — its Postgres-backed implementation is `name ILIKE '%<query>%'`, a
+// case-insensitive substring match, ordered by created_on, not by match
+// quality (see entity-service/internal/repository/it_service_repo.go). A
+// bare "first result" read (the original, incorrect version of this method)
+// could therefore return an unrelated service whose name merely contains
+// label as a substring, and — worse — since results are ordered by creation
+// time rather than relevance, a real exact match is not guaranteed to be
+// the first page's first row at all. So this method pages through every
+// result itself and only ever returns a service whose Name matches label
+// case-insensitively (folded via strings.EqualFold) and whose ID is
+// non-empty — the one true "the same match a human typing this label into
+// CMDB search and picking the exact-name result would have gotten",
+// independent of entity-service's own ordering. servicesSearchPageSize
+// bounds each page; servicesSearchMaxPages bounds the total pages walked
+// (a defensive cap — a legitimately large CMDB shouldn't need anywhere
+// near this many exact-name collisions on one label, and this must never
+// become an unbounded loop against a live service).
 //
 // Returns the (possibly empty) slice of matches and a nil error on a normal
-// 2xx response — an empty slice is a confirmed zero-result search, not an
-// error; the caller (internal/worker.resolveServiceID) decides what a
-// zero-result means (its unknown-service fallback). A non-nil error here is
-// always a transient/transport-level failure (a non-2xx response, or the
-// request never completing) — the caller folds that into the exact same
+// 2xx response — an empty slice means either a confirmed zero-result search
+// or a confirmed zero-*exact-match* search (both are the same "no match"
+// outcome from the caller's point of view), not an error; the caller
+// (internal/worker.resolveServiceID) decides what "no match" means (its
+// unknown-service fallback). A non-nil error here is always a
+// transient/transport-level failure (a non-2xx response, or the request
+// never completing) — the caller folds that into the exact same
 // retryable-delivery-failure path a CreateIncident error takes, never
 // translating it into a "no match" outcome itself.
 //
@@ -334,25 +346,64 @@ type searchITServicesResponse struct {
 // possible but not unconditional — treated as retryable regardless, same as
 // every other error from this call.
 func (c *Client) SearchServices(ctx context.Context, label string) ([]ITService, error) {
-	req := SearchITServicesRequest{
-		Filters:    &SearchITServicesFilters{SearchQuery: label},
-		Pagination: Pagination{Limit: 1, Offset: 0},
+	offset := 0
+	for page := 0; page < servicesSearchMaxPages; page++ {
+		req := SearchITServicesRequest{
+			Filters:    &SearchITServicesFilters{SearchQuery: label},
+			Pagination: Pagination{Limit: servicesSearchPageSize, Offset: offset},
+		}
+
+		body, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("csmclient: marshal SearchITServicesRequest: %w", err)
+		}
+
+		respBody, err := c.do(ctx, http.MethodPost, "/services/search", body)
+		if err != nil {
+			return nil, err
+		}
+
+		var resp searchITServicesResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			return nil, fmt.Errorf("csmclient: decode SearchITServices response: %w", err)
+		}
+
+		for _, svc := range resp.Services {
+			if svc.ID != "" && strings.EqualFold(svc.Name, label) {
+				return []ITService{svc}, nil
+			}
+		}
+
+		offset += len(resp.Services)
+		// Stop once offset has caught up with the server's own reported
+		// Total — deliberately not also keying off "this page came back
+		// short:" Postgres LIMIT/OFFSET (entity-service's own backing
+		// query) always returns a full page unless it's genuinely the last
+		// one, but trusting that as a second, independent stop condition
+		// only adds a way for the two signals to disagree; Total alone is
+		// the authoritative one. An empty page with offset still short of
+		// Total (a buggy/inconsistent server response) does not infinite
+		// loop — it just stops making progress, and servicesSearchMaxPages
+		// is the backstop that ends the loop regardless.
+		if offset >= resp.Total {
+			return nil, nil
+		}
 	}
 
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("csmclient: marshal SearchITServicesRequest: %w", err)
-	}
-
-	respBody, err := c.do(ctx, http.MethodPost, "/services/search", body)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp searchITServicesResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("csmclient: decode SearchITServices response: %w", err)
-	}
-
-	return resp.Services, nil
+	// servicesSearchMaxPages exhausted without a short/complete page ever
+	// being seen — treat as no match rather than looping further; see this
+	// const's own doc comment for why this is a defensive cap, not an
+	// expected outcome.
+	return nil, nil
 }
+
+// servicesSearchPageSize is the page size SearchServices requests per call
+// to POST /services/search while walking for an exact-name match.
+const servicesSearchPageSize = 50
+
+// servicesSearchMaxPages bounds how many pages SearchServices will walk
+// before giving up and treating the search as a no-match — a defensive cap
+// against ever looping unbounded against a live service, not a value this
+// service expects to actually hit in practice (see SearchServices' own doc
+// comment).
+const servicesSearchMaxPages = 20

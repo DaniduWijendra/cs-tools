@@ -59,11 +59,10 @@ type AlertRequest struct {
 	// distinguishable from an explicit, deliberately-chosen value; a plain
 	// string could never tell "not sent" apart from a valid-looking empty
 	// string. Values must be one of csmclient.CreateIncidentRequest's own
-	// "HIGH"/"MEDIUM"/"LOW" vocabulary — validate() does not itself check
-	// this (see that method's doc comment for what it does check); an
-	// adapter setting these is responsible for using exactly those three
-	// values, matching the same trust level already placed in every other
-	// field an adapter derives.
+	// "HIGH"/"MEDIUM"/"LOW" vocabulary — validate() rejects a non-nil value
+	// outside that set, so a generic /alerts caller can't smuggle an
+	// arbitrary string past this service straight into CSM's own incident
+	// contract.
 	Impact  *string `json:"impact,omitempty"`
 	Urgency *string `json:"urgency,omitempty"`
 }
@@ -110,8 +109,26 @@ func (req AlertRequest) validate() string {
 		return "metricName is required"
 	case strings.TrimSpace(req.Description) == "":
 		return "description is required"
+	case req.Impact != nil && !isValidImpactUrgency(*req.Impact):
+		return "impact must be HIGH, MEDIUM, or LOW"
+	case req.Urgency != nil && !isValidImpactUrgency(*req.Urgency):
+		return "urgency must be HIGH, MEDIUM, or LOW"
 	}
 	return ""
+}
+
+// isValidImpactUrgency reports whether v is one of
+// csmclient.CreateIncidentRequest's own Impact/Urgency values — see
+// AlertRequest.Impact/.Urgency's doc comment for why validate() enforces
+// this rather than trusting every caller/adapter to only ever set one of
+// the three.
+func isValidImpactUrgency(v string) bool {
+	switch v {
+	case "HIGH", "MEDIUM", "LOW":
+		return true
+	default:
+		return false
+	}
 }
 
 // MapToIncident builds the CreateIncidentRequest this service will

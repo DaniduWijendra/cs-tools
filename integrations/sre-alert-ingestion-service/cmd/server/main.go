@@ -21,12 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -124,18 +126,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// UnknownServiceID: a real, operator-provisioned CMDB "Unclassified"
+	// service UUID. Required config, mustEnv'd the same way SRE_ALERT_CALLER_ID
+	// is below — see worker.Config.UnknownServiceID's doc comment for why
+	// this is unconditional rather than optional-with-a-fallback: a
+	// deployment whose SRE_ALERT_SERVICE_MAP already covers every label it
+	// sends can just set this once and never see it used. Validated as a
+	// real UUID here, not left to fail downstream: an invalid value here
+	// would otherwise only surface once resolveServiceID's zero-result
+	// fallback actually fires, as a 400 from entity-service's own
+	// validateUUIDs — a permanent (non-retryable) delivery failure per
+	// worker.isRetryable, not a clean startup error.
+	unknownServiceID := mustEnv("SRE_ALERT_UNKNOWN_SERVICE_ID")
+	if !isCanonicalUUID(unknownServiceID) {
+		slog.Error("SRE_ALERT_UNKNOWN_SERVICE_ID must be a UUID", "value", unknownServiceID)
+		os.Exit(1)
+	}
+
 	w := worker.New(dbStore, csmClient, escalator, worker.Config{
-		MaxRetries:   envInt("SRE_ALERT_MAX_RETRIES", 3),
-		PollInterval: time.Duration(pollIntervalSeconds) * time.Second,
-		GroupWindow:  time.Duration(envInt("SRE_ALERT_GROUP_WINDOW_MINUTES", 15)) * time.Minute,
-		// UnknownServiceID: a real, operator-provisioned CMDB "Unclassified"
-		// service UUID. Required config, mustEnv'd the same way
-		// SRE_ALERT_CALLER_ID is below — see worker.Config.UnknownServiceID's
-		// doc comment for why this is unconditional rather than
-		// optional-with-a-fallback: a deployment whose SRE_ALERT_SERVICE_MAP
-		// already covers every label it sends can just set this once and
-		// never see it used.
-		UnknownServiceID: mustEnv("SRE_ALERT_UNKNOWN_SERVICE_ID"),
+		MaxRetries:       envInt("SRE_ALERT_MAX_RETRIES", 3),
+		PollInterval:     time.Duration(pollIntervalSeconds) * time.Second,
+		GroupWindow:      time.Duration(envInt("SRE_ALERT_GROUP_WINDOW_MINUTES", 15)) * time.Minute,
+		UnknownServiceID: unknownServiceID,
 	})
 
 	// callerID: a real, operator-provisioned CSM user id. CSM has no
@@ -326,15 +338,29 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// canonicalUUIDPattern matches a canonical, hyphenated UUID
+// (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). Used to fail fast on a
+// misconfigured service UUID — see isCanonicalUUID and parseServiceMap.
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// isCanonicalUUID reports whether s is a canonical, hyphenated UUID.
+func isCanonicalUUID(s string) bool {
+	return canonicalUUIDPattern.MatchString(s)
+}
+
 // parseServiceMap parses SRE_ALERT_SERVICE_MAP — a JSON object string
 // mapping an alert's raw Service label to a CMDB service UUID, e.g.
 // {"Azure Monitoring":"33333333-3333-3333-3333-333333333333"}. An empty raw
 // string is valid and returns (nil, nil): "unset" means "no static entries,"
 // not a configuration error — see handler.AlertHandler.serviceMap's doc
-// comment. Any non-empty value that isn't valid JSON, or isn't a flat
-// string->string object, is a startup error (the caller fails fast on it),
-// matching this service's existing "fail fast on bad config" convention
-// rather than silently ignoring a typo'd map.
+// comment. Any non-empty value that isn't valid JSON, isn't a flat
+// string->string object, has an empty label, or maps a label to a value
+// that isn't a real UUID, is a startup error (the caller fails fast on it) —
+// an invalid entry left unvalidated would otherwise pass MapToIncident's
+// static lookup silently and only surface once that alert reaches
+// CreateIncident, as a permanent (non-retryable) 400 from entity-service's
+// own validateUUIDs, matching this service's existing "fail fast on bad
+// config" convention rather than deferring the failure to request time.
 func parseServiceMap(raw string) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil
@@ -342,6 +368,14 @@ func parseServiceMap(raw string) (map[string]string, error) {
 	var m map[string]string
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, err
+	}
+	for label, id := range m {
+		if label == "" {
+			return nil, fmt.Errorf("SRE_ALERT_SERVICE_MAP: empty label")
+		}
+		if !isCanonicalUUID(id) {
+			return nil, fmt.Errorf("SRE_ALERT_SERVICE_MAP: value for %q is not a UUID: %q", label, id)
+		}
 	}
 	return m, nil
 }

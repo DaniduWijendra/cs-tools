@@ -291,6 +291,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden — payload "source" does not match the authenticated Basic Auth identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "413":
           description: RequestEntityTooLarge
           content:

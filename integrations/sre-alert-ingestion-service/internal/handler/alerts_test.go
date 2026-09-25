@@ -391,6 +391,52 @@ func TestMapToIncident_ImpactUrgencyOverride(t *testing.T) {
 	})
 }
 
+// TestAlertRequest_validate_RejectsInvalidImpactUrgency pins the fix for a
+// real gap: validate() previously never checked Impact/Urgency, so a
+// generic /alerts caller could submit any string in those fields and have
+// it forwarded straight into CSM's own incident contract, which only
+// accepts HIGH/MEDIUM/LOW.
+func TestAlertRequest_validate_RejectsInvalidImpactUrgency(t *testing.T) {
+	base := func() AlertRequest {
+		return AlertRequest{Source: "azure", Severity: "minor", Service: "svc", MetricName: "m", Description: "d"}
+	}
+
+	t.Run("nil Impact/Urgency is valid", func(t *testing.T) {
+		if msg := base().validate(); msg != "" {
+			t.Errorf("validate() = %q, want \"\"", msg)
+		}
+	})
+
+	t.Run("valid Impact/Urgency values are accepted", func(t *testing.T) {
+		for _, v := range []string{"HIGH", "MEDIUM", "LOW"} {
+			req := base()
+			req.Impact = &v
+			req.Urgency = &v
+			if msg := req.validate(); msg != "" {
+				t.Errorf("validate() with Impact=Urgency=%q = %q, want \"\"", v, msg)
+			}
+		}
+	})
+
+	t.Run("invalid Impact is rejected", func(t *testing.T) {
+		bad := "CRITICAL"
+		req := base()
+		req.Impact = &bad
+		if msg := req.validate(); msg != "impact must be HIGH, MEDIUM, or LOW" {
+			t.Errorf("validate() = %q, want the impact error", msg)
+		}
+	})
+
+	t.Run("invalid Urgency is rejected", func(t *testing.T) {
+		bad := ""
+		req := base()
+		req.Urgency = &bad
+		if msg := req.validate(); msg != "urgency must be HIGH, MEDIUM, or LOW" {
+			t.Errorf("validate() = %q, want the urgency error", msg)
+		}
+	})
+}
+
 // The dedup tag is the load-bearing contract internal/worker's
 // SearchIncidentByTag pre-retry check depends on (see
 // internal/csmclient.DedupTag's doc comment) — this pins the exact format

@@ -198,3 +198,39 @@ func TestParseServiceMap_RejectsNonStringValues(t *testing.T) {
 		t.Fatal("parseServiceMap accepted a non-string value, want an error")
 	}
 }
+
+// TestParseServiceMap_RejectsNonUUIDValue pins the fix for a real gap: a
+// non-UUID value (a typo, a bare sysid missing its hyphens, plain text)
+// used to pass parseServiceMap silently and only fail once an alert with
+// that label reached CreateIncident, as a permanent (non-retryable) 400
+// from entity-service's own validateUUIDs — this must instead fail startup.
+func TestParseServiceMap_RejectsNonUUIDValue(t *testing.T) {
+	if _, err := parseServiceMap(`{"Azure Monitoring":"not-a-uuid"}`); err == nil {
+		t.Fatal("parseServiceMap accepted a non-UUID value, want an error")
+	}
+}
+
+// TestParseServiceMap_RejectsEmptyLabel pins the same fail-fast convention
+// for a malformed key: an empty label can never match a real alert's
+// Service field, so it is dead, misleading configuration, not a value with
+// any legitimate use.
+func TestParseServiceMap_RejectsEmptyLabel(t *testing.T) {
+	if _, err := parseServiceMap(`{"":"33333333-3333-3333-3333-333333333333"}`); err == nil {
+		t.Fatal("parseServiceMap accepted an empty label, want an error")
+	}
+}
+
+func TestIsCanonicalUUID(t *testing.T) {
+	cases := map[string]bool{
+		"33333333-3333-3333-3333-333333333333": true,
+		"not-a-uuid":                           false,
+		"":                                     false,
+		"333333333333333333333333333333333333": false, // no hyphens
+		"33333333-3333-3333-3333-33333333333":  false, // one hex char short
+	}
+	for input, want := range cases {
+		if got := isCanonicalUUID(input); got != want {
+			t.Errorf("isCanonicalUUID(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
