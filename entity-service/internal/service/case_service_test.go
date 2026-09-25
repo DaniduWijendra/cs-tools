@@ -47,26 +47,27 @@ func (alwaysUnrestrictedAccess) ResolveScope(context.Context) (AccessScope, erro
 // an unsupported field happens before the Postgres backend ever reaches the
 // repository, not merely that the repository ignores the field.
 type stubCaseRepo struct {
-	searchCases              func(ctx context.Context, req domain.SearchCasesRequest) ([]domain.SearchCaseView, int, error)
-	createCaseAttachment     func(ctx context.Context, req domain.CreateAttachmentRequest) (domain.Attachment, error)
-	searchCaseAttachments    func(ctx context.Context, caseID string, pagination domain.Pagination) ([]domain.Attachment, int, error)
-	getCaseAttachmentByID    func(ctx context.Context, id string) (domain.Attachment, error)
-	deleteCaseAttachment     func(ctx context.Context, id string) error
-	updateAttachmentName     func(ctx context.Context, id, name, updatedBy string) (time.Time, error)
-	confirmCaseAttachment    func(ctx context.Context, id string) (domain.Attachment, error)
-	searchCaseComments       func(ctx context.Context, req domain.SearchCaseCommentsRequest) ([]domain.CaseComment, int, error)
-	updateCase               func(ctx context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error)
-	createCaseFromServiceNow func(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error)
-	createCaseComment        func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
-	createCase               func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
-	getCaseByID              func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
-	addCaseTag               func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
-	setCaseWatchList         func(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error)
-	accountDefaultWatcherIDs func(ctx context.Context, projectID string) ([]string, error)
-	updateCaseAssignee       func(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error)
-	acknowledgeCase          func(ctx context.Context, caseID, actorID, actorEmail string) (bool, domain.AssignedEngineerRef, string, time.Time, error)
-	updateCaseParent         func(ctx context.Context, caseID, parentID, callerEmail string) (time.Time, error)
-	updateCaseFields         func(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
+	searchCases                   func(ctx context.Context, req domain.SearchCasesRequest) ([]domain.SearchCaseView, int, error)
+	createCaseAttachment          func(ctx context.Context, req domain.CreateAttachmentRequest) (domain.Attachment, error)
+	searchCaseAttachments         func(ctx context.Context, caseID string, pagination domain.Pagination) ([]domain.Attachment, int, error)
+	getCaseAttachmentByID         func(ctx context.Context, id string) (domain.Attachment, error)
+	deleteCaseAttachment          func(ctx context.Context, id string) error
+	updateAttachmentName          func(ctx context.Context, id, name, updatedBy string) (time.Time, error)
+	confirmCaseAttachment         func(ctx context.Context, id string) (domain.Attachment, error)
+	searchCaseComments            func(ctx context.Context, req domain.SearchCaseCommentsRequest) ([]domain.CaseComment, int, error)
+	updateCase                    func(ctx context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error)
+	createCaseFromServiceNow      func(ctx context.Context, req domain.CreateCaseRequest, id, number, wso2ID, createdBy, state string) (domain.Case, error)
+	createCaseComment             func(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CaseComment, error)
+	createCase                    func(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error)
+	getCaseByID                   func(ctx context.Context, id string, scope repository.SearchScope) (domain.CaseView, error)
+	addCaseTag                    func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
+	setCaseWatchList              func(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error)
+	accountDefaultWatcherIDs      func(ctx context.Context, projectID string) ([]string, error)
+	updateCaseAssignee            func(ctx context.Context, caseID, userID, callerEmail string) (time.Time, bool, error)
+	acknowledgeCase               func(ctx context.Context, caseID, actorID, actorEmail string) (bool, domain.AssignedEngineerRef, string, time.Time, error)
+	updateCaseParent              func(ctx context.Context, caseID, parentID, callerEmail string) (time.Time, error)
+	updateCaseFields              func(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
+	recordCaseFieldChangeActivity func(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error
 }
 
 func (s *stubCaseRepo) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.Case, error) {
@@ -177,7 +178,7 @@ func (s *stubCaseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID s
 	}
 	return nil, nil
 }
-func (s *stubCaseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+func (s *stubCaseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, bool, error) {
 	if s.updateCaseAssignee != nil {
 		return s.updateCaseAssignee(ctx, caseID, userID, callerEmail)
 	}
@@ -203,6 +204,17 @@ func (s *stubCaseRepo) UpdateCaseFields(ctx context.Context, req domain.UpdateCa
 }
 func (s *stubCaseRepo) SearchCaseActivities(context.Context, domain.SearchCaseActivitiesRequest) ([]domain.CaseActivity, int, error) {
 	panic("not implemented")
+}
+
+// RecordCaseFieldChangeActivity defaults to a no-op (not a panic): it's a
+// best-effort side effect of many UpdateCase branches now, so most existing
+// tests exercising those branches never set this stub up at all. A test that
+// specifically wants to assert on it sets recordCaseFieldChangeActivity.
+func (s *stubCaseRepo) RecordCaseFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error {
+	if s.recordCaseFieldChangeActivity != nil {
+		return s.recordCaseFieldChangeActivity(ctx, caseID, fieldName, oldValue, newValue, actorEmail)
+	}
+	return nil
 }
 
 // stubUserRepo is a minimal repository.UserRepository; SearchCases doesn't
@@ -660,11 +672,18 @@ func TestCaseService_UpdateCase_UpdatesAssignee(t *testing.T) {
 		},
 	}
 	repo := &stubCaseRepo{
-		updateCaseAssignee: func(_ context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+		getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
+			// Unassigned before this call, matching this test's intent
+			// (assignee changes from nobody to John Roe) -- purely display
+			// data for the activity-feed entry now; the actual no-op
+			// decision comes from updateCaseAssignee's own "changed" return.
+			return domain.CaseView{ID: id, Number: "CS0001"}, nil
+		},
+		updateCaseAssignee: func(_ context.Context, caseID, userID, callerEmail string) (time.Time, bool, error) {
 			if userID != "assignee-id" {
 				t.Errorf("userID = %q, want assignee-id", userID)
 			}
-			return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC), nil
+			return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC), true, nil
 		},
 	}
 	userRepo := stubUserRepo{getUserByEmail: func(_ context.Context, email string) (domain.User, error) {
@@ -818,6 +837,15 @@ func TestCaseService_UpdateCase_UpdatesParent(t *testing.T) {
 		},
 	}
 	repo := &stubCaseRepo{
+		getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
+			// updateCaseParent now fetches both the case (old parent, if
+			// any) and the target parent (its number) around the write, for
+			// the activity-feed entry's old/new values.
+			if id == parentID {
+				return domain.CaseView{ID: id, Number: "CS-PARENT"}, nil
+			}
+			return domain.CaseView{ID: id, Number: "CS0001"}, nil
+		},
 		updateCaseParent: func(_ context.Context, caseID, gotParentID, callerEmail string) (time.Time, error) {
 			if gotParentID != parentID {
 				t.Errorf("parentID = %q, want %q", gotParentID, parentID)
@@ -917,6 +945,15 @@ func TestCaseService_UpdateCase_ResolutionFieldsRequireClosedOrSolutionProposedS
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &stubCaseRepo{
+				// UpdateCase's state/workState branch now always fetches
+				// the case's prior state (for the activity-feed entry, not
+				// just event publishing), so every State-bearing case here
+				// needs this stubbed even though none of them care about
+				// the activity log itself.
+				getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
+					st := domain.CaseStateOpen
+					return domain.CaseView{ID: id, State: &st}, nil
+				},
 				updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
 					st := domain.CaseState(*req.State)
 					return domain.Case{ID: req.ID, State: &st}, nil, nil
@@ -1094,6 +1131,15 @@ func TestCaseService_UpdateCase_MirrorsFieldToServiceNow(t *testing.T) {
 			dispatcher := NewSNWritebackDispatcher(failures)
 
 			repo := &stubCaseRepo{
+				// UpdateCase's state/workState branch now always fetches
+				// the case's prior state/workState (for the activity-feed
+				// entry, not just event publishing) -- irrelevant to this
+				// test's own mirror assertions, just needs to not panic.
+				getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
+					priorState := domain.CaseStateClosed
+					priorWorkState := domain.CaseWorkStatePaused
+					return domain.CaseView{ID: id, State: &priorState, WorkState: &priorWorkState}, nil
+				},
 				updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
 					return domain.Case{ID: req.ID, State: req.State, Severity: req.Severity, WorkState: req.WorkState}, req.Severity, nil
 				},
@@ -1320,6 +1366,10 @@ func TestCaseService_UpdateCase_RecordsSNWritebackFailureOnMirrorError(t *testin
 
 	workState := domain.CaseWorkStatePaused
 	repo := &stubCaseRepo{
+		getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
+			priorWorkState := domain.CaseWorkStateOngoing
+			return domain.CaseView{ID: id, WorkState: &priorWorkState}, nil
+		},
 		updateCase: func(_ context.Context, req domain.UpdateCaseRequest) (domain.Case, *domain.CaseSeverity, error) {
 			return domain.Case{ID: req.ID, WorkState: req.WorkState}, nil, nil
 		},

@@ -306,9 +306,17 @@ type CaseRepository interface {
 	AccountDefaultWatcherIDs(ctx context.Context, projectID string) ([]string, error)
 	// UpdateCaseAssignee sets work_item.assigned_to_id to userID -- already
 	// resolved and validated as a real "user" row by the caller (CaseService.
-	// updateCaseAssignee, via GetUserByEmail) -- and bumps updated_on/updated_by.
-	// Returns the new updated_on. Returns a NotFoundError if caseID does not exist.
-	UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error)
+	// updateCaseAssignee, via GetUserByEmail) -- and bumps updated_on/updated_by,
+	// but only when assigned_to_id actually differs from userID: the write
+	// itself is the no-op check (a single atomic UPDATE...WHERE...RETURNING,
+	// not a separate pre-write read), so two concurrent requests assigning
+	// the same case to the same engineer can't both observe "unchanged" and
+	// both publish/mirror the same no-op write -- see CaseService.
+	// updateCaseAssignee's own doc comment for why that race mattered
+	// (CodeRabbit finding on PR #1989). changed reports whether this call
+	// was the one that wrote it; updatedOn is the row's current value
+	// either way. Returns a NotFoundError if caseID does not exist.
+	UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (updatedOn time.Time, changed bool, err error)
 	// AcknowledgeCase atomically claims the case for actorID if nobody has
 	// acknowledged it yet (work_item.acknowledged_by_user_id IS NULL), or
 	// leaves it untouched if someone already has -- the same idempotent
@@ -342,6 +350,19 @@ type CaseRepository interface {
 	// every sibling UpdateCase branch. Returns a NotFoundError if req.ID does
 	// not exist.
 	UpdateCaseFields(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
+	// RecordCaseFieldChangeActivity inserts a work_item_activity row
+	// (migration 000056) recording that caseID's fieldName changed from
+	// oldValue to newValue, attributed to actorEmail. SearchCaseActivities'
+	// own field_change branch already renders any field_name generically
+	// (see caseActivityFieldChangeLabel) -- this is the missing write half:
+	// nothing wrote to this table on the Postgres data source before this,
+	// even though the ServiceNow data source's own sync process populates
+	// it there, so a Postgres-native mutation's own change never appeared
+	// in the case's activity feed. Best-effort by every caller (a failure
+	// here must not undo or fail the mutation that already succeeded), so
+	// this itself just returns whatever error occurs, with no special
+	// handling of its own.
+	RecordCaseFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error
 	// SearchCaseActivities returns a paginated, newest-first feed combining
 	// the case's comments (comment, migration 000037) and complete
 	// attachments (case_attachment, migration 000043) into one merged
@@ -791,6 +812,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		// it can't become *string.
 		internalID                               *string
 		aeID, aeName, aeEmail                    *string
+		ackID, ackName, ackEmail                 *string
 		pcID, pcNum, pcType                      *string
 		rcID, rcNum                              *string
 		accountID, accountName                   *string
@@ -833,6 +855,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		        a.id, a.name,
 		        cre.id, cre.name, sre.id, sre.name,
 		        ae.id, COALESCE(ae.name, NULLIF(TRIM(CONCAT_WS(' ', ae.first_name, ae.last_name)), '')), ae.email,
+		        ack.id, COALESCE(ack.name, NULLIF(TRIM(CONCAT_WS(' ', ack.first_name, ack.last_name)), '')), ack.email,
 		        pw.id, pw.number, pw.type::TEXT,
 		        rc_wi.id, rc_wi.number
 		 FROM work_item wi
@@ -848,6 +871,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		 LEFT JOIN product prod ON prod.id = dp.product_id
 		 LEFT JOIN product_version pv ON pv.id = dp.version_id
 		 LEFT JOIN "user" ae ON ae.id = wi.assigned_to_id
+		 LEFT JOIN "user" ack ON ack.id = wi.acknowledged_by_user_id
 		 LEFT JOIN work_item pw ON pw.id = wi.parent_id
 		 LEFT JOIN "case" rc ON rc.id = c.related_case_id
 		 LEFT JOIN work_item rc_wi ON rc_wi.id = rc.id
@@ -867,6 +891,7 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 		&accountID, &accountName,
 		&creTeamID, &creTeamName, &sreTeamID, &sreTeamName,
 		&aeID, &aeName, &aeEmail,
+		&ackID, &ackName, &ackEmail,
 		&pcID, &pcNum, &pcType,
 		&rcID, &rcNum,
 	)
@@ -991,6 +1016,13 @@ func (r *caseRepo) GetCaseByID(ctx context.Context, id string, scope SearchScope
 			aName = *aeName
 		}
 		cv.AssignedEngineer = domain.NewUserReference(*aeID, stringOrEmpty(aeEmail), aName)
+	}
+	if ackID != nil {
+		ackNameStr := ""
+		if ackName != nil {
+			ackNameStr = *ackName
+		}
+		cv.AcknowledgedBy = &domain.AssignedEngineerRef{ID: *ackID, Name: ackNameStr, Email: ackEmail}
 	}
 	if pcID != nil {
 		// work_item.parent_id (migration 000036) is a generic self-reference
@@ -2099,20 +2131,39 @@ func (r *caseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID strin
 	return ids, nil
 }
 
+// updateCaseAssigneeQuery atomically applies the no-op check inside the
+// UPDATE itself (WHERE assigned_to_id IS DISTINCT FROM $2) rather than a
+// separate pre-write read -- two concurrent calls assigning the same case to
+// the same engineer can't both see "unchanged" and neither can both see
+// "changed", since only one of them can actually win the WHERE clause. The
+// outer SELECT reads work_item AFTER the CTE runs (same "modify, then report
+// the post-write row" idiom updateCaseQuery/acknowledgeCaseQuery already use
+// in this file), so it reports the just-written updated_on on a genuine
+// change and the pre-existing one on a no-op.
+const updateCaseAssigneeQuery = `
+	WITH updated AS (
+		UPDATE work_item
+		SET assigned_to_id = $2, updated_on = NOW(), updated_by = $3
+		WHERE id = $1 AND assigned_to_id IS DISTINCT FROM $2
+		RETURNING id
+	)
+	SELECT wi.updated_on, (updated.id IS NOT NULL) AS changed
+	FROM work_item wi
+	LEFT JOIN updated ON updated.id = wi.id
+	WHERE wi.id = $1`
+
 // UpdateCaseAssignee implements CaseRepository.
-func (r *caseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+func (r *caseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, bool, error) {
 	var updatedOn time.Time
-	err := r.db.QueryRow(ctx,
-		`UPDATE work_item SET assigned_to_id = $2, updated_on = NOW(), updated_by = $3 WHERE id = $1 RETURNING updated_on`,
-		caseID, userID, callerEmail,
-	).Scan(&updatedOn)
+	var changed bool
+	err := r.db.QueryRow(ctx, updateCaseAssigneeQuery, caseID, userID, callerEmail).Scan(&updatedOn, &changed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, &apierror.NotFoundError{Msg: "case not found"}
+		return time.Time{}, false, &apierror.NotFoundError{Msg: "case not found"}
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("update case assignee: %w", err)
+		return time.Time{}, false, fmt.Errorf("update case assignee: %w", err)
 	}
-	return updatedOn, nil
+	return updatedOn, changed, nil
 }
 
 // UpdateCaseParent implements CaseRepository.
@@ -2132,6 +2183,19 @@ func (r *caseRepo) UpdateCaseParent(ctx context.Context, caseID, parentID, calle
 		return time.Time{}, fmt.Errorf("update case parent: %w", err)
 	}
 	return updatedOn, nil
+}
+
+// RecordCaseFieldChangeActivity implements CaseRepository.
+func (r *caseRepo) RecordCaseFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error {
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO work_item_activity (id, created_on, created_by, work_item_id, field_name, old_value, new_value, user_email)
+		 VALUES (gen_random_uuid(), NOW(), $1, $2, $3, $4, $5, $1)`,
+		actorEmail, caseID, fieldName, oldValue, newValue,
+	)
+	if err != nil {
+		return fmt.Errorf("record case field change activity: %w", err)
+	}
+	return nil
 }
 
 // AcknowledgeCase implements CaseRepository. The claim itself

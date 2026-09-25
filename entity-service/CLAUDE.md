@@ -687,6 +687,120 @@ owning team's space is arguably more useful than a stale one. Left as
 current-product routing; revisit only if the same-space guarantee turns
 out to matter in practice.
 
+**`caseService.UpdateCase` (the Postgres data source) supports
+`Acknowledge`/`AssigneeEmail` too** — `caseService.acknowledgeCase`/
+`updateCaseAssignee` (own branches in `UpdateCase`, alongside
+`updateCaseWatchList`/`updateCaseParent`/`updateCaseFields`) write
+`work_item.acknowledged_by_user_id`/`assigned_to_id` via
+`CaseRepository.AcknowledgeCase`/`UpdateCaseAssignee`.
+`CaseRepository.AcknowledgeCase` claims a case first-write-wins inside a
+transaction that row-locks `work_item` (`SELECT ... FOR UPDATE`) before
+reading whether it's already claimed, so two concurrent Acknowledge calls on
+the same case can't both believe they were first; it returns
+`alreadyAcknowledged` plus whoever now holds the claim, read back from the
+same "user" join regardless of which branch actually ran. `UpdateCaseAssignee`
+has no such guard at all — it unconditionally writes `assigned_to_id` every
+call, no no-op detection in the repository layer.
+- **This service's own contribution on top of that**: neither
+  `acknowledgeCase` nor `updateCaseAssignee` originally published a
+  `case.acknowledged`/`case.assigned` event on the Postgres data source at
+  all — Acknowledge/AssigneeEmail worked (the write itself succeeded,
+  ServiceNow-mirror dispatch fired under dual-write mode), but
+  `csm-notification-service` never heard about either one unless
+  `DATA_SOURCE=servicenow`. Closing that gap added:
+  - **`updateCaseAssignee`'s own no-op detection**, done at the service
+    layer since the repository doesn't do it: a `GetCaseByID` fetch right
+    before the write (gated on `s.publisher != nil`, so a deployment with no
+    Event Hub configured pays nothing extra) compares
+    `cv.AssignedEngineer.Email` against the requested `AssigneeEmail`
+    case-insensitively — the same guard `snCaseService.UpdateCase`'s own
+    AssigneeEmail path applies, just done here instead of in SQL.
+  - **`publishCaseAcknowledged`/`publishCaseAssigned`**, reusing the exact
+    same shared helpers/payload shapes ServiceNow's own versions do
+    (`caseProductName`/`caseTeamName`/`watchListUserEmails`,
+    `events.CaseAcknowledgedPayload`/`CaseAssignedPayload`) — both live in
+    the same `service` package, so nothing needed duplicating.
+    `publishCaseAcknowledged` only fires when `!alreadyAcknowledged` (a
+    repeat `Acknowledge:true` against an already-claimed case changed
+    nothing, so nothing to publish — the same distinction
+    `snCaseService.publishCaseAcknowledged`'s own call site makes) and takes
+    `acknowledgerName` straight from `AcknowledgeCase`'s own return value, no
+    second lookup. `publishCaseAssigned` re-fetches the case via
+    `GetCaseByID` *after* the write (the pre-write fetch above exists only
+    to detect the no-op, not to reuse as a payload source) and guards
+    `cv.ProjectDetails` as nilable — unlike ServiceNow's `CaseView`, which
+    always has one, this data source's does not (see `GetCaseByID`'s own
+    comment on why project/deployment joins are `LEFT JOIN`s here).
+  - **`GetCaseByID`'s query now also joins `acknowledged_by_user_id`**
+    (`LEFT JOIN "user" ack ON ack.id = wi.acknowledged_by_user_id`, same
+    pattern as its pre-existing `assigned_to_id`/`ae` join) to populate
+    `CaseView.AcknowledgedBy` — previously always nil on this data source
+    even after a successful Acknowledge, since nothing read the column back
+    for display outside `AcknowledgeCase`'s own one-off query.
+- **Not carried over from the ServiceNow path**: there is no elevated-role
+  check on `Acknowledge` here — `acknowledgeCase`'s own doc comment notes
+  this is deliberate, not an oversight: no Postgres-side permission model
+  exists yet, so this data source only requires a known authenticated
+  caller, same as every other Postgres case mutation. `SearchCaseView` still
+  has no `AcknowledgedBy` field either (matching ServiceNow's own
+  `SearchCaseView`-equivalent, which doesn't surface it there either — only
+  `GetCaseByID` does).
+
+**`work_item_activity` (migration 000056) now gets written to on the
+Postgres data source too.** `SearchCaseActivities`' own `field_change` branch
+already rendered any `field_name` generically (`caseActivityFieldChangeLabel`
+title-cases it, e.g. `"assigned_to_id"` → `"Assigned To Id"`) — the table was
+fully wired up on the read side, but **nothing in this codebase ever wrote to
+it** on this data source (the ServiceNow data source's own case activity
+comes from a live upstream call instead, not this table; this table appears
+to exist for the ServiceNow data source's own sync process to populate,
+which this data source has no equivalent of). The practical symptom: a
+Postgres-native state/severity/workState/assign/acknowledge/parent change
+produced no entry in the case's own activity feed at all — a real, reported
+gap ("with servicenow data source all are shown").
+- **`CaseRepository.RecordCaseFieldChangeActivity(ctx, caseID, fieldName,
+  oldValue, newValue, actorEmail)`** is the missing write half — a plain
+  `INSERT INTO work_item_activity`. `caseService.recordFieldChangeActivity`
+  wraps it best-effort (log and ignore on failure, same posture as every
+  `publishXxx` helper in this file): the mutation itself has already
+  succeeded by the time this runs, so a failure here must never undo it or
+  report the request as failed. A blank `actorEmail` skips the write
+  entirely (no anonymous rows) rather than inserting one with an empty
+  `user_email`.
+- **Old/new value convention, since there's no ServiceNow sync to match
+  against**: `state`/`severity`/`work_state` store the raw lowercase domain
+  enum value (e.g. `"work_in_progress"`), the same representation the JSON
+  API already uses for these fields — no separate display-label map
+  invented purely for this. `assigned_to_id`/`acknowledged_by_user_id`
+  store a human display name instead (e.g. `"Jane Doe"`, or `"Unassigned"`
+  for "no prior assignee") — a raw UUID would be useless to a human reading
+  the activity feed, and `caseActivityFieldChangeLabel` already title-cases
+  `field_name` itself to say *which* field, so the value only needs to say
+  *who*. `parent_id` stores the parent case's own number (e.g.
+  `"CS0001"`), fetched via an extra best-effort `GetCaseByID` before/after
+  the write in `updateCaseParent` (rare operation, so the extra round trips
+  are an acceptable cost) — an empty string if that lookup fails.
+- **Call sites**: `updateCaseAssignee`/`acknowledgeCase`/`updateCaseParent`
+  already resolve an `actor` for other reasons (ServiceNow mirror
+  attribution, first-write-wins claiming) and reuse `actor.Email` directly.
+  The main `UpdateCase` body's state/severity/workState branch is the one
+  exception — it has never required an authenticated caller before (no
+  permission model exists for Postgres-side case mutations at all yet), so
+  it resolves the actor **best-effort**: a missing/invalid `x-user-id-token`
+  just means this update's activity entry is skipped, not a newly-rejected
+  request. That branch's own `before` `*domain.CaseView` fetch (previously
+  gated on `s.publisher != nil && req.State != nil`, only for
+  `case.status_changed`'s sake) is now unconditional whenever `req.State` or
+  `req.WorkState` is set, since the activity write needs the prior value
+  regardless of whether Event Hub is configured at all.
+- **Deliberately out of scope**: `updateCaseFields`'s combinable "plain
+  field" bundle (Subject/Description/DeploymentID/DeployedProductID/fix-ETAs/
+  RelatedCaseID/WorkaroundProvided) does not write to `work_item_activity`
+  yet — up to nine fields in one call, several without a cheaply-available
+  "old" value, is a larger and more speculative addition than the six
+  branches above; left for a future change if it turns out to matter in
+  practice the same way assign/state did.
+
 Every helper above runs **synchronously** (not detached/async the way
 `apps/csm-portal/backend`'s own `internal/handler/cases.go` `publishAsync`
 is), each bounded by its own 5s `context.WithTimeout`

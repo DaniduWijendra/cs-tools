@@ -82,6 +82,13 @@ func derefState(s *domain.CaseState) domain.CaseState {
 	return *s
 }
 
+func derefWorkState(s *domain.CaseWorkState) domain.CaseWorkState {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // validateDateRange enforces the same rules as the Ballerina reference's
 // shared validateDateRange helper: both dates must be exactly 10 characters
 // in YYYY-MM-DD format, startDate must be strictly before endDate, and the
