@@ -669,9 +669,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// UpdateCallRequest does not (Postgres-first CREATE means
 		// customer_call.id has no ServiceNow counterpart to target).
 		snCallRequestMirrorSvc := service.NewServiceNowCallRequestService(serviceNowIntegrationServiceClient)
-		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, snWritebackDispatcher, snCallRequestMirrorSvc)
+		activeCallRequestSvc = service.NewCallRequestServiceWithSNWriteback(callRequestRepo, userRepo, accessSvc, snWritebackDispatcher, snCallRequestMirrorSvc)
 	default:
-		activeCallRequestSvc = service.NewCallRequestService(callRequestRepo, userRepo)
+		activeCallRequestSvc = service.NewCallRequestService(callRequestRepo, userRepo, accessSvc)
 	}
 	callRequestHandler := handler.NewCallRequestHandler(activeCallRequestSvc)
 
