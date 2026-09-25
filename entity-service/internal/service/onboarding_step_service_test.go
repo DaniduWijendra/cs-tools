@@ -133,6 +133,9 @@ func TestOnboardingStepService_UpsertValidation(t *testing.T) {
 		"bad step":           func(r *domain.UpsertOnboardingStepRequest) { r.Step = "PAYMENT" },
 		"bad status":         func(r *domain.UpsertOnboardingStepRequest) { r.Status = "DONE" },
 		"missing eventType":  func(r *domain.UpsertOnboardingStepRequest) { r.EventType = "" },
+		"eventType too long": func(r *domain.UpsertOnboardingStepRequest) {
+			r.EventType = strings.Repeat("x", maxOnboardingStepEventTypeLen+1)
+		},
 		"zero eventModified": func(r *domain.UpsertOnboardingStepRequest) { r.EventModifiedOn = time.Time{} },
 		"missing email":      func(r *domain.UpsertOnboardingStepRequest) { r.Email = "" },
 		"bad projectId":      func(r *domain.UpsertOnboardingStepRequest) { r.ProjectID = sampleStr("not-a-uuid") },
@@ -202,5 +205,20 @@ func TestOnboardingStepService_Search(t *testing.T) {
 		Pagination: domain.Pagination{Limit: maxLimit + 1},
 	}); !errors.As(err, &ve) {
 		t.Errorf("limit over cap: err = %v", err)
+	}
+}
+
+// TestOnboardingStepService_AcceptsNotificationEventType pins the value
+// csm-notification-service actually sends for its IDENTITY and EMAIL steps.
+// It is longer than the column's original VARCHAR(20), which is what made
+// every one of its ledger writes fail.
+func TestOnboardingStepService_AcceptsNotificationEventType(t *testing.T) {
+	repo := &recordingStepRepo{}
+	svc := NewOnboardingStepService(repo, alwaysUnrestrictedAccess{})
+	req := validStepReq()
+	req.EventType = "project_contact.invited"
+
+	if _, err := svc.Upsert(context.Background(), req); err != nil {
+		t.Fatalf("Upsert: %v", err)
 	}
 }
