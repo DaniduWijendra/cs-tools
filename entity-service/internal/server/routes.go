@@ -1282,6 +1282,20 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		}
 	}
 
+	// PLG Customer Success Portal. Every repository, service, handler and route
+	// it needs is in plg_routes.go — this is the only part of entity-service's
+	// own wiring the merge touches.
+	//
+	// Gated on db != nil like every other Postgres-backed route above:
+	// NewPoolIfNeeded returns a nil pool for DATA_SOURCE=servicenow, and PLG is
+	// Postgres-only by construction — its tables do not exist in that mode.
+	// Registering anyway would start cleanly and then nil-pointer on the first
+	// query of every PLG request. Not registering means those paths 404, which
+	// is the truthful answer where PLG has no data to serve.
+	if db != nil {
+		registerPLGRoutes(mux, db)
+	}
+
 	return middleware.CorrelationID(
 		middleware.Recovery(
 			middleware.Logger(
