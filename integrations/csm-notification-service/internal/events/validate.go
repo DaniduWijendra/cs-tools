@@ -264,7 +264,9 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		// both the Asgardeo userName and the invitation's recipient.
 		// GivenName/FamilyName are optional (Salesforce doesn't require a
 		// first name; dispatch falls back to the email's local part), and
-		// ProjectName/ProjectKey/Roles/Type are display-only.
+		// ProjectName/ProjectKey/Roles/Type are display-only, and
+		// IsResend is a marker dispatch acts on, valid either way —
+		// an absent one is simply a first invitation.
 		if p.MembershipSfID == "" || !emailPattern.MatchString(p.Email) {
 			return fmt.Errorf("events: missing or invalid required field for %s", t)
 		}

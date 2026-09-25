@@ -131,6 +131,13 @@ func invitedRecord(integration bool) eventbus.Record {
 	return eventbus.Record{Value: []byte(`{"type":"project_contact.invited","entityId":"` + invitedMembership + `","payload":{"membershipSfId":"` + invitedMembership + `","contactSfId":"003000000000001AAA","email":"jane@acme.com","givenName":"Jane","familyName":"Doe","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":["Admin","Portal user"],"isIntegrationUser":` + isIntegration + `,"type":"OWN CONTACT"}}`)}
 }
 
+// resentInvitedRecord is the same invitation republished by entity-service
+// after an admin pressed "Resend invitation" -- identical to
+// invitedRecord(false) but for the isResend marker.
+func resentInvitedRecord() eventbus.Record {
+	return eventbus.Record{Value: []byte(`{"type":"project_contact.invited","entityId":"` + invitedMembership + `","payload":{"membershipSfId":"` + invitedMembership + `","contactSfId":"003000000000001AAA","email":"jane@acme.com","givenName":"Jane","familyName":"Doe","projectName":"Acme Cloud","projectKey":"ACMECLOUD","roles":["Admin","Portal user"],"isIntegrationUser":false,"type":"OWN CONTACT","isResend":true}}`)}
+}
+
 // newOnboardingDispatcher wires a Dispatcher with every case.* channel
 // mocked away and the onboarding feature configured as given.
 func newOnboardingDispatcher(identity *mockIdentityProvisioner, email *mockEmailSender, steps *mockStepRecorder, identityEnabled, emailEnabled bool) *Dispatcher {
@@ -649,6 +656,131 @@ func TestDispatcher_Handle_ProjectContactInvited_LedgerNotConsultedWhenEmailIsOf
 	}
 	if steps.emailSentChecks != 0 {
 		t.Errorf("ledger consulted %d times with the email step off, want 0", steps.emailSentChecks)
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ResendBypassesTheLedgerGuard:
+// a deliberate resend is the one case the duplicate guard must not stop.
+// The ledger says an invitation already succeeded -- which is exactly what
+// a resend expects to find -- and the email still goes out, with the EMAIL
+// step recorded again so the ledger's attempt count keeps counting.
+func TestDispatcher_Handle_ProjectContactInvited_ResendBypassesTheLedgerGuard(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}
+	steps := &mockStepRecorder{emailAlreadySent: true}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), resentInvitedRecord()); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1: a resend must send even though the ledger records one", len(email.calls))
+	}
+	if steps.emailSentChecks != 0 {
+		t.Errorf("ledger consulted %d times on a resend, want 0", steps.emailSentChecks)
+	}
+	assertSteps(t, steps, "IDENTITY=SUCCEEDED", "EMAIL=SUCCEEDED")
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ResendUsesReminderWording:
+// by the time a resend goes out the account exists, so the unguarded logic
+// would reach for the "you already have a WSO2 account" template -- which
+// reads as nonsense to someone who never received the first email. A
+// resend gets the reminder instead, and neither of the other two.
+func TestDispatcher_Handle_ProjectContactInvited_ResendUsesReminderWording(t *testing.T) {
+	identity, email, steps := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}, &mockStepRecorder{}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), resentInvitedRecord()); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(email.calls))
+	}
+	sent := email.calls[0]
+	if !strings.Contains(sent.subject, "Reminder") || !strings.Contains(sent.subject, "Acme Cloud") {
+		t.Errorf("subject = %q, want the reminder wording naming the project", sent.subject)
+	}
+	if !strings.Contains(sent.htmlBody, "Here is your invitation to the project") {
+		t.Error("body does not use the reminder wording")
+	}
+	for _, deny := range []string{"A WSO2 account has been created for you", "You already have a WSO2 account"} {
+		if strings.Contains(sent.htmlBody, deny) {
+			t.Errorf("resend body contains %q, which belongs to another variant", deny)
+		}
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_WithoutResendTheGuardStillHolds
+// is the other half of the pair above: the same ledger state, the same
+// dispatcher, only the marker missing -- and nothing is sent.
+func TestDispatcher_Handle_ProjectContactInvited_WithoutResendTheGuardStillHolds(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}
+	steps := &mockStepRecorder{emailAlreadySent: true}
+	d := newOnboardingDispatcher(identity, email, steps, true, true)
+
+	if err := d.Handle(context.Background(), invitedRecord(false)); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails without the resend marker, want none", len(email.calls))
+	}
+	if steps.emailSentChecks != 1 {
+		t.Errorf("ledger consulted %d times, want exactly 1", steps.emailSentChecks)
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_NoLedgerConfiguredDoesNotSend
+// covers a misconfiguration the other two nil checks already cover for the
+// SCIM and email clients: the email step enabled with no onboarding-step
+// recorder at all. Recording a step tolerates that, but the duplicate check
+// cannot -- and reaching it with a nil recorder used to panic inside the
+// consumer goroutine. It must be an ordinary failed record instead, with no
+// unguarded invitation going out.
+func TestDispatcher_Handle_ProjectContactInvited_NoLedgerConfiguredDoesNotSend(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{}, &mockEmailSender{}
+	// Deliberately not newOnboardingDispatcher: Steps has to be a nil
+	// interface, not a typed nil *mockStepRecorder.
+	d := newTestDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}).
+		WithOnboarding(OnboardingConfig{
+			Identity:        identity,
+			Email:           email,
+			IdentityEnabled: true,
+			EmailEnabled:    true,
+			PortalURL:       "https://support.wso2.com",
+		})
+
+	err := d.Handle(context.Background(), invitedRecord(false))
+	if err == nil {
+		t.Fatal("Handle() = nil, want a configuration error so the record is retried")
+	}
+	if !strings.Contains(err.Error(), "onboarding-step ledger") {
+		t.Errorf("Handle() error = %v, want it to name the missing ledger", err)
+	}
+	if len(email.calls) != 0 {
+		t.Errorf("sent %d emails, want none with no ledger to check them against", len(email.calls))
+	}
+}
+
+// TestDispatcher_Handle_ProjectContactInvited_ResendNeedsNoLedger is the
+// other side of that guard: a resend never reads the ledger, so a missing
+// recorder must not stop it. The send is deliberate; the only thing lost is
+// the best-effort record of it, which recordOnboardingStep already tolerates.
+func TestDispatcher_Handle_ProjectContactInvited_ResendNeedsNoLedger(t *testing.T) {
+	identity, email := &mockIdentityProvisioner{existed: true}, &mockEmailSender{}
+	d := newTestDispatcher(&mockEmailSender{}, &mockGoogleChatSender{}, &mockCallSender{}).
+		WithOnboarding(OnboardingConfig{
+			Identity:        identity,
+			Email:           email,
+			IdentityEnabled: true,
+			EmailEnabled:    true,
+			PortalURL:       "https://support.wso2.com",
+		})
+
+	if err := d.Handle(context.Background(), resentInvitedRecord()); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(email.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1: a resend does not depend on the ledger", len(email.calls))
 	}
 }
 

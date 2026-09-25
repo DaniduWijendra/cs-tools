@@ -440,4 +440,13 @@ type ProjectContactInvitedPayload struct {
 	// onboarding-step writes with it. Optional: an empty value means
 	// entity-service could not parse the Salesforce date.
 	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
+	// IsResend marks a deliberate re-invitation — an admin pressing
+	// "Resend invitation" in the portal, which entity-service republishes
+	// as this same event with the marker set. Optional: an absent value
+	// means a normal, first invitation. dispatch then skips the
+	// duplicate-invitation ledger check (the whole point of a resend is to
+	// send again) and uses the short reminder wording, which claims
+	// nothing about whether the account was just created — see
+	// dispatch.handleProjectContactInvited.
+	IsResend bool `json:"isResend,omitempty"`
 }

@@ -54,6 +54,9 @@ var projectContactInvitedNewTemplateRaw string
 //go:embed templates/project_contact_invited_existing.html
 var projectContactInvitedExistingTemplateRaw string
 
+//go:embed templates/project_contact_invited_reminder.html
+var projectContactInvitedReminderTemplateRaw string
+
 // wso2LogoURL is WSO2's own official logo asset, served from wso2.cachefly.net
 // (WSO2's public CDN for site assets — not third-party hosting). An earlier
 // version embedded the logo as an inline base64 data: URI instead, avoiding
@@ -88,6 +91,7 @@ var (
 
 	projectContactInvitedNewTemplate      = bakeLogo(projectContactInvitedNewTemplateRaw)
 	projectContactInvitedExistingTemplate = bakeLogo(projectContactInvitedExistingTemplateRaw)
+	projectContactInvitedReminderTemplate = bakeLogo(projectContactInvitedReminderTemplateRaw)
 )
 
 // htmlBlockBoundary matches the tags plainTextFromHTML treats as line
@@ -443,9 +447,10 @@ func RenderCRPlanDateNoticeEmail(d CRPlanDateEmailData) string {
 	return replacer.Replace(crPlanDateNoticeTemplate)
 }
 
-// ProjectContactInvitedEmailData holds every value substituted into the two
-// project-invitation templates (RenderProjectContactInvitedNewEmail /
-// RenderProjectContactInvitedExistingEmail). DisplayName is already
+// ProjectContactInvitedEmailData holds every value substituted into the
+// three project-invitation templates (RenderProjectContactInvitedNewEmail /
+// RenderProjectContactInvitedExistingEmail /
+// RenderProjectContactInvitedReminderEmail). DisplayName is already
 // resolved by the caller (given + family name, or the email's local part
 // when Salesforce has neither — dispatch.inviteeDisplayName's concern, not
 // this package's). Roles are the raw Salesforce project roles; when empty
@@ -482,8 +487,21 @@ func RenderProjectContactInvitedExistingEmail(d ProjectContactInvitedEmailData) 
 	return renderProjectContactInvited(projectContactInvitedExistingTemplate, d)
 }
 
-// renderProjectContactInvited is the shared substitution both invitation
-// variants use — they differ only in wording, not in placeholders.
+// RenderProjectContactInvitedReminderEmail fills in the short reminder sent
+// when an admin deliberately resends an invitation
+// (events.ProjectContactInvitedPayload.IsResend): here is your invitation
+// again, sign in here. Deliberately says nothing about the account — by the
+// time a resend goes out the Asgardeo user exists, but the reader may never
+// have seen the first email, so "you already have a WSO2 account" would read
+// as nonsense and "an account has been created for you" would be a second
+// welcome. AccountCreated is ignored by this variant.
+func RenderProjectContactInvitedReminderEmail(d ProjectContactInvitedEmailData) string {
+	return renderProjectContactInvited(projectContactInvitedReminderTemplate, d)
+}
+
+// renderProjectContactInvited is the shared substitution all three
+// invitation variants use — they differ only in wording, not in
+// placeholders (the reminder simply has no ACCOUNT_* blocks to fill).
 func renderProjectContactInvited(tmpl string, d ProjectContactInvitedEmailData) string {
 	roles := strings.Join(d.Roles, ", ")
 	tmpl = applyOptionalBlock(tmpl, "ROLES", roles)

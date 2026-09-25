@@ -379,8 +379,17 @@ func TestMembershipIngest_CreatedInvitedPublishesEvent(t *testing.T) {
 		!reflect.DeepEqual(payload.Roles, []string{"Portal user", "Security Contact", "Admin"}) || payload.IsIntegrationUser {
 		t.Errorf("payload = %+v", payload)
 	}
-	if ts, err := time.Parse(time.RFC3339Nano, payload.EventModifiedOn); err != nil || ts.IsZero() {
-		t.Errorf("payload.eventModifiedOn = %q, want the membership's Salesforce LastModifiedDate in RFC 3339", payload.EventModifiedOn)
+	// Not merely "a valid, non-zero timestamp": this value is what the
+	// consumer's own version check compares against, so a payload carrying
+	// the processing time instead of the record's LastModifiedDate would
+	// silently make every replay look newer. Pin the exact instant.
+	wantEventModifiedOn, ok := parseSalesforceLastModified(sampleStr(testLastModified))
+	if !ok {
+		t.Fatalf("the testLastModified fixture %q must parse", testLastModified)
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, payload.EventModifiedOn); err != nil || !ts.Equal(wantEventModifiedOn) {
+		t.Errorf("payload.eventModifiedOn = %q, want %s (the membership's Salesforce LastModifiedDate in RFC 3339)",
+			payload.EventModifiedOn, wantEventModifiedOn.Format(time.RFC3339Nano))
 	}
 	if h.se.pcCalls[0] != testMembershipID || h.se.contactCalls[0] != testContactID {
 		t.Errorf("calls: pc=%v contact=%v", h.se.pcCalls, h.se.contactCalls)
