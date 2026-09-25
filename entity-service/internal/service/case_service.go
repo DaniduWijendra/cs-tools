@@ -19,6 +19,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -1094,6 +1096,24 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 		return domain.UpdateCaseResponse{}, err
 	}
 
+	// before is fetched only when something could publish, to detect a
+	// genuine assignee change -- a caller re-PATCHing the case's current
+	// assignee (a no-op as far as anyone downstream cares) must not send
+	// every watcher a false "case assigned" notification, the same guard
+	// snCaseService.UpdateCase's own AssigneeEmail path applies.
+	// CaseRepository.UpdateCaseAssignee itself has no such guard (it always
+	// writes assigned_to_id), so this data source detects the no-op here
+	// instead, before the write, the same way snCaseService.UpdateCase
+	// compares its own pre-PATCH GetCaseByID against req.AssigneeEmail.
+	publishAssign := false
+	if s.publisher != nil {
+		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
+			slog.ErrorContext(ctx, "update case: enrich case for case.assigned publish failed", "caseId", req.ID)
+		} else if cv.AssignedEngineer == nil || !strings.EqualFold(cv.AssignedEngineer.Email, assignee.Email) {
+			publishAssign = true
+		}
+	}
+
 	updatedOn, err := s.repo.UpdateCaseAssignee(ctx, req.ID, assignee.ID, actor.Email)
 	if err != nil {
 		return domain.UpdateCaseResponse{}, err
@@ -1102,6 +1122,12 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 	assigneeName := strings.TrimSpace(assignee.FirstName + " " + assignee.LastName)
 	if assigneeName == "" {
 		assigneeName = assignee.Email
+	}
+
+	// Event publishing follows the write, not DATA_SOURCE -- see
+	// publishCaseCreatedEvent's own doc comment for why.
+	if publishAssign {
+		s.publishCaseAssigned(ctx, req.ID, assigneeName, assignee.Email)
 	}
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
@@ -1130,6 +1156,60 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 	}, nil
 }
 
+// publishCaseAssigned mirrors snCaseService.publishCaseAssigned -- see that
+// function's own doc comment for the full design rationale (Recipients is
+// the case's watch list only, bounded by publishCaseAssignedTimeout).
+// Unlike the ServiceNow version, this re-fetches the case AFTER the write:
+// updateCaseAssignee's own pre-write GetCaseByID (above) exists only to
+// detect the no-op case, not to reuse as a payload source, since
+// cv.ProjectDetails/cv.WatchList don't change based on the assignment
+// itself either way.
+func (s *caseService) publishCaseAssigned(ctx context.Context, caseID, assigneeName, assigneeEmail string) {
+	if s.publisher == nil || assigneeEmail == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, publishCaseAssignedTimeout)
+	defer cancel()
+
+	cv, err := s.GetCaseByID(ctx, caseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "update case: enrich case for case.assigned publish failed", "caseId", caseID)
+		return
+	}
+
+	recipients := watchListUserEmails(cv.WatchList)
+	if len(recipients) == 0 {
+		slog.InfoContext(ctx, "update case: case.assigned not published, case has no watchers to email", "caseId", caseID)
+		return
+	}
+
+	// cv.ProjectDetails is nilable on this data source (unlike ServiceNow's
+	// own CaseView, where it's always populated) -- see GetCaseByID's own
+	// comment on why project/deployment joins are LEFT joins here.
+	projectID := ""
+	if cv.ProjectDetails != nil {
+		projectID = cv.ProjectDetails.ID
+	}
+
+	payload, err := json.Marshal(events.CaseAssignedPayload{
+		AssigneeName:  assigneeName,
+		AssigneeEmail: assigneeEmail,
+		ProjectID:     projectID,
+		CaseID:        caseID,
+		CaseNumber:    cv.Number,
+		WSO2CaseID:    cv.InternalID,
+		CaseTitle:     cv.Subject,
+		Recipients:    recipients,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "update case: encode case.assigned payload failed", "caseId", caseID, "error", err)
+		return
+	}
+	if err := s.publisher.Publish(ctx, events.TypeCaseAssigned, caseID, payload); err != nil {
+		slog.ErrorContext(ctx, "update case: publish case.assigned failed", "caseId", caseID)
+	}
+}
+
 // acknowledgeCase implements UpdateCase's Acknowledge branch: claiming the
 // case for the calling engineer via CaseRepository.AcknowledgeCase's atomic
 // "first write wins" semantics -- same idempotent contract
@@ -1146,6 +1226,15 @@ func (s *caseService) acknowledgeCase(ctx context.Context, req domain.UpdateCase
 	alreadyAcknowledged, ackBy, number, updatedOn, err := s.repo.AcknowledgeCase(ctx, req.ID, actor.ID, actor.Email)
 	if err != nil {
 		return domain.UpdateCaseResponse{}, err
+	}
+
+	// Only publish/mirror when this call is the one that actually claimed
+	// it -- a repeat Acknowledge:true against an already-acknowledged case
+	// changed nothing in Postgres, so there's nothing new to react to. See
+	// snCaseService.publishCaseAcknowledged's own doc comment for the same
+	// AlreadyAcknowledged distinction on the ServiceNow data source.
+	if !alreadyAcknowledged {
+		s.publishCaseAcknowledged(ctx, req.ID, ackBy.Name)
 	}
 
 	// Only mirror to ServiceNow when this call is the one that actually
@@ -1172,6 +1261,44 @@ func (s *caseService) acknowledgeCase(ctx context.Context, req domain.UpdateCase
 			AcknowledgedBy:      &ackBy,
 		},
 	}, nil
+}
+
+// publishCaseAcknowledged mirrors snCaseService.publishCaseAcknowledged --
+// see that function's own doc comment for the full design rationale
+// (Chat-only, no Recipients/email reaction; bounded by
+// publishCaseAcknowledgedTimeout). acknowledgerName comes straight from
+// CaseRepository.AcknowledgeCase's own return value (ackBy.Name) rather
+// than a second lookup -- unlike ServiceNow, this data source computed that
+// identity itself in the same round trip that performed the claim.
+func (s *caseService) publishCaseAcknowledged(ctx context.Context, caseID, acknowledgerName string) {
+	if s.publisher == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, publishCaseAcknowledgedTimeout)
+	defer cancel()
+
+	cv, err := s.GetCaseByID(ctx, caseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "update case: enrich case for case.acknowledged publish failed", "caseId", caseID)
+		return
+	}
+
+	payload, err := json.Marshal(events.CaseAcknowledgedPayload{
+		CaseID:           caseID,
+		CaseNumber:       cv.Number,
+		WSO2CaseID:       cv.InternalID,
+		Severity:         strings.ToUpper(string(derefSeverity(cv.Severity))),
+		Product:          caseProductName(cv),
+		Team:             caseTeamName(cv),
+		AcknowledgerName: acknowledgerName,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "update case: encode case.acknowledged payload failed", "caseId", caseID, "error", err)
+		return
+	}
+	if err := s.publisher.Publish(ctx, events.TypeCaseAcknowledged, caseID, payload); err != nil {
+		slog.ErrorContext(ctx, "update case: publish case.acknowledged failed", "caseId", caseID)
+	}
 }
 
 // updateCaseParent implements UpdateCase's ParentID branch: writing

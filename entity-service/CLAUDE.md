@@ -687,6 +687,65 @@ owning team's space is arguably more useful than a stale one. Left as
 current-product routing; revisit only if the same-space guarantee turns
 out to matter in practice.
 
+**`caseService.UpdateCase` (the Postgres data source) supports
+`Acknowledge`/`AssigneeEmail` too** — `caseService.acknowledgeCase`/
+`updateCaseAssignee` (own branches in `UpdateCase`, alongside
+`updateCaseWatchList`/`updateCaseParent`/`updateCaseFields`) write
+`work_item.acknowledged_by_user_id`/`assigned_to_id` via
+`CaseRepository.AcknowledgeCase`/`UpdateCaseAssignee`.
+`CaseRepository.AcknowledgeCase` claims a case first-write-wins inside a
+transaction that row-locks `work_item` (`SELECT ... FOR UPDATE`) before
+reading whether it's already claimed, so two concurrent Acknowledge calls on
+the same case can't both believe they were first; it returns
+`alreadyAcknowledged` plus whoever now holds the claim, read back from the
+same "user" join regardless of which branch actually ran. `UpdateCaseAssignee`
+has no such guard at all — it unconditionally writes `assigned_to_id` every
+call, no no-op detection in the repository layer.
+- **This service's own contribution on top of that**: neither
+  `acknowledgeCase` nor `updateCaseAssignee` originally published a
+  `case.acknowledged`/`case.assigned` event on the Postgres data source at
+  all — Acknowledge/AssigneeEmail worked (the write itself succeeded,
+  ServiceNow-mirror dispatch fired under dual-write mode), but
+  `csm-notification-service` never heard about either one unless
+  `DATA_SOURCE=servicenow`. Closing that gap added:
+  - **`updateCaseAssignee`'s own no-op detection**, done at the service
+    layer since the repository doesn't do it: a `GetCaseByID` fetch right
+    before the write (gated on `s.publisher != nil`, so a deployment with no
+    Event Hub configured pays nothing extra) compares
+    `cv.AssignedEngineer.Email` against the requested `AssigneeEmail`
+    case-insensitively — the same guard `snCaseService.UpdateCase`'s own
+    AssigneeEmail path applies, just done here instead of in SQL.
+  - **`publishCaseAcknowledged`/`publishCaseAssigned`**, reusing the exact
+    same shared helpers/payload shapes ServiceNow's own versions do
+    (`caseProductName`/`caseTeamName`/`watchListUserEmails`,
+    `events.CaseAcknowledgedPayload`/`CaseAssignedPayload`) — both live in
+    the same `service` package, so nothing needed duplicating.
+    `publishCaseAcknowledged` only fires when `!alreadyAcknowledged` (a
+    repeat `Acknowledge:true` against an already-claimed case changed
+    nothing, so nothing to publish — the same distinction
+    `snCaseService.publishCaseAcknowledged`'s own call site makes) and takes
+    `acknowledgerName` straight from `AcknowledgeCase`'s own return value, no
+    second lookup. `publishCaseAssigned` re-fetches the case via
+    `GetCaseByID` *after* the write (the pre-write fetch above exists only
+    to detect the no-op, not to reuse as a payload source) and guards
+    `cv.ProjectDetails` as nilable — unlike ServiceNow's `CaseView`, which
+    always has one, this data source's does not (see `GetCaseByID`'s own
+    comment on why project/deployment joins are `LEFT JOIN`s here).
+  - **`GetCaseByID`'s query now also joins `acknowledged_by_user_id`**
+    (`LEFT JOIN "user" ack ON ack.id = wi.acknowledged_by_user_id`, same
+    pattern as its pre-existing `assigned_to_id`/`ae` join) to populate
+    `CaseView.AcknowledgedBy` — previously always nil on this data source
+    even after a successful Acknowledge, since nothing read the column back
+    for display outside `AcknowledgeCase`'s own one-off query.
+- **Not carried over from the ServiceNow path**: there is no elevated-role
+  check on `Acknowledge` here — `acknowledgeCase`'s own doc comment notes
+  this is deliberate, not an oversight: no Postgres-side permission model
+  exists yet, so this data source only requires a known authenticated
+  caller, same as every other Postgres case mutation. `SearchCaseView` still
+  has no `AcknowledgedBy` field either (matching ServiceNow's own
+  `SearchCaseView`-equivalent, which doesn't surface it there either — only
+  `GetCaseByID` does).
+
 Every helper above runs **synchronously** (not detached/async the way
 `apps/csm-portal/backend`'s own `internal/handler/cases.go` `publishAsync`
 is), each bounded by its own 5s `context.WithTimeout`

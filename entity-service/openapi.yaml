@@ -3325,9 +3325,9 @@ paths:
       description: |
         Updates exactly one field of the case. Provide exactly one of: `state`, `severity`,
         `workState`, `watchList`, `assigneeEmail`, `acknowledge`, `bestCaseFixEta`,
-        `mostLikelyFixEta`, or `worstCaseFixEta`. `watchList`, `assigneeEmail`, `bestCaseFixEta`,
-        `mostLikelyFixEta`, and `worstCaseFixEta` are supported only when the ServiceNow data
-        source is active.
+        `mostLikelyFixEta`, or `worstCaseFixEta`. `bestCaseFixEta`, `mostLikelyFixEta`, and
+        `worstCaseFixEta` are supported only when the ServiceNow data source is active;
+        `watchList`, `assigneeEmail`, and `acknowledge` are supported by every data source.
       operationId: patchCase
       parameters:
         - name: id
@@ -10165,8 +10165,8 @@ components:
         four fields may be sent together in one request (e.g. all three fix-ETA estimates plus
         `workaroundProvided` in the same call) — they must not be combined with any of the
         exclusive fields above, though.
-        `watchList`, `assigneeEmail`, and the whole combinable group are supported only for the
-        ServiceNow data source.
+        The combinable group is supported only for the ServiceNow data source. `watchList`,
+        `assigneeEmail`, and `acknowledge` are supported by every data source.
         `resolutionCode`, `cause`, and `closeNotes` are optional and may only be provided alongside
         `state` when the state is `closed` or `solution_proposed`.
         `type` transfers the case to another type and is supported only for the ServiceNow
@@ -10253,14 +10253,19 @@ components:
           items:
             type: string
           description: |
-            The full set of watchers to set on the case, replacing whatever is there
-            (ServiceNow only). Each item is a watcher email (Customer Portal) or a
-            platform user UUID (CSM); the list must be all emails or all UUIDs. An
-            empty array clears the watch list, and counts as providing the field.
+            The full set of watchers to set on the case, replacing whatever is there.
+            Each item is a watcher email (Customer Portal) or a platform user UUID
+            (CSM); the list must be all emails or all UUIDs. An empty array clears the
+            watch list, and counts as providing the field.
         assigneeEmail:
           type: string
           format: email
-          description: Email of the engineer to assign to this case (ServiceNow only).
+          description: >
+            Email of the engineer to assign to this case. On the ServiceNow data
+            source, must be an email ServiceNow itself resolves to an assignable
+            engineer. On the Postgres data source, must match an existing platform
+            user's email; a no-op re-assignment to the case's current assignee
+            succeeds without publishing `case.assigned`.
         acknowledge:
           type: boolean
           enum: [true]
@@ -10269,9 +10274,10 @@ components:
             someone has seen it and picked it up, which is distinct from assignment.
             Succeeds without changing anything if the case is already acknowledged, in
             which case the response carries `alreadyAcknowledged: true`. Only `true` is
-            accepted; there is no way to remove an acknowledgement. Requires an elevated
-            support role, and is supported only by data sources that record
-            acknowledgement.
+            accepted; there is no way to remove an acknowledgement. On the ServiceNow
+            data source this requires an elevated support role, enforced upstream; the
+            Postgres data source only requires the caller to be a known authenticated
+            user.
         resolutionCode:
           type: string
           enum:
