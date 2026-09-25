@@ -145,6 +145,47 @@ an inline delivery attempt to `CreateAlert` "for lower latency to first
 attempt" — that's what `SRE_ALERT_POLL_INTERVAL_SECONDS` is for; a crash
 between an inline attempt and persisting would silently lose the alert.
 
+## Service-UUID resolution: static map on the fast path, live search only in the worker
+
+`CreateIncidentRequest.ServiceID` must be a CMDB service UUID
+(`format: uuid` on `csm-integration-service`'s own contract); the alert's own
+`Service` field is a human-readable label a vendor sends (Azure's
+`monitoringService`, or a fixed adapter literal like `"Site24x7
+Monitoring"`), never a UUID. Passing that label straight through as
+`ServiceID` was a confirmed bug (every alert from every source failed
+delivery) — the fix is a hybrid resolution split across two places, for the
+exact same reason `MapToIncident` runs synchronously (see "Persist-first is
+not an optimization" above): a network call must never sit on the request
+path before the `202` response.
+
+- **`internal/handler.MapToIncident`** consults `SRE_ALERT_SERVICE_MAP` (a
+  static, exact-match label→UUID table, parsed once at startup in
+  `cmd/server/main.go`) synchronously — pure in-process map lookup, no I/O.
+  A miss writes `csmclient.UnresolvedServiceIDSentinel` (the empty string,
+  deliberately Go's own zero value — see that constant's doc comment for
+  why) instead of ever calling `/services/search` inline. The raw label is
+  never lost: `alertpayload.Payload.Service` already preserves it
+  separately from `CreateIncidentRequest`.
+- **`internal/worker.resolveServiceID`** does the live half, once per
+  delivery attempt, immediately before `CreateIncident` — never earlier.
+  Order: an in-memory, TTL-bounded cache (`internal/worker.serviceCache`,
+  default 15 minutes, only successful resolutions ever cached — a
+  zero-result or transient error must not pin an alert to a stale answer)
+  → a live `POST /services/search` call (`csmclient.Client.SearchServices`,
+  limit 1, exact-match `searchQuery`) → `SRE_ALERT_UNKNOWN_SERVICE_ID` on a
+  **confirmed** zero-result. A transient search error is NOT translated
+  into the unknown-service fallback — it's folded into
+  `internal/worker.handleDeliveryFailure`, the exact same retryable-failure
+  path a `CreateIncident` error takes (`isRetryable`), so a search hiccup
+  gets retried like any other CSM-unavailability signal, not silently
+  bucketed as "this label doesn't exist."
+
+Do not resolve a label inline in `MapToIncident` "to avoid the worker doing
+it later" — that reintroduces the exact network-call-before-persist problem
+"Persist-first is not an optimization" above exists to prevent. Do not cache
+a zero-result or a search error in `serviceCache` either — both need to be
+retried, not pinned for `serviceCache`'s TTL.
+
 ## Backoff-due filtering happens in Go, not SQL
 
 `internal/store.PostgresStore.PendingBatch` returns *every* `pending` row
@@ -276,8 +317,9 @@ need to lower the `go.mod` version to match an older local install.
 `POST /alerts` only ever accepted this service's own pre-normalized
 `AlertRequest` JSON — nothing translated a real monitoring tool's actual
 webhook payload into it. `internal/handler/adapter_azure.go`,
-`adapter_site24x7.go`, `adapter_opensearch.go`, and `adapter_grafana.go`
-close that gap: each is a dedicated `POST /alerts/adapters/<vendor>` route
+`adapter_site24x7.go`, `adapter_opensearch.go`, `adapter_grafana.go`, and
+`adapter_choreodp.go` close that gap: each is a dedicated
+`POST /alerts/adapters/<vendor>` route
 that parses one vendor's own native payload into an `AlertRequest`, then
 calls the same unexported `AlertHandler.enqueueAlert` that `CreateAlert`
 itself calls (see `internal/handler/alerts.go`) — every adapter reuses
@@ -309,6 +351,50 @@ have been wrong. `"azure"` and `"site24x7"` are the literals
 `internal/severity.MapContactType` already has entries for; keep using
 those exact strings if a new adapter's vendor gets a `ContactType` entry
 added there in the future.
+
+`adapter_choreodp.go` is the one exception to the fixed-literal-`Source`
+rule above: its payload's own `source` field genuinely is the originating
+identity (not a human-readable title like OpenSearch's), so it's mapped
+straight through to `AlertRequest.Source` — which also feeds
+`requireAuthenticatedSource`'s Basic Auth match, same as every other field.
+It's also the first adapter to set `AlertRequest.Impact`/`Urgency`
+(`internal/handler.AlertRequest`'s additive override of
+`severity.MapImpactUrgency` — see that field's own doc comment): this
+source's severity/impact/urgency are raw ServiceNow-convention integers
+(1=High/2=Medium/3=Low), not the string vocabulary every other adapter
+maps to.
+
+## Group-attach pushes a work note — best-effort, like `recordMapping`
+
+`internal/worker.tryGroup`'s attach path used to be silent: finding an
+earlier alert's still-open incident and recording a `CreateAlertIncidentMapping`
+row (a Postgres-side audit trail on this service's own database) said nothing
+to the incident itself. `internal/worker.pushGroupAttachWorkNote` closes
+that gap, calling `csmclient.Client.UpdateIncident` (`PATCH /incidents/{id}`
+on `csm-integration-service`) with a work note summarizing the new alert
+(`internal/worker.buildGroupAttachWorkNotes`, built from `row.AlertNumber`/
+`ReceivedAt` plus whatever `bp.CreateIncidentRequest.WorkNotes`/
+`AdditionalComments` this alert's own `internal/handler.MapToIncident` call
+already produced when it was buffered — not re-derived).
+
+Same best-effort, non-blocking philosophy as `recordMapping` immediately
+below it in `internal/worker/worker.go` — read that method's doc comment,
+it applies here verbatim: a failure here is logged as a warning and never
+fails the overall delivery or holds back `Store.MarkDelivered`. The primary
+goal (this alert is attached to the right incident) is already achieved by
+the time this runs. Do not change this to block delivery on the work-note
+push succeeding — that would regress a correctness property (never lose a
+buffered alert over a side effect) for a visibility improvement.
+
+`csmclient.Client.UpdateIncident` goes through the exact same
+M2M-credential-fallback mechanism as `CreateIncident`/the two searches (see
+"Why a 401 is retryable" above) — a 401 is possible, not guaranteed — except
+this operation has no Postgres-data-source fallback at all on
+`csm-integration-service`'s side (see that service's own CLAUDE.md): a 503
+is possible too, and is treated the same as any other error here — logged,
+not retried, not escalated (there is nothing to retry: the work note is a
+one-shot summary of this specific alert, and retrying it on a later scan
+would need its own dedup story this feature does not need).
 
 ## Vendor neutrality
 

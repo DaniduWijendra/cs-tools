@@ -67,6 +67,40 @@ either endpoint as a possible, retryable outcome (see
 `internal/csmclient/incidents.go`'s doc comment in `sre-alert-ingestion-service`
 for the caller-side reasoning), not as proof the endpoint is permanently broken.
 
+**`POST /services/search` (`SearchITServices`) uses this exact same
+M2M-fallback mechanism** — it proxies a ServiceNow-backed entity-service CMDB
+IT-service search operation, confirmed to go through the identical code path
+as `CreateIncident`/`SearchIncidents` above. It works over M2M the same way
+those two now do: a 401 is possible if the target environment's M2M
+ServiceNow credential isn't configured, but that is not unconditional. This
+endpoint backs `sre-alert-ingestion-service`'s live service-UUID resolution
+fallback (see that service's own CLAUDE.md) — a static label-to-UUID map is
+consulted first, synchronously, before an alert is ever buffered; this
+endpoint is only called, at delivery-attempt time, for a label the static map
+doesn't cover.
+
+**`PATCH /incidents/{id}` (`PatchIncident`) uses this exact same M2M-fallback
+mechanism as `CreateIncident`/`SearchIncidents`/`SearchITServices` above — but
+unlike `PATCH /cases/{id}` below, it has no Postgres-data-source path at
+all.** On `DATA_SOURCE=postgres`, entity-service's `incidentService.UpdateIncident`
+unconditionally returns a 503 (not supported on this data source yet — several
+fields have no backing Postgres column, and others would need comment-table
+side effects not implemented there); there is no field combination that
+succeeds. On `DATA_SOURCE=servicenow`, it goes through the identical
+M2M-credential-fallback code path as the other three endpoints above: a 401
+is possible if the target environment's M2M ServiceNow credential isn't
+configured, but not unconditional. **Do not describe this endpoint as "always
+401" (that's `UpdateProject`'s situation) or as a field-dependent partial
+exception like `PATCH /cases/{id}` (that endpoint's Postgres path narrows to
+specific fields instead of failing outright) — its actual behavior is
+"unconditionally ServiceNow-backed, no Postgres fallback, M2M-credential-
+dependent on that data source."** Added for `sre-alert-ingestion-service`'s
+group-attach work-note push (see that service's own CLAUDE.md): when it
+attaches a new alert to an already-existing incident instead of creating one,
+it pushes a work note summarizing the new alert via this endpoint —
+best-effort, non-blocking, matching that service's existing failure-tolerance
+conventions.
+
 The "deferred pending a captured end-user token" history below (from the owning
 team's internal issue, written by the engineer who built the ACP path) describes
 `UpdateProject`'s situation specifically — that endpoint's ServiceNow operation
@@ -146,7 +180,7 @@ handler so every `slog.*Context(r.Context(), …)` call automatically includes
 
 | Package | Upstream | Notes |
 |---------|----------|-------|
-| `entity` | Entity service | Account/Project + Contacts sub-resource, Case (patch + comment create), Opportunity/Invoice/ProjectOpportunityLink (read-only), incident creation/search, alert-incident mapping create/lookup; raw `[]byte` passthrough |
+| `entity` | Entity service | Account/Project + Contacts sub-resource, Case (patch + comment create), Opportunity/Invoice/ProjectOpportunityLink (read-only), incident creation/search/update, alert-incident mapping create/lookup; raw `[]byte` passthrough |
 
 A new upstream service would get its own package under `internal/`, following the
 same `Config`/`Client`/`NewClient`/`do()` pattern as `internal/entity`.

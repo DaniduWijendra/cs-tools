@@ -51,6 +51,20 @@ type AlertRequest struct {
 	Environment      string `json:"environment,omitempty"`
 	UniqueIdentifier string `json:"uniqueIdentifier,omitempty"`
 	Description      string `json:"description"`
+	// Impact and Urgency are an additive, optional override of this
+	// service's usual severity.MapImpactUrgency derivation — see
+	// MapToIncident's doc comment for the full contract. Pointers, not plain
+	// strings, so "unset" (nil, the zero value for every existing caller:
+	// generic /alerts callers and every pre-existing vendor adapter) is
+	// distinguishable from an explicit, deliberately-chosen value; a plain
+	// string could never tell "not sent" apart from a valid-looking empty
+	// string. Values must be one of csmclient.CreateIncidentRequest's own
+	// "HIGH"/"MEDIUM"/"LOW" vocabulary — validate() rejects a non-nil value
+	// outside that set, so a generic /alerts caller can't smuggle an
+	// arbitrary string past this service straight into CSM's own incident
+	// contract.
+	Impact  *string `json:"impact,omitempty"`
+	Urgency *string `json:"urgency,omitempty"`
 }
 
 // validate reports the first missing or malformed field, or "" if req is
@@ -95,28 +109,91 @@ func (req AlertRequest) validate() string {
 		return "metricName is required"
 	case strings.TrimSpace(req.Description) == "":
 		return "description is required"
+	case req.Impact != nil && !isValidImpactUrgency(*req.Impact):
+		return "impact must be HIGH, MEDIUM, or LOW"
+	case req.Urgency != nil && !isValidImpactUrgency(*req.Urgency):
+		return "urgency must be HIGH, MEDIUM, or LOW"
 	}
 	return ""
 }
 
+// isValidImpactUrgency reports whether v is one of
+// csmclient.CreateIncidentRequest's own Impact/Urgency values — see
+// AlertRequest.Impact/.Urgency's doc comment for why validate() enforces
+// this rather than trusting every caller/adapter to only ever set one of
+// the three.
+func isValidImpactUrgency(v string) bool {
+	switch v {
+	case "HIGH", "MEDIUM", "LOW":
+		return true
+	default:
+		return false
+	}
+}
+
 // MapToIncident builds the CreateIncidentRequest this service will
 // eventually send to csm-integration-service, from req, the buffered alert
-// row's own human-readable alert number, and the configured callerID (see
+// row's own human-readable alert number, the configured callerID (see
 // AlertHandler.callerID's doc comment — CSM has no "system" user concept for
 // machine-created incidents today, so this must be a real,
 // operator-provisioned CSM user id passed in via config, never guessed or
-// hardcoded here).
+// hardcoded here), and serviceMap (SRE_ALERT_SERVICE_MAP).
 //
 // alertNumber is embedded into the built Subject as a dedup tag
 // (csmclient.DedupTag) — see buildSubject's doc comment for why.
-func MapToIncident(req AlertRequest, alertNumber, callerID string) csmclient.CreateIncidentRequest {
+//
+// ServiceID resolution (the static fast path of this service's hybrid
+// service-UUID resolution design): req.Service is a human-readable label
+// (a vendor's own field, e.g. Azure's monitoringService, or a fixed literal
+// like a vendor adapter's hardcoded source name) — never itself a valid CMDB
+// service UUID, so it can never be sent to CSM as ServiceID verbatim (CSM
+// requires `serviceId` to be `format: uuid`, a ServiceNow cmdb_ci_service
+// sysid). serviceMap is an exact-match label->UUID table
+// (SRE_ALERT_SERVICE_MAP, parsed once at startup — see cmd/server/main.go).
+// A match is looked up here, synchronously — pure in-process map lookup, no
+// I/O, safe to run on this function's fast path (MapToIncident runs inside
+// enqueueAlert's Enqueue callback, before the 202 response is sent; see
+// enqueueAlert's own doc comment for why no network call may happen here).
+//
+// A miss does NOT trigger a live lookup inline — that would violate the
+// same constraint. Instead, ServiceID is set to
+// csmclient.UnresolvedServiceIDSentinel (see that constant's doc comment)
+// and the alert is buffered as normal. req.Service itself is separately
+// preserved on the persisted row (alertpayload.Payload.Service), so nothing
+// is lost — internal/worker.resolveServiceID performs the live resolution
+// later, once per delivery attempt, immediately before CreateIncident is
+// called, never before.
+//
+// Impact/Urgency override: req.Impact and req.Urgency are an additive,
+// optional override of the severity.MapImpactUrgency derivation below. When
+// either is nil (every generic /alerts caller and every pre-existing vendor
+// adapter — none of them ever set these fields), the corresponding value
+// from severity.MapImpactUrgency(req.Severity) is used unchanged, exactly as
+// before this override existed. Only a source that has its own authoritative
+// impact/urgency signal (e.g. adapter_choreodp.go, translating ServiceNow's
+// own numeric impact/urgency convention) sets these, bypassing the
+// Severity-derived table for that one field. Backward-compatible by
+// construction: this cannot change MapToIncident's output for any existing
+// caller.
+func MapToIncident(req AlertRequest, alertNumber, callerID string, serviceMap map[string]string) csmclient.CreateIncidentRequest {
 	iu := severity.MapImpactUrgency(req.Severity)
+	if req.Impact != nil {
+		iu.Impact = *req.Impact
+	}
+	if req.Urgency != nil {
+		iu.Urgency = *req.Urgency
+	}
 	category := severity.MapCategory(req.Category)
+
+	serviceID := csmclient.UnresolvedServiceIDSentinel
+	if id, ok := serviceMap[req.Service]; ok {
+		serviceID = id
+	}
 
 	out := csmclient.CreateIncidentRequest{
 		CallerID:  callerID,
 		Category:  category,
-		ServiceID: req.Service,
+		ServiceID: serviceID,
 		Impact:    iu.Impact,
 		Urgency:   iu.Urgency,
 		Subject:   buildSubject(alertNumber, req),
@@ -218,14 +295,22 @@ type AlertHandler struct {
 	// concept today. This is required, non-empty config, never a guessed or
 	// hardcoded value — see this service's README/CLAUDE.md.
 	callerID string
+	// serviceMap is the static, exact-match Service-label -> CMDB service
+	// UUID table (SRE_ALERT_SERVICE_MAP), consulted synchronously by
+	// MapToIncident. Optional: a nil or empty map means "no static entries",
+	// not a configuration error — every alert simply falls through to
+	// internal/worker's live-resolution fallback. See MapToIncident's doc
+	// comment for the full hybrid-resolution design.
+	serviceMap map[string]string
 }
 
 // NewAlertHandler creates an AlertHandler. callerID must be non-empty — the
 // caller (cmd/server/main.go) is expected to fail startup via mustEnv if
 // SRE_ALERT_CALLER_ID is unset, rather than this constructor silently
-// accepting an empty string.
-func NewAlertHandler(store alertStore, callerID string) *AlertHandler {
-	return &AlertHandler{store: store, callerID: callerID}
+// accepting an empty string. serviceMap may be nil (see the field's own doc
+// comment).
+func NewAlertHandler(store alertStore, callerID string, serviceMap map[string]string) *AlertHandler {
+	return &AlertHandler{store: store, callerID: callerID, serviceMap: serviceMap}
 }
 
 // errValidation wraps a validate() failure message so enqueueAlert's callers
@@ -272,7 +357,7 @@ func (h *AlertHandler) enqueueAlert(ctx context.Context, req AlertRequest) (id, 
 	id = idgen.New()
 
 	alertNumber, err = h.store.Enqueue(ctx, id, func(alertNumber string) ([]byte, error) {
-		incidentReq := MapToIncident(req, alertNumber, h.callerID)
+		incidentReq := MapToIncident(req, alertNumber, h.callerID, h.serviceMap)
 		payload := alertpayload.Payload{
 			CreateIncidentRequest: incidentReq,
 			Source:                req.Source,
