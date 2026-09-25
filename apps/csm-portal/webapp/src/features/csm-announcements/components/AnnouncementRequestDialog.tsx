@@ -188,36 +188,38 @@ export default function AnnouncementRequestDialog({
   const failedProjectLabel = (projectId: string): string =>
     failedProjectsPreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
-  // Resolves the frozen resolvedProjectIds snapshot to real short keys for
-  // the Audience box below -- otherwise shown as raw, meaningless UUIDs to
-  // whoever's reviewing/approving the request. Same resolve-on-change
-  // pattern as failedProjectsPreview above; any id that fails to resolve (a
-  // fetch error, or past the 200-project preview cap) just falls back to its
-  // raw id rather than blocking the rest of the list.
-  const audiencePreview = useResolvedAudiencePreview();
-  const resolvedProjectIdsKey = request?.resolvedProjectIds?.join(",") ?? "";
-  useEffect(() => {
-    if (request?.resolvedProjectIds && request.resolvedProjectIds.length > 0) {
-      void audiencePreview.resolve(request.resolvedProjectIds);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedProjectIdsKey]);
-  const audienceProjectLabel = (projectId: string): string =>
-    audiencePreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
-  // Caps how many chips the Audience box actually renders -- a large "All
-  // customer projects" send can resolve into well over a thousand ids, and
-  // dumping all of them into one review box is unreadable regardless of
-  // whether each one shows a real key or a raw id. Kept below
-  // useResolvedAudiencePreview's own AUDIENCE_PREVIEW_MAX_PROJECTS (200) so
-  // every chip actually shown here is guaranteed to have been resolved --
-  // this box never renders a raw UUID, it just stops before reaching the
-  // unresolved tail instead.
+  // Caps how many audience projects get resolved and shown as chips below.
+  // A large "All customer projects" send can resolve into well over a
+  // thousand ids, and dumping all of them into one review box is unreadable
+  // regardless of whether each one shows a real key or a raw id. Resolving
+  // is a real GET /projects/{id} round trip per id (bounded 5 at a time,
+  // see useResolvedAudiencePreview), so this slices *before* calling
+  // resolve() rather than only capping what's displayed afterward --
+  // otherwise a 1500+ project audience would still cost up to 200
+  // individual round trips (useResolvedAudiencePreview's own resolve cap)
+  // just to throw away everything past the 100 this box ever shows.
   const AUDIENCE_DISPLAY_CAP = 100;
   const visibleAudienceProjectIds = request?.resolvedProjectIds?.slice(0, AUDIENCE_DISPLAY_CAP) ?? [];
   const hiddenAudienceProjectCount = Math.max(
     (request?.resolvedProjectIds?.length ?? 0) - visibleAudienceProjectIds.length,
     0,
   );
+
+  // Resolves the visible slice above to real short keys -- otherwise shown
+  // as raw, meaningless UUIDs to whoever's reviewing/approving the request.
+  // Same resolve-on-change pattern as failedProjectsPreview above; any id
+  // that fails to resolve (a fetch error) just falls back to its raw id
+  // rather than blocking the rest of the list.
+  const audiencePreview = useResolvedAudiencePreview();
+  const visibleAudienceProjectIdsKey = visibleAudienceProjectIds.join(",");
+  useEffect(() => {
+    if (visibleAudienceProjectIds.length > 0) {
+      void audiencePreview.resolve(visibleAudienceProjectIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleAudienceProjectIdsKey]);
+  const audienceProjectLabel = (projectId: string): string =>
+    audiencePreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
   // Schedule: an alternative to clicking Publish immediately — pick a
   // future date/time and operations/csm-scheduled-tasks' own sub-cron
