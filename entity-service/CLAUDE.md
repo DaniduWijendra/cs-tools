@@ -3173,6 +3173,20 @@ orders on `LOWER(COALESCE(NULLIF(name,''), first + last, user_name))` because
 `"user".name` is empty for a few synced rows (5 of 2,937 in staging); `u.id` is
 always the last tie-break so pages are stable. No `sortBy` keeps newest-first.
 
+## POST /users/search active filter on the Postgres data source
+
+`userService.SearchUsers` used to reject any `active` filter on Postgres
+("only supported for the ServiceNow data source") even though `"user".
+is_active` is a real, already-read column — found live via the case
+detail page's Time Tracking tab, whose approver search sends
+`{roleIds: ["timecard_approver"], active: true}` to only offer active
+approvers, and 400'd outright. `userRepo.SearchUsers` now filters on it:
+`active: true` matches `is_active IS NULL OR is_active = TRUE` (a NULL row
+counts as active, the same convention `AccessService.ResolveScope` already
+uses for this exact column), `active: false` matches `is_active = FALSE`
+strictly — a row with no `is_active` recorded at all is not known to be
+inactive, so it must not satisfy that filter.
+
 ## POST /users/search returns each user's roles (Postgres data source)
 
 The Postgres `User` had no roles, so the CSM users page showed none even though

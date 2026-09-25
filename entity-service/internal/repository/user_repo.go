@@ -213,6 +213,19 @@ func (r *userRepo) SearchUsers(ctx context.Context, req domain.SearchUsersReques
 		argIdx++
 	}
 
+	if req.Filters.Active != nil {
+		// "user".is_active is nullable; a NULL row counts as active, the same
+		// convention AccessService.ResolveScope already uses for this exact
+		// column ("user.is_active NULL counts as active" -- access_repo.go).
+		// active=false is strict, though: a row with no is_active recorded at
+		// all is not known to be inactive, so it must not match that filter.
+		if *req.Filters.Active {
+			where += " AND (u.is_active IS NULL OR u.is_active = TRUE)"
+		} else {
+			where += " AND u.is_active = FALSE"
+		}
+	}
+
 	const fromClause = `FROM "user" u`
 
 	countQuery := "SELECT COUNT(*) " + fromClause + " " + where

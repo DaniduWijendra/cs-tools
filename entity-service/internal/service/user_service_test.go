@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -161,6 +162,35 @@ func TestUserService_SearchUsers_SortBy(t *testing.T) {
 			}
 			if !called || got != tt.sort {
 				t.Fatalf("repo saw sort %+v (called=%v), want %+v", got, called, tt.sort)
+			}
+		})
+	}
+}
+
+// TestUserService_SearchUsers_ActiveFilterReachesRepository is the
+// regression guard for a real bug: POST /users/search with an active
+// filter (e.g. {roleIds: ["timecard_approver"], active: true}, the Time
+// Tracking tab's own approver search) 400'd unconditionally on this data
+// source, even though "user".is_active is a real, already-read column.
+// Proves both true and false reach the repository rather than being
+// rejected.
+func TestUserService_SearchUsers_ActiveFilterReachesRepository(t *testing.T) {
+	for _, active := range []bool{true, false} {
+		t.Run(fmt.Sprintf("active=%v", active), func(t *testing.T) {
+			var got *bool
+			repo := stubUserRepo{
+				searchUsers: func(_ context.Context, req domain.SearchUsersRequest) ([]domain.User, int, error) {
+					got = req.Filters.Active
+					return nil, 0, nil
+				},
+			}
+			active := active
+			req := domain.SearchUsersRequest{Filters: domain.SearchUsersFilters{Active: &active}}
+			if _, err := NewUserService(repo).SearchUsers(context.Background(), req); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil || *got != active {
+				t.Fatalf("repo saw Active = %v, want %v", got, active)
 			}
 		})
 	}
