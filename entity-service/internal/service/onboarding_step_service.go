@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -31,6 +32,11 @@ import (
 // service (csm-notification-service, the customer portal backend), which
 // requireInternalCaller enforces; the label itself carries no identity.
 const onboardingStepDefaultActor = "onboarding-step-api"
+
+// maxOnboardingStepEventTypeLen is onboarding_step.event_type's column width
+// (migration 000086). A longer value is refused here as a 400 rather than
+// reaching Postgres and coming back as a 500 (SQLSTATE 22001).
+const maxOnboardingStepEventTypeLen = 64
 
 var validOnboardingStepName = map[domain.OnboardingStepName]bool{
 	domain.OnboardingStepIdentity:     true,
@@ -91,6 +97,9 @@ func (s *onboardingStepService) Upsert(ctx context.Context, req domain.UpsertOnb
 	req.EventType = strings.TrimSpace(req.EventType)
 	if req.EventType == "" {
 		return domain.OnboardingStep{}, &apierror.ValidationError{Msg: "eventType is required"}
+	}
+	if utf8.RuneCountInString(req.EventType) > maxOnboardingStepEventTypeLen {
+		return domain.OnboardingStep{}, &apierror.ValidationError{Msg: fmt.Sprintf("eventType cannot exceed %d characters", maxOnboardingStepEventTypeLen)}
 	}
 	if req.EventModifiedOn.IsZero() {
 		return domain.OnboardingStep{}, &apierror.ValidationError{Msg: "eventModifiedOn is required"}
