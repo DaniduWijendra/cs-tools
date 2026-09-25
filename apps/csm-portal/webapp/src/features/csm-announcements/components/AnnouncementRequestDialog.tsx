@@ -603,6 +603,8 @@ export default function AnnouncementRequestDialog({
 
             {request.resolvedProjectIds && request.resolvedProjectIds.length > 0 && (
               <Box
+                role="group"
+                aria-label="Audience projects"
                 sx={{
                   border: 1,
                   borderColor: "divider",

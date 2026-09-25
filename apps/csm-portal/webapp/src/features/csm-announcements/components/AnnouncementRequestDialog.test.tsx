@@ -15,7 +15,7 @@
 // under the License.
 
 import type { ReactElement } from "react";
-import { act, fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import { act, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
 import "@testing-library/jest-dom/vitest";
@@ -561,10 +561,15 @@ describe("AnnouncementRequestDialog — approved", () => {
     render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
     // Resolved to its real short key ("P-2", per this file's own
     // useAuthApiClient mock returning key: id.toUpperCase()), not the raw
-    // frozen project id — shown in the send-progress card's own chip and
-    // the Audience box's chip list even before the confirmation dialog (a
-    // third instance) opens below.
-    await vi.waitFor(() => expect(screen.getAllByText("P-2").length).toBeGreaterThan(0));
+    // frozen project id. Scoped to the Audience box specifically (not just
+    // "P-2" anywhere on screen) -- the send-progress card renders its own
+    // "P-2" chip too, so an unscoped query could pass even if the Audience
+    // box itself fell back to the raw project id.
+    await vi.waitFor(() =>
+      expect(
+        within(screen.getByRole("group", { name: "Audience projects" })).getByText("P-2"),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /publish anyway/i }));
     expect(screen.getByText(/publish without the failed projects/i)).toBeInTheDocument();
