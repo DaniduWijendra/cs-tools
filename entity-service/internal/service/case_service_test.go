@@ -1547,11 +1547,13 @@ func TestCaseService_CreateCase_PublishesOnlyAfterPostgresSucceeds(t *testing.T)
 			return domain.Case{ID: id, Number: number, InternalID: wso2ID, CreatedBy: createdBy, State: &respState}, nil
 		},
 		getCaseByID: func(context.Context, string, repository.SearchScope) (domain.CaseView, error) {
+			severity := domain.CaseSeverityHigh
 			return domain.CaseView{
 				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
 				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
 				ProjectDetails: &domain.EntityRef{ID: "proj-1", Name: "Project One"},
 				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+				Severity:       &severity,
 			}, nil
 		},
 	}
@@ -1624,11 +1626,13 @@ func TestCaseService_CreateCase_AddsAccountDefaultWatchers(t *testing.T) {
 			if !watchListSet {
 				t.Error("GetCaseByID (case.created enrichment) was called before SetCaseWatchList")
 			}
+			severity := domain.CaseSeverityHigh
 			return domain.CaseView{
 				ID: caseID, Number: "CS0023002", InternalID: "WSO2-CS-2", Subject: "s", Description: "d",
 				CreatedOn:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
 				ProjectDetails: &domain.EntityRef{ID: projectID, Name: "Project One"},
 				WatchList:      []domain.WatchListUser{{Email: "watcher@example.com"}},
+				Severity:       &severity,
 			}, nil
 		},
 	}

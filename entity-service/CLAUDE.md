@@ -490,7 +490,16 @@ easy to wire up for real once both exist.
   created with no watchers is a normal state, not an error, so publishing is
   silently skipped rather than sending a payload
   `csm-notification-service`'s `events.Validate` would reject anyway for an
-  empty `recipients` list.
+  empty `recipients` list. The same skip applies when the case has no
+  severity: `CaseCreatedPayload.Priority` has no `omitempty` (a consumer
+  always expects a real value) and `""` is not a real priority. Since
+  severity is a required, validated field for `type: "case"`
+  (`validateCreateCaseRequest`), this only actually triggers for the other
+  four types `publishCaseCreatedEvent` also serves —
+  `announcement`/`engagement`/`service_request`/`security_report_analysis`
+  have no severity concept at all (a `"case"`-only column) — so none of
+  those four ever publish `case.created`, by explicit request, not by
+  oversight.
 - **`snIncidentService.CreateIncident`** publishes `incident.created` via
   `publishIncidentCreated`, called the same way. No enrichment round trip is
   needed here: `req.Subject`/`req.AdditionalComments` already carry

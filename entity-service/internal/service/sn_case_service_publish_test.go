@@ -227,6 +227,57 @@ func TestSNCaseService_CreateCase_SkipsPublishWhenNoWatchers(t *testing.T) {
 	}
 }
 
+// TestSNCaseService_CreateCase_SkipsPublishWhenNoSeverity verifies that a
+// created record with no severity does not publish case.created at all --
+// CaseCreatedPayload.Priority has no omitempty (a consumer always expects a
+// real value), and "" is not a real priority. Uses type "announcement"
+// specifically: severity is a required, validated field for type "case"
+// (validateCreateCaseRequest), so this scenario can only occur for one of
+// the other four types this shared function also serves -- none of
+// which have a severity concept at all (case-only field). Deliberate,
+// not an oversight: those four never publish case.created as a result.
+func TestSNCaseService_CreateCase_SkipsPublishWhenNoSeverity(t *testing.T) {
+	const caseSysid = "9999999999999999999999999999dddd"
+	const projectSysid = "8888888888888888888888888888eeee"
+	const watcherSysid = "7777777777777777777777777777ffff"
+
+	getCaseBody := `{
+		"id": "` + caseSysid + `",
+		"internalId": "WSO2-024",
+		"number": "CS0024001",
+		"title": "No severity here",
+		"description": "d",
+		"createdOn": "2026-01-02 10:00:00",
+		"createdBy": "jane.doe@example.com",
+		"createdByFullName": "Jane Doe",
+		"project": {"id": "` + projectSysid + `", "name": "Project Zeta"},
+		"deployment": {"id": "", "name": ""},
+		"deployedProduct": {"id": "", "name": "", "version": ""},
+		"state": {"id": 1, "label": "Open"},
+		"watchList": [
+			{"id": "` + watcherSysid + `", "userName": "jroe", "name": "John Roe", "email": "john.roe@example.com"}
+		]
+	}`
+
+	client := newTestCreateCaseClient(t, caseSysid, getCaseBody)
+	publisher := &mockEventPublisher{}
+	svc := NewServiceNowCaseService(client, nil, publisher, nil, nil)
+
+	req := domain.CreateCaseRequest{
+		Type:        "announcement",
+		ProjectID:   testProjectUUID,
+		Subject:     "No severity here",
+		Description: "d",
+	}
+
+	if _, err := svc.CreateCase(contextWithUserIDToken("token"), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.calls) != 0 {
+		t.Fatalf("expected no publish call for a record with no severity, got %d", len(publisher.calls))
+	}
+}
+
 // TestSNCaseService_CreateCase_PublishFailureDoesNotFailCreateCase verifies
 // that neither a Publish error nor a GetCaseByID enrichment error is
 // returned to CreateCase's own caller — the case already exists in
@@ -249,6 +300,7 @@ func TestSNCaseService_CreateCase_PublishFailureDoesNotFailCreateCase(t *testing
 		"project": {"id": "` + projectSysid + `", "name": "Project Zeta"},
 		"deployment": {"id": "", "name": ""},
 		"deployedProduct": {"id": "", "name": "", "version": ""},
+		"severity": {"id": 3, "label": "3 - High"},
 		"state": {"id": 1, "label": "Open"},
 		"watchList": [
 			{"id": "` + watcherSysid + `", "userName": "jroe", "name": "John Roe", "email": "john.roe@example.com"}
