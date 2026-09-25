@@ -317,8 +317,9 @@ need to lower the `go.mod` version to match an older local install.
 `POST /alerts` only ever accepted this service's own pre-normalized
 `AlertRequest` JSON — nothing translated a real monitoring tool's actual
 webhook payload into it. `internal/handler/adapter_azure.go`,
-`adapter_site24x7.go`, `adapter_opensearch.go`, and `adapter_grafana.go`
-close that gap: each is a dedicated `POST /alerts/adapters/<vendor>` route
+`adapter_site24x7.go`, `adapter_opensearch.go`, `adapter_grafana.go`, and
+`adapter_choreodp.go` close that gap: each is a dedicated
+`POST /alerts/adapters/<vendor>` route
 that parses one vendor's own native payload into an `AlertRequest`, then
 calls the same unexported `AlertHandler.enqueueAlert` that `CreateAlert`
 itself calls (see `internal/handler/alerts.go`) — every adapter reuses
@@ -350,6 +351,50 @@ have been wrong. `"azure"` and `"site24x7"` are the literals
 `internal/severity.MapContactType` already has entries for; keep using
 those exact strings if a new adapter's vendor gets a `ContactType` entry
 added there in the future.
+
+`adapter_choreodp.go` is the one exception to the fixed-literal-`Source`
+rule above: its payload's own `source` field genuinely is the originating
+identity (not a human-readable title like OpenSearch's), so it's mapped
+straight through to `AlertRequest.Source` — which also feeds
+`requireAuthenticatedSource`'s Basic Auth match, same as every other field.
+It's also the first adapter to set `AlertRequest.Impact`/`Urgency`
+(`internal/handler.AlertRequest`'s additive override of
+`severity.MapImpactUrgency` — see that field's own doc comment): this
+source's severity/impact/urgency are raw ServiceNow-convention integers
+(1=High/2=Medium/3=Low), not the string vocabulary every other adapter
+maps to.
+
+## Group-attach pushes a work note — best-effort, like `recordMapping`
+
+`internal/worker.tryGroup`'s attach path used to be silent: finding an
+earlier alert's still-open incident and recording a `CreateAlertIncidentMapping`
+row (a Postgres-side audit trail on this service's own database) said nothing
+to the incident itself. `internal/worker.pushGroupAttachWorkNote` closes
+that gap, calling `csmclient.Client.UpdateIncident` (`PATCH /incidents/{id}`
+on `csm-integration-service`) with a work note summarizing the new alert
+(`internal/worker.buildGroupAttachWorkNotes`, built from `row.AlertNumber`/
+`ReceivedAt` plus whatever `bp.CreateIncidentRequest.WorkNotes`/
+`AdditionalComments` this alert's own `internal/handler.MapToIncident` call
+already produced when it was buffered — not re-derived).
+
+Same best-effort, non-blocking philosophy as `recordMapping` immediately
+below it in `internal/worker/worker.go` — read that method's doc comment,
+it applies here verbatim: a failure here is logged as a warning and never
+fails the overall delivery or holds back `Store.MarkDelivered`. The primary
+goal (this alert is attached to the right incident) is already achieved by
+the time this runs. Do not change this to block delivery on the work-note
+push succeeding — that would regress a correctness property (never lose a
+buffered alert over a side effect) for a visibility improvement.
+
+`csmclient.Client.UpdateIncident` goes through the exact same
+M2M-credential-fallback mechanism as `CreateIncident`/the two searches (see
+"Why a 401 is retryable" above) — a 401 is possible, not guaranteed — except
+this operation has no Postgres-data-source fallback at all on
+`csm-integration-service`'s side (see that service's own CLAUDE.md): a 503
+is possible too, and is treated the same as any other error here — logged,
+not retried, not escalated (there is nothing to retry: the work note is a
+one-shot summary of this specific alert, and retrying it on a later scan
+would need its own dedup story this feature does not need).
 
 ## Vendor neutrality
 

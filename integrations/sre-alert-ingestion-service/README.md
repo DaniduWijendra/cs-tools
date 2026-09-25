@@ -84,6 +84,23 @@ csm-integration-service  ---->  entity-service  ---->  platform incident store
 Persist-then-attempt, not attempt-then-persist: nothing is lost even if this
 process crashes between accepting a request and its first delivery attempt.
 
+## `CSM_INTEGRATION_BASE_URL` can point at `csm-integration-service` or `entity-service` directly
+
+`internal/csmclient` always calls the same relative paths — `POST /incidents`,
+`POST /incidents/search`, `PATCH /incidents/{id}`, `POST /services/search`,
+`POST /alert-incident-mappings`, `POST /alert-incident-mappings/lookup` — and
+`csm-integration-service` proxies every one of them at that identical
+relative path against `entity-service`, which exposes the same paths itself.
+So whether a given deployment of this service reaches `entity-service`
+directly (e.g. both components in the same Choreo organization) or goes
+through `csm-integration-service` (e.g. this service is deployed outside
+that organization, where `entity-service` isn't directly reachable) is purely
+a matter of which `CSM_INTEGRATION_BASE_URL`/OAuth2 client credentials it's
+configured with — no code in this service branches on which target it's
+talking to, and none should be added; if a future path ever needs one target
+but not the other, that's a reason to revisit this, not to special-case it
+here.
+
 ## Prerequisites
 
 - Go `1.26+` — [install](https://go.dev/doc/install)
@@ -214,6 +231,11 @@ to `SERVICE_INTERRUPTION` (`internal/severity.MapCategory`).
 - `POST /alerts/adapters/grafana` — accepts a Grafana native alert-webhook
   payload; only `state == "alerting"` creates a buffered alert, any other
   state returns `200` with a small acknowledgment body
+- `POST /alerts/adapters/choreodp` — accepts an internal alert-forwarder's
+  native alert payload; `severity`/`impact`/`urgency` are raw integers
+  (1=High, 2=Medium, 3=Low), and `impact`/`urgency` are passed straight
+  through as an override of the created incident's Impact/Urgency — see
+  "Impact/Urgency override" below
 
 Every adapter route translates its vendor's own native payload into
 `AlertRequest`, then reuses the exact same validation/buffering/worker/
@@ -259,6 +281,25 @@ file; this section is a summary, not a restatement of every line.
   `tags.service` is passed through as free text (unlike the prior pipeline,
   which only honored it when it equaled `"CHOREO"` — a routing rule tied to
   that system's own lookup table, with no equivalent here).
+- **Internal alert-forwarder** (`adapter_choreodp.go`): `severity`,
+  `impact`, and `urgency` are raw integers (1=High, 2=Medium, 3=Low), not
+  this service's string vocabulary. `severity` → `critical`/`major`/`minor`;
+  any other value → `"warning"` (fails safe, not open — see
+  `choreoDPSeverityTable`). `impact`/`urgency` map onto `HIGH`/`MEDIUM`/`LOW`
+  and are set directly on `AlertRequest.impact`/`urgency` — see
+  "Impact/Urgency override" below. `source` (unlike every other adapter) is
+  taken straight from the payload's own `source` field, not a fixed literal.
+
+## Impact/Urgency override
+
+`AlertRequest.impact`/`urgency` are an additive, optional override of this
+service's usual `severity.MapImpactUrgency(req.Severity)` derivation
+(`internal/handler.MapToIncident`) — set only by `adapter_choreodp.go` today,
+since it's the only source with its own authoritative impact/urgency signal.
+Every other caller (generic `/alerts`, the four other adapters) never sets
+these, so `MapToIncident`'s output is unchanged for them: nil means "derive
+from Severity as before." Values must be `HIGH`/`MEDIUM`/`LOW`, matching
+`csmclient.CreateIncidentRequest.Impact`/`.Urgency`'s own vocabulary.
 
 ## Retry / escalation behavior
 
@@ -368,6 +409,16 @@ Every successful delivery (a fresh create, or an attach via grouping) also
 records a best-effort `CreateAlertIncidentMapping` call — a CSM-side audit
 trail of which alerts fed which incident, kept for visibility even though
 the grouping *decision* itself no longer reads it back.
+
+A group-attach also pushes a best-effort work note onto the incident itself
+via `csmclient.Client.UpdateIncident` (`PATCH /incidents/{id}` on
+`csm-integration-service`), summarizing the new alert (alert number, when it
+was received, and whatever `internal/handler.buildWorkNotes`/the alert's own
+description already captured) — so an engineer looking at the incident sees
+"this condition fired again" history, not silence. Same failure-tolerance
+contract as `CreateAlertIncidentMapping`: a failed push is logged and does
+not block `MarkDelivered` or the mapping call — the primary goal (this alert
+is attached to the right incident) is already achieved by the time it runs.
 
 This design mirrors, in spirit, a ServiceNow prod flow ("Create Incident
 from Alert") found during design — a hash + time-window match — but is not

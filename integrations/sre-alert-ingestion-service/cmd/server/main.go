@@ -189,6 +189,7 @@ func main() {
 	mux.Handle("POST /alerts/adapters/site24x7", basicAuth(http.HandlerFunc(alertHandler.CreateAlertFromSite24x7)))
 	mux.Handle("POST /alerts/adapters/opensearch", basicAuth(http.HandlerFunc(alertHandler.CreateAlertFromOpenSearch)))
 	mux.Handle("POST /alerts/adapters/grafana", basicAuth(http.HandlerFunc(alertHandler.CreateAlertFromGrafana)))
+	mux.Handle("POST /alerts/adapters/choreodp", basicAuth(http.HandlerFunc(alertHandler.CreateAlertFromChoreoDP)))
 
 	addr := ":" + envOrDefault("PORT", "8080")
 

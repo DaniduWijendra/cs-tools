@@ -352,6 +352,45 @@ func TestMapToIncident_ServiceMapMissUsesSentinel(t *testing.T) {
 	}
 }
 
+// TestMapToIncident_ImpactUrgencyOverride pins the additive
+// AlertRequest.Impact/Urgency override: when set, they replace
+// severity.MapImpactUrgency's own derivation for that field; when nil (every
+// existing caller today), MapToIncident's output is unchanged from before
+// this override existed.
+func TestMapToIncident_ImpactUrgencyOverride(t *testing.T) {
+	t.Run("nil Impact/Urgency falls back to severity-derived values unchanged", func(t *testing.T) {
+		req := AlertRequest{Source: "azure", Severity: "minor", Service: "svc", MetricName: "m", Description: "d"}
+		out := MapToIncident(req, "alert-id-1", "caller-1", nil)
+		if out.Impact != "MEDIUM" || out.Urgency != "MEDIUM" {
+			t.Errorf("Impact/Urgency = %q/%q, want MEDIUM/MEDIUM (severity.MapImpactUrgency(\"minor\"), unchanged)", out.Impact, out.Urgency)
+		}
+	})
+
+	t.Run("explicit Impact/Urgency override the severity-derived values", func(t *testing.T) {
+		impact, urgency := "HIGH", "LOW"
+		req := AlertRequest{Source: "azure", Severity: "minor", Service: "svc", MetricName: "m", Description: "d", Impact: &impact, Urgency: &urgency}
+		out := MapToIncident(req, "alert-id-1", "caller-1", nil)
+		if out.Impact != "HIGH" {
+			t.Errorf("Impact = %q, want the explicit override HIGH (not minor's usual MEDIUM)", out.Impact)
+		}
+		if out.Urgency != "LOW" {
+			t.Errorf("Urgency = %q, want the explicit override LOW (not minor's usual MEDIUM)", out.Urgency)
+		}
+	})
+
+	t.Run("only Impact set overrides just that field", func(t *testing.T) {
+		impact := "HIGH"
+		req := AlertRequest{Source: "azure", Severity: "minor", Service: "svc", MetricName: "m", Description: "d", Impact: &impact}
+		out := MapToIncident(req, "alert-id-1", "caller-1", nil)
+		if out.Impact != "HIGH" {
+			t.Errorf("Impact = %q, want the explicit override HIGH", out.Impact)
+		}
+		if out.Urgency != "MEDIUM" {
+			t.Errorf("Urgency = %q, want the severity-derived MEDIUM (Urgency was never overridden)", out.Urgency)
+		}
+	})
+}
+
 // The dedup tag is the load-bearing contract internal/worker's
 // SearchIncidentByTag pre-retry check depends on (see
 // internal/csmclient.DedupTag's doc comment) — this pins the exact format

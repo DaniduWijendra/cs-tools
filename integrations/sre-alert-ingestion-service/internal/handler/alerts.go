@@ -51,6 +51,21 @@ type AlertRequest struct {
 	Environment      string `json:"environment,omitempty"`
 	UniqueIdentifier string `json:"uniqueIdentifier,omitempty"`
 	Description      string `json:"description"`
+	// Impact and Urgency are an additive, optional override of this
+	// service's usual severity.MapImpactUrgency derivation — see
+	// MapToIncident's doc comment for the full contract. Pointers, not plain
+	// strings, so "unset" (nil, the zero value for every existing caller:
+	// generic /alerts callers and every pre-existing vendor adapter) is
+	// distinguishable from an explicit, deliberately-chosen value; a plain
+	// string could never tell "not sent" apart from a valid-looking empty
+	// string. Values must be one of csmclient.CreateIncidentRequest's own
+	// "HIGH"/"MEDIUM"/"LOW" vocabulary — validate() does not itself check
+	// this (see that method's doc comment for what it does check); an
+	// adapter setting these is responsible for using exactly those three
+	// values, matching the same trust level already placed in every other
+	// field an adapter derives.
+	Impact  *string `json:"impact,omitempty"`
+	Urgency *string `json:"urgency,omitempty"`
 }
 
 // validate reports the first missing or malformed field, or "" if req is
@@ -131,8 +146,26 @@ func (req AlertRequest) validate() string {
 // is lost — internal/worker.resolveServiceID performs the live resolution
 // later, once per delivery attempt, immediately before CreateIncident is
 // called, never before.
+//
+// Impact/Urgency override: req.Impact and req.Urgency are an additive,
+// optional override of the severity.MapImpactUrgency derivation below. When
+// either is nil (every generic /alerts caller and every pre-existing vendor
+// adapter — none of them ever set these fields), the corresponding value
+// from severity.MapImpactUrgency(req.Severity) is used unchanged, exactly as
+// before this override existed. Only a source that has its own authoritative
+// impact/urgency signal (e.g. adapter_choreodp.go, translating ServiceNow's
+// own numeric impact/urgency convention) sets these, bypassing the
+// Severity-derived table for that one field. Backward-compatible by
+// construction: this cannot change MapToIncident's output for any existing
+// caller.
 func MapToIncident(req AlertRequest, alertNumber, callerID string, serviceMap map[string]string) csmclient.CreateIncidentRequest {
 	iu := severity.MapImpactUrgency(req.Severity)
+	if req.Impact != nil {
+		iu.Impact = *req.Impact
+	}
+	if req.Urgency != nil {
+		iu.Urgency = *req.Urgency
+	}
 	category := severity.MapCategory(req.Category)
 
 	serviceID := csmclient.UnresolvedServiceIDSentinel
