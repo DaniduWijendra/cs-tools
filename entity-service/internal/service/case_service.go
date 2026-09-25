@@ -897,23 +897,38 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 	}
 
 	// before is the case's full view immediately prior to this update — used
-	// only to detect a genuine state change (a caller re-PATCHing the case's
-	// current state must not send every watcher a false "status changed"
-	// notification, the same guard snCaseService.UpdateCase already applies)
-	// and, on a genuine change, to build case.status_changed's payload
-	// (Recipients/ProjectID/etc. — see publishStatusChangedEvent). Skipped
-	// entirely when nothing could possibly publish (s.publisher nil) or
-	// this request can't produce a status change (req.State nil) — no need
-	// to pay for an extra read otherwise. A fetch failure here is logged and
-	// treated as "skip the publish", not a failed update: the case update
-	// itself does not depend on this.
+	// to detect a genuine state/workState change (a caller re-PATCHing the
+	// case's current state must not send every watcher a false "status
+	// changed" notification, nor gain a spurious activity-feed entry, the
+	// same guard snCaseService.UpdateCase already applies) and, on a genuine
+	// state change, to build case.status_changed's payload
+	// (Recipients/ProjectID/etc. — see publishStatusChangedEvent). Fetched
+	// whenever either field is set, regardless of s.publisher: previously
+	// this was skipped entirely when nothing could possibly publish, but
+	// the activity-feed write below needs it either way, unlike the
+	// publish-only concern this comment used to describe alone. A fetch
+	// failure here is logged and treated as "skip the publish/activity
+	// entry," not a failed update: the case update itself does not depend
+	// on this.
 	var before *domain.CaseView
-	if s.publisher != nil && req.State != nil {
+	if req.State != nil || req.WorkState != nil {
 		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
-			slog.ErrorContext(ctx, "update case: enrich case for case.status_changed publish failed", "caseId", req.ID)
+			slog.ErrorContext(ctx, "update case: enrich case for case.status_changed publish/activity failed", "caseId", req.ID)
 		} else {
 			before = &cv
 		}
+	}
+
+	// actorEmail is used only for this update's own activity-feed entry
+	// below -- resolved best-effort, not required, since this branch has
+	// never required an authenticated caller before now (no permission
+	// model exists for Postgres-side case mutations yet -- see
+	// updateCaseAssignee's own doc comment) and must not start rejecting a
+	// caller who omits x-user-id-token just because this data source can
+	// now also log field changes to work_item_activity.
+	var actorEmail string
+	if actor, err := s.resolveActor(ctx); err == nil {
+		actorEmail = actor.Email
 	}
 
 	// oldSeverity is the case's severity immediately before this update —
@@ -928,6 +943,21 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 
 	if req.Severity != nil {
 		s.detectBillableStatusChange(ctx, req.ID, oldSeverity, c.Severity)
+	}
+
+	// Activity-feed logging follows the write, same as event publishing
+	// below -- see CaseRepository.RecordCaseFieldChangeActivity's own doc
+	// comment for why this table needed a write path at all on this data
+	// source. State/Severity/WorkState are mutually exclusive on this
+	// request (fieldCount above), so at most one of these three fires.
+	if req.State != nil && before != nil && derefState(before.State) != *req.State {
+		s.recordFieldChangeActivity(ctx, req.ID, "state", string(derefState(before.State)), string(*req.State), actorEmail)
+	}
+	if req.Severity != nil && c.Severity != nil && derefSeverity(oldSeverity) != *c.Severity {
+		s.recordFieldChangeActivity(ctx, req.ID, "severity", string(derefSeverity(oldSeverity)), string(*c.Severity), actorEmail)
+	}
+	if req.WorkState != nil && before != nil && c.WorkState != nil && derefWorkState(before.WorkState) != *c.WorkState {
+		s.recordFieldChangeActivity(ctx, req.ID, "work_state", string(derefWorkState(before.WorkState)), string(*c.WorkState), actorEmail)
 	}
 
 	// Event publishing follows the write, not DATA_SOURCE -- see
@@ -1096,21 +1126,27 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 		return domain.UpdateCaseResponse{}, err
 	}
 
-	// before is fetched only when something could publish, to detect a
-	// genuine assignee change -- a caller re-PATCHing the case's current
-	// assignee (a no-op as far as anyone downstream cares) must not send
-	// every watcher a false "case assigned" notification, the same guard
+	// before is fetched to detect a genuine assignee change -- a caller
+	// re-PATCHing the case's current assignee (a no-op as far as anyone
+	// downstream cares) must not send every watcher a false "case assigned"
+	// notification, nor gain a spurious activity-feed entry, the same guard
 	// snCaseService.UpdateCase's own AssigneeEmail path applies.
 	// CaseRepository.UpdateCaseAssignee itself has no such guard (it always
 	// writes assigned_to_id), so this data source detects the no-op here
 	// instead, before the write, the same way snCaseService.UpdateCase
 	// compares its own pre-PATCH GetCaseByID against req.AssigneeEmail.
-	publishAssign := false
-	if s.publisher != nil {
-		if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
-			slog.ErrorContext(ctx, "update case: enrich case for case.assigned publish failed", "caseId", req.ID)
-		} else if cv.AssignedEngineer == nil || !strings.EqualFold(cv.AssignedEngineer.Email, assignee.Email) {
-			publishAssign = true
+	// Always fetched (not gated on s.publisher), since the activity-feed
+	// write below needs it regardless of whether Event Hub is configured.
+	changed := false
+	previousAssigneeName := "Unassigned"
+	if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
+		slog.ErrorContext(ctx, "update case: enrich case for case.assigned publish/activity failed", "caseId", req.ID)
+	} else {
+		if cv.AssignedEngineer != nil {
+			previousAssigneeName = cv.AssignedEngineer.Name
+			changed = !strings.EqualFold(cv.AssignedEngineer.Email, assignee.Email)
+		} else {
+			changed = true
 		}
 	}
 
@@ -1124,10 +1160,11 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 		assigneeName = assignee.Email
 	}
 
-	// Event publishing follows the write, not DATA_SOURCE -- see
-	// publishCaseCreatedEvent's own doc comment for why.
-	if publishAssign {
+	// Event publishing/activity-feed logging both follow the write, not
+	// DATA_SOURCE -- see publishCaseCreatedEvent's own doc comment for why.
+	if changed {
 		s.publishCaseAssigned(ctx, req.ID, assigneeName, assignee.Email)
+		s.recordFieldChangeActivity(ctx, req.ID, "assigned_to_id", previousAssigneeName, assigneeName, actor.Email)
 	}
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
@@ -1235,6 +1272,7 @@ func (s *caseService) acknowledgeCase(ctx context.Context, req domain.UpdateCase
 	// AlreadyAcknowledged distinction on the ServiceNow data source.
 	if !alreadyAcknowledged {
 		s.publishCaseAcknowledged(ctx, req.ID, ackBy.Name)
+		s.recordFieldChangeActivity(ctx, req.ID, "acknowledged_by_user_id", "", ackBy.Name, actor.Email)
 	}
 
 	// Only mirror to ServiceNow when this call is the one that actually
@@ -1315,10 +1353,24 @@ func (s *caseService) updateCaseParent(ctx context.Context, req domain.UpdateCas
 		return domain.UpdateCaseResponse{}, err
 	}
 
+	// oldParentNumber is best-effort display data for the activity-feed
+	// entry below only -- a fetch failure just means that entry's old value
+	// comes back empty, never a reason to fail the parent change itself.
+	oldParentNumber := ""
+	if before, err := s.GetCaseByID(ctx, req.ID); err == nil && before.ParentCase != nil {
+		oldParentNumber = before.ParentCase.Number
+	}
+
 	updatedOn, err := s.repo.UpdateCaseParent(ctx, req.ID, *req.ParentID, actor.Email)
 	if err != nil {
 		return domain.UpdateCaseResponse{}, err
 	}
+
+	newParentNumber := ""
+	if newParent, err := s.GetCaseByID(ctx, *req.ParentID); err == nil {
+		newParentNumber = newParent.Number
+	}
+	s.recordFieldChangeActivity(ctx, req.ID, "parent_id", oldParentNumber, newParentNumber, actor.Email)
 
 	// Best-effort ServiceNow mirror write, DATA_SOURCE=postgres-servicenow-dual-write
 	// only -- same Postgres-first/async posture as every sibling branch above.
@@ -1704,6 +1756,24 @@ func (s *caseService) resolveActor(ctx context.Context) (domain.User, error) {
 		return domain.User{}, &apierror.ValidationError{Msg: "x-user-id-token: " + err.Error()}
 	}
 	return s.userRepo.GetUserByEmail(ctx, email)
+}
+
+// recordFieldChangeActivity is a best-effort wrapper around
+// CaseRepository.RecordCaseFieldChangeActivity: a failure here is logged and
+// otherwise ignored, since the case mutation that triggered it already
+// succeeded and must not be undone -- or reported to the caller as failed --
+// just because its own activity-feed entry couldn't be written. actorEmail
+// empty is treated as "nothing to attribute this to" and skips the write
+// entirely, rather than inserting a row with a blank user_email (see
+// UpdateCase's own state/severity/workState branch for why actorEmail can be
+// empty there).
+func (s *caseService) recordFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) {
+	if actorEmail == "" {
+		return
+	}
+	if err := s.repo.RecordCaseFieldChangeActivity(ctx, caseID, fieldName, oldValue, newValue, actorEmail); err != nil {
+		slog.ErrorContext(ctx, "update case: record field change activity failed", "caseId", caseID, "field", fieldName, "error", err)
+	}
 }
 
 // CreateCaseAttachment implements CaseService for the CSM-native (Postgres)

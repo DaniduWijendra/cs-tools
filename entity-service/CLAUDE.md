@@ -746,6 +746,61 @@ call, no no-op detection in the repository layer.
   `SearchCaseView`-equivalent, which doesn't surface it there either — only
   `GetCaseByID` does).
 
+**`work_item_activity` (migration 000056) now gets written to on the
+Postgres data source too.** `SearchCaseActivities`' own `field_change` branch
+already rendered any `field_name` generically (`caseActivityFieldChangeLabel`
+title-cases it, e.g. `"assigned_to_id"` → `"Assigned To Id"`) — the table was
+fully wired up on the read side, but **nothing in this codebase ever wrote to
+it** on this data source (the ServiceNow data source's own case activity
+comes from a live upstream call instead, not this table; this table appears
+to exist for the ServiceNow data source's own sync process to populate,
+which this data source has no equivalent of). The practical symptom: a
+Postgres-native state/severity/workState/assign/acknowledge/parent change
+produced no entry in the case's own activity feed at all — a real, reported
+gap ("with servicenow data source all are shown").
+- **`CaseRepository.RecordCaseFieldChangeActivity(ctx, caseID, fieldName,
+  oldValue, newValue, actorEmail)`** is the missing write half — a plain
+  `INSERT INTO work_item_activity`. `caseService.recordFieldChangeActivity`
+  wraps it best-effort (log and ignore on failure, same posture as every
+  `publishXxx` helper in this file): the mutation itself has already
+  succeeded by the time this runs, so a failure here must never undo it or
+  report the request as failed. A blank `actorEmail` skips the write
+  entirely (no anonymous rows) rather than inserting one with an empty
+  `user_email`.
+- **Old/new value convention, since there's no ServiceNow sync to match
+  against**: `state`/`severity`/`work_state` store the raw lowercase domain
+  enum value (e.g. `"work_in_progress"`), the same representation the JSON
+  API already uses for these fields — no separate display-label map
+  invented purely for this. `assigned_to_id`/`acknowledged_by_user_id`
+  store a human display name instead (e.g. `"Jane Doe"`, or `"Unassigned"`
+  for "no prior assignee") — a raw UUID would be useless to a human reading
+  the activity feed, and `caseActivityFieldChangeLabel` already title-cases
+  `field_name` itself to say *which* field, so the value only needs to say
+  *who*. `parent_id` stores the parent case's own number (e.g.
+  `"CS0001"`), fetched via an extra best-effort `GetCaseByID` before/after
+  the write in `updateCaseParent` (rare operation, so the extra round trips
+  are an acceptable cost) — an empty string if that lookup fails.
+- **Call sites**: `updateCaseAssignee`/`acknowledgeCase`/`updateCaseParent`
+  already resolve an `actor` for other reasons (ServiceNow mirror
+  attribution, first-write-wins claiming) and reuse `actor.Email` directly.
+  The main `UpdateCase` body's state/severity/workState branch is the one
+  exception — it has never required an authenticated caller before (no
+  permission model exists for Postgres-side case mutations at all yet), so
+  it resolves the actor **best-effort**: a missing/invalid `x-user-id-token`
+  just means this update's activity entry is skipped, not a newly-rejected
+  request. That branch's own `before` `*domain.CaseView` fetch (previously
+  gated on `s.publisher != nil && req.State != nil`, only for
+  `case.status_changed`'s sake) is now unconditional whenever `req.State` or
+  `req.WorkState` is set, since the activity write needs the prior value
+  regardless of whether Event Hub is configured at all.
+- **Deliberately out of scope**: `updateCaseFields`'s combinable "plain
+  field" bundle (Subject/Description/DeploymentID/DeployedProductID/fix-ETAs/
+  RelatedCaseID/WorkaroundProvided) does not write to `work_item_activity`
+  yet — up to nine fields in one call, several without a cheaply-available
+  "old" value, is a larger and more speculative addition than the six
+  branches above; left for a future change if it turns out to matter in
+  practice the same way assign/state did.
+
 Every helper above runs **synchronously** (not detached/async the way
 `apps/csm-portal/backend`'s own `internal/handler/cases.go` `publishAsync`
 is), each bounded by its own 5s `context.WithTimeout`

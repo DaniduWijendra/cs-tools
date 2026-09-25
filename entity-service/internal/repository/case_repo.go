@@ -342,6 +342,19 @@ type CaseRepository interface {
 	// every sibling UpdateCase branch. Returns a NotFoundError if req.ID does
 	// not exist.
 	UpdateCaseFields(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
+	// RecordCaseFieldChangeActivity inserts a work_item_activity row
+	// (migration 000056) recording that caseID's fieldName changed from
+	// oldValue to newValue, attributed to actorEmail. SearchCaseActivities'
+	// own field_change branch already renders any field_name generically
+	// (see caseActivityFieldChangeLabel) -- this is the missing write half:
+	// nothing wrote to this table on the Postgres data source before this,
+	// even though the ServiceNow data source's own sync process populates
+	// it there, so a Postgres-native mutation's own change never appeared
+	// in the case's activity feed. Best-effort by every caller (a failure
+	// here must not undo or fail the mutation that already succeeded), so
+	// this itself just returns whatever error occurs, with no special
+	// handling of its own.
+	RecordCaseFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error
 	// SearchCaseActivities returns a paginated, newest-first feed combining
 	// the case's comments (comment, migration 000037) and complete
 	// attachments (case_attachment, migration 000043) into one merged
@@ -2142,6 +2155,19 @@ func (r *caseRepo) UpdateCaseParent(ctx context.Context, caseID, parentID, calle
 		return time.Time{}, fmt.Errorf("update case parent: %w", err)
 	}
 	return updatedOn, nil
+}
+
+// RecordCaseFieldChangeActivity implements CaseRepository.
+func (r *caseRepo) RecordCaseFieldChangeActivity(ctx context.Context, caseID, fieldName, oldValue, newValue, actorEmail string) error {
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO work_item_activity (id, created_on, created_by, work_item_id, field_name, old_value, new_value, user_email)
+		 VALUES (gen_random_uuid(), NOW(), $1, $2, $3, $4, $5, $1)`,
+		actorEmail, caseID, fieldName, oldValue, newValue,
+	)
+	if err != nil {
+		return fmt.Errorf("record case field change activity: %w", err)
+	}
+	return nil
 }
 
 // AcknowledgeCase implements CaseRepository. The claim itself
