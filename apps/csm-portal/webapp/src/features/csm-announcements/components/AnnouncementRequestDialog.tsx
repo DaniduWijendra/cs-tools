@@ -204,6 +204,20 @@ export default function AnnouncementRequestDialog({
   }, [resolvedProjectIdsKey]);
   const audienceProjectLabel = (projectId: string): string =>
     audiencePreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
+  // Caps how many chips the Audience box actually renders -- a large "All
+  // customer projects" send can resolve into well over a thousand ids, and
+  // dumping all of them into one review box is unreadable regardless of
+  // whether each one shows a real key or a raw id. Kept below
+  // useResolvedAudiencePreview's own AUDIENCE_PREVIEW_MAX_PROJECTS (200) so
+  // every chip actually shown here is guaranteed to have been resolved --
+  // this box never renders a raw UUID, it just stops before reaching the
+  // unresolved tail instead.
+  const AUDIENCE_DISPLAY_CAP = 100;
+  const visibleAudienceProjectIds = request?.resolvedProjectIds?.slice(0, AUDIENCE_DISPLAY_CAP) ?? [];
+  const hiddenAudienceProjectCount = Math.max(
+    (request?.resolvedProjectIds?.length ?? 0) - visibleAudienceProjectIds.length,
+    0,
+  );
 
   // Schedule: an alternative to clicking Publish immediately — pick a
   // future date/time and operations/csm-scheduled-tasks' own sub-cron
@@ -591,20 +605,35 @@ export default function AnnouncementRequestDialog({
                   border: 1,
                   borderColor: "divider",
                   borderRadius: 1,
-                  maxHeight: 120,
+                  maxHeight: 220,
                   overflowY: "auto",
-                  p: 1,
+                  p: 1.5,
                 }}
               >
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap" }}
-                >
-                  {audiencePreview.isLoading
-                    ? "Resolving project names…"
-                    : request.resolvedProjectIds.map(audienceProjectLabel).join(", ")}
-                </Typography>
+                {audiencePreview.isLoading ? (
+                  <Typography variant="body2" color="text.secondary">
+                    Resolving project names…
+                  </Typography>
+                ) : (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
+                    {visibleAudienceProjectIds.map((projectId) => (
+                      <Chip
+                        key={projectId}
+                        label={audienceProjectLabel(projectId)}
+                        size="small"
+                        variant="outlined"
+                      />
+                    ))}
+                    {hiddenAudienceProjectCount > 0 && (
+                      <Chip
+                        label={`+${hiddenAudienceProjectCount} more`}
+                        size="small"
+                        variant="outlined"
+                        color="default"
+                      />
+                    )}
+                  </Box>
+                )}
               </Box>
             )}
 
