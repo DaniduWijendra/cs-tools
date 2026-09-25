@@ -99,14 +99,18 @@ type SearchUsersFilters struct {
 	Emails      []string   `json:"emails"`
 	// UserIDs restricts the search to specific users. It intersects with the other
 	// filters, and supplying it also lifts the active-only default so a deactivated
-	// user stays retrievable by ID.
+	// user stays retrievable by ID (ServiceNow data source; the Postgres data
+	// source has no such implicit active-only default to lift -- it only
+	// filters by activeness when Active is explicitly set).
 	UserIDs []string `json:"userIds"`
-	// GroupIDs restricts the search to members of these groups. Resolved to a user-ID
-	// set before the upstream call, since the data source cannot join users against
-	// group membership in one query.
+	// GroupIDs restricts the search to members of these groups -- on
+	// ServiceNow, resolved to a user-ID set before the upstream call, since
+	// that data source cannot join users against group membership in one
+	// query; on Postgres, a plain EXISTS against team_member (migration
+	// 000028), matched directly in the same query.
 	GroupIDs []string `json:"groupIds"`
 	// GroupNames restricts the search to members of the groups with these exact display
-	// names, resolved to a user-ID set the same way GroupIDs is. It exists alongside
+	// names, resolved the same way GroupIDs is on each data source. It exists alongside
 	// GroupIDs because the caller's team registry is keyed by group name: group ids
 	// differ between environments while the names do not, and not every configured team
 	// carries an id at all.

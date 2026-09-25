@@ -213,6 +213,42 @@ func (r *userRepo) SearchUsers(ctx context.Context, req domain.SearchUsersReques
 		argIdx++
 	}
 
+	if len(req.Filters.UserIDs) > 0 {
+		where += fmt.Sprintf(" AND u.id = ANY($%d::uuid[])", argIdx)
+		filterArgs = append(filterArgs, req.Filters.UserIDs)
+		argIdx++
+	}
+
+	if len(req.Filters.GroupIDs) > 0 {
+		where += fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM team_member tm WHERE tm.user_id = u.id AND tm.team_id = ANY($%d::uuid[])
+		)`, argIdx)
+		filterArgs = append(filterArgs, req.Filters.GroupIDs)
+		argIdx++
+	}
+
+	if len(req.Filters.GroupNames) > 0 {
+		where += fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM team_member tm JOIN team t ON t.id = tm.team_id
+			WHERE tm.user_id = u.id AND t.name = ANY($%d::text[])
+		)`, argIdx)
+		filterArgs = append(filterArgs, req.Filters.GroupNames)
+		argIdx++
+	}
+
+	if req.Filters.Active != nil {
+		// "user".is_active is nullable; a NULL row counts as active, the same
+		// convention AccessService.ResolveScope already uses for this exact
+		// column ("user.is_active NULL counts as active" -- access_repo.go).
+		// active=false is strict, though: a row with no is_active recorded at
+		// all is not known to be inactive, so it must not match that filter.
+		if *req.Filters.Active {
+			where += " AND (u.is_active IS NULL OR u.is_active = TRUE)"
+		} else {
+			where += " AND u.is_active = FALSE"
+		}
+	}
+
 	const fromClause = `FROM "user" u`
 
 	countQuery := "SELECT COUNT(*) " + fromClause + " " + where

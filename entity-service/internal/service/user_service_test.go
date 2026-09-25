@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -161,6 +162,99 @@ func TestUserService_SearchUsers_SortBy(t *testing.T) {
 			}
 			if !called || got != tt.sort {
 				t.Fatalf("repo saw sort %+v (called=%v), want %+v", got, called, tt.sort)
+			}
+		})
+	}
+}
+
+// TestUserService_SearchUsers_ActiveFilterReachesRepository is the
+// regression guard for a real bug: POST /users/search with an active
+// filter (e.g. {roleIds: ["timecard_approver"], active: true}, the Time
+// Tracking tab's own approver search) 400'd unconditionally on this data
+// source, even though "user".is_active is a real, already-read column.
+// Proves both true and false reach the repository rather than being
+// rejected.
+func TestUserService_SearchUsers_ActiveFilterReachesRepository(t *testing.T) {
+	for _, active := range []bool{true, false} {
+		t.Run(fmt.Sprintf("active=%v", active), func(t *testing.T) {
+			var got *bool
+			repo := stubUserRepo{
+				searchUsers: func(_ context.Context, req domain.SearchUsersRequest) ([]domain.User, int, error) {
+					got = req.Filters.Active
+					return nil, 0, nil
+				},
+			}
+			active := active
+			req := domain.SearchUsersRequest{Filters: domain.SearchUsersFilters{Active: &active}}
+			if _, err := NewUserService(repo).SearchUsers(context.Background(), req); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil || *got != active {
+				t.Fatalf("repo saw Active = %v, want %v", got, active)
+			}
+		})
+	}
+}
+
+// TestUserService_SearchUsers_UserIDsGroupFiltersReachRepository is the
+// regression guard for another instance of the same bug: userIds, groupIds
+// and groupNames were rejected outright on this data source, even though
+// they're a plain u.id = ANY(...) and an EXISTS against team_member/team --
+// both already used elsewhere (e.g. GetUserGroups). Proves all three reach
+// the repository rather than being rejected.
+func TestUserService_SearchUsers_UserIDsGroupFiltersReachRepository(t *testing.T) {
+	userID := "11111111-1111-1111-1111-111111111111"
+	groupID := "22222222-2222-2222-2222-222222222222"
+	var got domain.SearchUsersFilters
+	repo := stubUserRepo{
+		searchUsers: func(_ context.Context, req domain.SearchUsersRequest) ([]domain.User, int, error) {
+			got = req.Filters
+			return nil, 0, nil
+		},
+	}
+	req := domain.SearchUsersRequest{Filters: domain.SearchUsersFilters{
+		UserIDs:    []string{userID},
+		GroupIDs:   []string{groupID},
+		GroupNames: []string{"CAB Approval"},
+	}}
+	if _, err := NewUserService(repo).SearchUsers(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.UserIDs) != 1 || got.UserIDs[0] != userID {
+		t.Fatalf("repo saw UserIDs = %v, want [%s]", got.UserIDs, userID)
+	}
+	if len(got.GroupIDs) != 1 || got.GroupIDs[0] != groupID {
+		t.Fatalf("repo saw GroupIDs = %v, want [%s]", got.GroupIDs, groupID)
+	}
+	if len(got.GroupNames) != 1 || got.GroupNames[0] != "CAB Approval" {
+		t.Fatalf("repo saw GroupNames = %v, want [CAB Approval]", got.GroupNames)
+	}
+}
+
+// TestUserService_SearchUsers_UserIDsGroupFilters_RejectsMalformedUUID proves
+// userIds/groupIds still validate as UUIDs before reaching the repository --
+// only the blanket "unsupported on Postgres" rejection was removed.
+func TestUserService_SearchUsers_UserIDsGroupFilters_RejectsMalformedUUID(t *testing.T) {
+	tests := []struct {
+		name    string
+		filters domain.SearchUsersFilters
+	}{
+		{name: "userIds", filters: domain.SearchUsersFilters{UserIDs: []string{"not-a-uuid"}}},
+		{name: "groupIds", filters: domain.SearchUsersFilters{GroupIDs: []string{"not-a-uuid"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := stubUserRepo{
+				searchUsers: func(context.Context, domain.SearchUsersRequest) ([]domain.User, int, error) {
+					t.Fatal("repository should not be called for a malformed uuid")
+					return nil, 0, nil
+				},
+			}
+			req := domain.SearchUsersRequest{Filters: tt.filters}
+			_, err := NewUserService(repo).SearchUsers(context.Background(), req)
+			var ve *apierror.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("err = %v, want ValidationError", err)
 			}
 		})
 	}
