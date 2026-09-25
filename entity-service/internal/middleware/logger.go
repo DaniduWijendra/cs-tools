@@ -18,7 +18,6 @@
 package middleware
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -39,32 +38,19 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
-// deadlineSetter matches the unexported interface net/http's response type
-// implements, which http.ResponseController relies on via a type assertion.
-type deadlineSetter interface {
-	SetWriteDeadline(time.Time) error
-	SetReadDeadline(time.Time) error
-}
-
-// SetWriteDeadline and SetReadDeadline forward to the underlying
-// ResponseWriter, so http.NewResponseController(w).SetWriteDeadline still
-// works through this wrapper -- used by handlers whose own work can
-// legitimately exceed the server's global WriteTimeout (see
-// AutoPublishAnnouncementRequest).
-func (rw *responseWriter) SetWriteDeadline(deadline time.Time) error {
-	ds, ok := rw.ResponseWriter.(deadlineSetter)
-	if !ok {
-		return fmt.Errorf("underlying ResponseWriter does not support setting a write deadline")
-	}
-	return ds.SetWriteDeadline(deadline)
-}
-
-func (rw *responseWriter) SetReadDeadline(deadline time.Time) error {
-	ds, ok := rw.ResponseWriter.(deadlineSetter)
-	if !ok {
-		return fmt.Errorf("underlying ResponseWriter does not support setting a read deadline")
-	}
-	return ds.SetReadDeadline(deadline)
+// Unwrap lets http.NewResponseController see through this wrapper to the
+// underlying ResponseWriter -- required for SetWriteDeadline/SetReadDeadline
+// (used by handlers whose own work can legitimately exceed the server's
+// global WriteTimeout, see AutoPublishAnnouncementRequest) to reach the real,
+// deadline-capable writer several middleware layers down (this wrapper is
+// itself nested inside recoveryWriter, see recovery.go's own Unwrap).
+// ResponseController checks for a direct SetWriteDeadline implementation
+// first and only falls back to Unwrap when that's absent, so a wrapper-local
+// forwarding method (the previous approach here) is unnecessary and, worse,
+// actively wrong: it would be found and called before Unwrap is ever
+// consulted, while itself only being able to see one layer down.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 // sanitizePath strips newline characters from a URL path to prevent log injection.

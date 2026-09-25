@@ -486,6 +486,14 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 		mu               sync.Mutex
 		stillFailingTags []string
 		firstErr         error
+		// deferredWork is set (from the sequential launching loops below, never
+		// from a spawned goroutine, so it needs no lock of its own) when ctx
+		// expires before every project could even be attempted. Without this,
+		// a project skipped entirely (never launched, so never added to
+		// stillFailingCases/stillFailingTags either) would be silently treated
+		// as if it didn't exist -- letting the "nothing left failing" check
+		// below reach MarkPublished for a batch that was actually incomplete.
+		deferredWork bool
 	)
 	recordFirstErr := func(err error) {
 		mu.Lock()
@@ -498,12 +506,21 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 	// Retry any earlier tag failures first, reusing the case that already
 	// exists rather than creating a second one for the same project. Bounded
 	// concurrent, same as the fan-out below — see this method's own doc
-	// comment for why.
+	// comment for why. Each launch acquires its semaphore slot via ctx so a
+	// launch that's still waiting for a slot when ctx expires (autoPublishHandlerTimeout)
+	// gives up instead of eventually launching real, already-doomed work --
+	// see recordNow's own doc comment for why work already launched still
+	// gets its outcome recorded regardless.
 	var tagRetryWG sync.WaitGroup
 	tagRetrySem := make(chan struct{}, autoPublishFanOutConcurrency)
 	for projectID, caseID := range failedTagCaseByProject {
+		select {
+		case tagRetrySem <- struct{}{}:
+		case <-ctx.Done():
+			deferredWork = true
+			continue
+		}
 		tagRetryWG.Add(1)
-		tagRetrySem <- struct{}{}
 		go func(projectID, caseID string) {
 			defer tagRetryWG.Done()
 			defer func() { <-tagRetrySem }()
@@ -534,8 +551,13 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 		if succeeded[projectID] {
 			continue
 		}
+		select {
+		case fanOutSem <- struct{}{}:
+		case <-ctx.Done():
+			deferredWork = true
+			continue
+		}
 		fanOutWG.Add(1)
-		fanOutSem <- struct{}{}
 		go func(projectID string) {
 			defer fanOutWG.Done()
 			defer func() { <-fanOutSem }()
@@ -587,11 +609,16 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 		return domain.AnnouncementRequest{}, firstErr
 	}
 
-	if len(stillFailingCases) > 0 || len(stillFailingTags) > 0 {
-		return domain.AnnouncementRequest{}, &apierror.ConflictError{Msg: fmt.Sprintf(
-			"not yet fully delivered — %d project(s) failed case creation, %d project(s) failed the security tag; will retry next tick",
+	if deferredWork || len(stillFailingCases) > 0 || len(stillFailingTags) > 0 {
+		msg := fmt.Sprintf(
+			"not yet fully delivered — %d project(s) failed case creation, %d project(s) failed the security tag",
 			len(stillFailingCases), len(stillFailingTags),
-		)}
+		)
+		if deferredWork {
+			msg += "; some project work was deferred because the context expired"
+		}
+		msg += "; will retry next tick"
+		return domain.AnnouncementRequest{}, &apierror.ConflictError{Msg: msg}
 	}
 
 	caseIDs := make([]string, 0, len(caseIDByProject))
