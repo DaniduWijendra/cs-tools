@@ -59,7 +59,10 @@ export interface BeSaveSavedFilterViewPayload {
 export interface BeReorderSavedFilterViewPayload {
   listKey: BeSavedFilterListKey;
   name: string;
-  direction: "up" | "down";
+  /** One-slot move. Omit when `position` is set. */
+  direction?: "up" | "down";
+  /** 0-based target index. Wins over `direction` when both are set. */
+  position?: number;
 }
 
 export interface BeSearchResponseBase {

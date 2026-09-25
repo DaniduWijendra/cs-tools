@@ -127,12 +127,22 @@ func (s *savedFilterViewService) Reorder(ctx context.Context, req domain.Reorder
 	if name == "" {
 		return domain.SavedFilterViewList{}, &apierror.ValidationError{Msg: "name is required"}
 	}
-	if req.Direction != domain.SavedFilterMoveUp && req.Direction != domain.SavedFilterMoveDown {
-		return domain.SavedFilterViewList{}, &apierror.ValidationError{Msg: "direction must be up or down"}
-	}
 	userID, err := s.currentUserID(ctx)
 	if err != nil {
 		return domain.SavedFilterViewList{}, err
+	}
+	if req.Position != nil {
+		if *req.Position < 0 {
+			return domain.SavedFilterViewList{}, &apierror.ValidationError{Msg: "position must be zero or greater"}
+		}
+		views, err := s.repo.MoveTo(ctx, userID, req.ListKey, name, *req.Position)
+		if err != nil {
+			return domain.SavedFilterViewList{}, err
+		}
+		return domain.SavedFilterViewList{Views: views}, nil
+	}
+	if req.Direction != domain.SavedFilterMoveUp && req.Direction != domain.SavedFilterMoveDown {
+		return domain.SavedFilterViewList{}, &apierror.ValidationError{Msg: "direction must be up or down"}
 	}
 	views, err := s.repo.Move(ctx, userID, req.ListKey, name, req.Direction)
 	if err != nil {

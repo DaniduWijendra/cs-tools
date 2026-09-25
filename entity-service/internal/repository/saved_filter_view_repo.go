@@ -19,6 +19,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +33,7 @@ type SavedFilterViewRepository interface {
 	Save(ctx context.Context, userID string, listKey domain.SavedFilterListKey, name, qs string) ([]domain.SavedFilterView, error)
 	Delete(ctx context.Context, userID string, listKey domain.SavedFilterListKey, name string) ([]domain.SavedFilterView, error)
 	Move(ctx context.Context, userID string, listKey domain.SavedFilterListKey, name string, direction domain.SavedFilterMoveDirection) ([]domain.SavedFilterView, error)
+	MoveTo(ctx context.Context, userID string, listKey domain.SavedFilterListKey, name string, position int) ([]domain.SavedFilterView, error)
 }
 
 type savedFilterViewRepo struct {
@@ -228,6 +230,95 @@ func (r *savedFilterViewRepo) Move(ctx context.Context, userID string, listKey d
 		return nil, fmt.Errorf("move saved filter view: commit: %w", err)
 	}
 	return views, nil
+}
+
+func (r *savedFilterViewRepo) MoveTo(ctx context.Context, userID string, listKey domain.SavedFilterListKey, name string, position int) ([]domain.SavedFilterView, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("move saved filter view: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockSavedFilterList(ctx, tx, userID, listKey); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT id, name FROM user_saved_filter
+		 WHERE user_id = $1 AND list_key = $2
+		 ORDER BY filter_position ASC`,
+		userID, string(listKey),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("move saved filter view: list ids: %w", err)
+	}
+
+	var ids []string
+	from := -1
+	for rows.Next() {
+		var id, rowName string
+		if err := rows.Scan(&id, &rowName); err != nil {
+			return nil, fmt.Errorf("move saved filter view: scan id: %w", err)
+		}
+		if strings.EqualFold(rowName, name) {
+			from = len(ids)
+		}
+		ids = append(ids, id)
+	}
+	closeErr := rows.Err()
+	rows.Close()
+	if closeErr != nil {
+		return nil, fmt.Errorf("move saved filter view: ids: %w", closeErr)
+	}
+
+	if from >= 0 {
+		next, changed := reorderIDs(ids, from, position)
+		if changed {
+			for i, id := range next {
+				if _, err := tx.Exec(ctx,
+					`UPDATE user_saved_filter SET filter_position = $1, updated_on = NOW() WHERE id = $2`,
+					i, id,
+				); err != nil {
+					return nil, fmt.Errorf("move saved filter view: set position: %w", err)
+				}
+			}
+		}
+	}
+
+	views, err := r.list(ctx, tx, userID, listKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("move saved filter view: commit: %w", err)
+	}
+	return views, nil
+}
+
+// reorderIDs moves the id at from to the 0-based index to and returns the
+// compacted order. An out-of-range to is clamped. No change returns the
+// original slice and false.
+func reorderIDs(ids []string, from, to int) ([]string, bool) {
+	if len(ids) == 0 || from < 0 || from >= len(ids) {
+		return ids, false
+	}
+	if to < 0 {
+		to = 0
+	}
+	if to >= len(ids) {
+		to = len(ids) - 1
+	}
+	if from == to {
+		return ids, false
+	}
+	next := append([]string(nil), ids...)
+	id := next[from]
+	next = append(next[:from], next[from+1:]...)
+	if to > len(next) {
+		to = len(next)
+	}
+	next = append(next[:to], append([]string{id}, next[to:]...)...)
+	return next, true
 }
 
 // lockSavedFilterList serializes Save/Delete/Move for one (user_id, list_key)

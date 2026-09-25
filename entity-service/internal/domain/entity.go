@@ -202,10 +202,13 @@ type SaveSavedFilterViewRequest struct {
 }
 
 // ReorderSavedFilterViewRequest is POST /users/me/saved-filter-views/reorder.
+// Direction moves one slot. Position, when set, is the 0-based target index
+// and takes precedence so a drag can jump several slots in one request.
 type ReorderSavedFilterViewRequest struct {
 	ListKey   SavedFilterListKey       `json:"listKey"`
 	Name      string                   `json:"name"`
-	Direction SavedFilterMoveDirection `json:"direction"`
+	Direction SavedFilterMoveDirection `json:"direction,omitempty"`
+	Position  *int                     `json:"position,omitempty"`
 }
 
 // SNUser is the user view returned by the ServiceNow data source.

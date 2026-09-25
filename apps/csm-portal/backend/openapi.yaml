@@ -11177,7 +11177,11 @@ components:
           type: string
     ReorderSavedFilterViewPayload:
       type: object
-      required: [listKey, name, direction]
+      required: [listKey, name]
+      description: Send direction to move one slot, or position to place the view at a 0-based index. Position wins when both are set.
+      anyOf:
+        - required: [direction]
+        - required: [position]
       properties:
         listKey:
           type: string
@@ -11187,6 +11191,9 @@ components:
         direction:
           type: string
           enum: [up, down]
+        position:
+          type: integer
+          minimum: 0
 
     UserResponse:
       type: object

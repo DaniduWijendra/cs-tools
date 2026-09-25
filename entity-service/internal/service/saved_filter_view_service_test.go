@@ -48,6 +48,9 @@ type fakeSavedFilterViewRepo struct {
 	movedName  string
 	movedDir   domain.SavedFilterMoveDirection
 	moveResult []domain.SavedFilterView
+
+	moveToCalled bool
+	movedTo      int
 }
 
 func (f *fakeSavedFilterViewRepo) List(_ context.Context, userID string, _ domain.SavedFilterListKey) ([]domain.SavedFilterView, error) {
@@ -81,6 +84,15 @@ func (f *fakeSavedFilterViewRepo) Move(_ context.Context, _ string, _ domain.Sav
 	f.moveCalled = true
 	f.movedName = name
 	f.movedDir = direction
+	if f.moveResult != nil {
+		return f.moveResult, nil
+	}
+	return f.list, nil
+}
+func (f *fakeSavedFilterViewRepo) MoveTo(_ context.Context, _ string, _ domain.SavedFilterListKey, name string, position int) ([]domain.SavedFilterView, error) {
+	f.moveToCalled = true
+	f.movedName = name
+	f.movedTo = position
 	if f.moveResult != nil {
 		return f.moveResult, nil
 	}
@@ -246,5 +258,20 @@ func TestSavedFilterViewService_Reorder_Forwards(t *testing.T) {
 	}
 	if !repo.moveCalled || repo.movedName != "A" || repo.movedDir != domain.SavedFilterMoveDown {
 		t.Fatalf("move not forwarded: %+v", repo)
+	}
+}
+
+func TestSavedFilterViewService_Reorder_ForwardsPosition(t *testing.T) {
+	repo := &fakeSavedFilterViewRepo{}
+	svc, ctx := savedFilterViewSvc(t, repo)
+	pos := 2
+	_, err := svc.Reorder(ctx, domain.ReorderSavedFilterViewRequest{
+		ListKey: domain.SavedFilterListKeyCases, Name: "  A  ", Position: &pos,
+	})
+	if err != nil {
+		t.Fatalf("Reorder: %v", err)
+	}
+	if !repo.moveToCalled || repo.movedName != "A" || repo.movedTo != 2 || repo.moveCalled {
+		t.Fatalf("position not forwarded: %+v", repo)
 	}
 }

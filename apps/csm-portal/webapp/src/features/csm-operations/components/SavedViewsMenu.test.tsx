@@ -57,10 +57,16 @@ function wireApi(): void {
   });
   postMock.mockImplementation(async (_path: string, body: BeReorderSavedFilterViewPayload) => {
     const i = views.findIndex((v) => v.name.toLowerCase() === body.name.toLowerCase());
-    const t = body.direction === "up" ? i - 1 : i + 1;
-    if (i >= 0 && t >= 0 && t < views.length) {
+    const t =
+      body.position !== undefined
+        ? body.position
+        : body.direction === "up"
+          ? i - 1
+          : i + 1;
+    if (i >= 0 && t >= 0 && t < views.length && t !== i) {
       const next = [...views];
-      [next[i], next[t]] = [next[t], next[i]];
+      const [item] = next.splice(i, 1);
+      next.splice(Math.min(t, next.length), 0, item);
       views = next;
     }
     return { views: [...views] };
@@ -160,7 +166,7 @@ describe("SavedViewsMenu", () => {
     );
   });
 
-  it("reorders saved views with the up/down icon buttons", async () => {
+  it("reorders saved views with the arrow keys on the drag button", async () => {
     views = [
       { name: "Second", qs: "q=2" },
       { name: "First", qs: "q=1" },
@@ -168,8 +174,10 @@ describe("SavedViewsMenu", () => {
     renderMenu();
 
     fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
-    await waitFor(() => screen.getByRole("button", { name: /move saved view second down/i }));
-    fireEvent.click(screen.getByRole("button", { name: /move saved view second down/i }));
+    await waitFor(() => screen.getByRole("button", { name: /drag to reorder saved view second/i }));
+    fireEvent.keyDown(screen.getByRole("button", { name: /drag to reorder saved view second/i }), {
+      key: "ArrowDown",
+    });
 
     await waitFor(() => {
       const items = screen
@@ -178,6 +186,72 @@ describe("SavedViewsMenu", () => {
       expect(items[0]).toHaveTextContent("First");
       expect(items[1]).toHaveTextContent("Second");
     });
+  });
+
+  it("drag-drop reorders to the target index in one request", async () => {
+    views = [
+      { name: "A", qs: "a" },
+      { name: "B", qs: "b" },
+      { name: "C", qs: "c" },
+    ];
+    renderMenu();
+    fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
+    const handle = await screen.findByRole("button", { name: /drag to reorder saved view A/i });
+    const target = screen.getByRole("menuitem", { name: /C/ });
+    fireEvent.dragStart(handle);
+    fireEvent.dragOver(target);
+    fireEvent.drop(target);
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/users/me/saved-filter-views/reorder", {
+        listKey: "incidents",
+        name: "A",
+        position: 2,
+      }),
+    );
+  });
+
+  it("copies the list page URL for a saved view", async () => {
+    views = [{ name: "Mine", qs: "state=open" }];
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    renderMenu({ listKey: "cases" });
+    fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /copy filter link for mine/i }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        `${window.location.origin}/cases?state=open`,
+      ),
+    );
+  });
+
+  it("saves a pasted filter link instead of the filters on screen", async () => {
+    renderMenu({ currentQs: "q=hello" });
+    fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /save current view/i }));
+    fireEvent.change(screen.getByLabelText(/view name/i), { target: { value: "Shared" } });
+    fireEvent.change(screen.getByLabelText(/filter link/i), {
+      target: { value: "http://localhost:3001/operations/incidents?state=open&severity=S1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() =>
+      expect(patchMock).toHaveBeenCalledWith("/users/me/saved-filter-views", {
+        listKey: "incidents",
+        name: "Shared",
+        qs: "state=open&severity=S1",
+      }),
+    );
+  });
+
+  it("shows an error and does not save when the pasted text is not a filter", async () => {
+    renderMenu();
+    fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /save current view/i }));
+    fireEvent.change(screen.getByLabelText(/view name/i), { target: { value: "Shared" } });
+    fireEvent.change(screen.getByLabelText(/filter link/i), { target: { value: "not a filter" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    expect(await screen.findByText(/doesn't contain a filter/i)).toBeInTheDocument();
+    expect(patchMock).not.toHaveBeenCalled();
   });
 
   it("does not claim 'all records' in the save dialog when only a search term is active", () => {
@@ -197,6 +271,19 @@ describe("SavedViewsMenu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /save current view/i }));
 
     expect(screen.getByText(/will show all records/i)).toBeInTheDocument();
+  });
+
+  it("does not describe the filters on screen once a link is pasted", () => {
+    renderMenu({ activeCount: 0, hasSearch: false });
+
+    fireEvent.click(screen.getByRole("button", { name: /saved views/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /save current view/i }));
+    fireEvent.change(screen.getByLabelText(/filter link/i), {
+      target: { value: "state=open" },
+    });
+
+    expect(screen.queryByText(/will show all records/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/saves the filter from the pasted link/i)).toBeInTheDocument();
   });
 
   it("deletes a saved view via its delete icon button", async () => {

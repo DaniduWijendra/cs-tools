@@ -725,52 +725,42 @@ describe("CasesFilterBar — saved views reordering", () => {
 
   async function openSavedViewsMenu(): Promise<void> {
     fireEvent.click(screen.getByRole("button", { name: /Saved views/ }));
-    await waitFor(() => screen.getByRole("button", { name: "Move saved view First down" }));
+    await waitFor(() =>
+      screen.getByRole("button", { name: "Drag to reorder saved view First" }),
+    );
   }
 
-  it("renders move up/down buttons for saved views; the Suggested section is gone", async () => {
+  it("renders a drag button for saved views; the Suggested section is gone", async () => {
     renderBar({ ...DEFAULT_CASES_FILTERS });
     await openSavedViewsMenu();
 
-    // The built-in Suggested section has been removed entirely.
     expect(screen.queryByText("Suggested")).not.toBeInTheDocument();
     expect(screen.queryByText("S0/S1 active")).not.toBeInTheDocument();
-
-    // Saved (user) views get reorder controls.
     expect(
-      screen.getByRole("button", { name: "Move saved view First down" }),
+      screen.getByRole("button", { name: "Drag to reorder saved view First" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Move saved view Second up" }),
+      screen.getByRole("button", { name: "Drag to reorder saved view Second" }),
     ).toBeInTheDocument();
   });
 
-  it("disables (or omits an enabled) up-arrow on the first item", async () => {
-    renderBar({ ...DEFAULT_CASES_FILTERS });
-    await openSavedViewsMenu();
-
-    expect(
-      screen.getByRole("button", { name: "Move saved view First up" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Move saved view Second down" }),
-    ).toBeDisabled();
-  });
-
-  it("clicking move-down on the first saved view reorders the list without applying it", async () => {
+  it("arrow-down on the first saved view reorders the list without applying it", async () => {
     const { onChange } = renderBar({ ...DEFAULT_CASES_FILTERS });
     await openSavedViewsMenu();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Move saved view First down" }),
-    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Drag to reorder saved view First" }), {
+      key: "ArrowDown",
+    });
 
     expect(onChange).not.toHaveBeenCalled();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Move saved view Second up" }),
-      ).toBeDisabled();
+      const items = screen.getAllByRole("menuitem");
+      const labels = items.map((el) => el.textContent ?? "");
+      const second = labels.findIndex((t) => t.includes("Second"));
+      const first = labels.findIndex((t) => t.includes("First"));
+      expect(second).toBeGreaterThan(-1);
+      expect(first).toBeGreaterThan(second);
     });
   });
 });

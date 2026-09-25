@@ -65,10 +65,12 @@ function inMemory(initial: View[] = []) {
   });
   postMock.mockImplementation(async (_path: string, body: BeReorderSavedFilterViewPayload) => {
     const i = views.findIndex((v) => v.name.toLowerCase() === body.name.toLowerCase());
-    const t = body.direction === "up" ? i - 1 : i + 1;
-    if (i >= 0 && t >= 0 && t < views.length) {
+    const t =
+      body.position !== undefined ? body.position : body.direction === "up" ? i - 1 : i + 1;
+    if (i >= 0 && t >= 0 && t < views.length && t !== i) {
       const next = [...views];
-      [next[i], next[t]] = [next[t], next[i]];
+      const [item] = next.splice(i, 1);
+      next.splice(Math.min(t, next.length), 0, item);
       views = next;
     }
     return { views: [...views] };
@@ -164,6 +166,10 @@ describe("useSavedFilterViews", () => {
       await result.current.moveFilterView("B", "up");
     });
     await waitFor(() => expect(result.current.views.map((v) => v.name)).toEqual(["B", "C", "A"]));
+    await act(async () => {
+      await result.current.reorderFilterView("A", 0);
+    });
+    await waitFor(() => expect(result.current.views.map((v) => v.name)).toEqual(["A", "B", "C"]));
   });
 
   it("migrates localStorage when GET returns an empty list, preserving order", async () => {

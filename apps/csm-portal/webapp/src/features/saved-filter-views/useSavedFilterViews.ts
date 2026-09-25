@@ -62,6 +62,7 @@ export function useSavedFilterViews(listKey: SavedFilterListKey): {
   saveFilterView: (name: string, qs: string) => Promise<void>;
   deleteFilterView: (name: string) => Promise<void>;
   moveFilterView: (name: string, direction: "up" | "down") => Promise<void>;
+  reorderFilterView: (name: string, position: number) => Promise<void>;
   resetSaveError: () => void;
 } {
   const api = useBackendApi();
@@ -131,10 +132,16 @@ export function useSavedFilterViews(listKey: SavedFilterListKey): {
   });
 
   const reorderMutation = useMutation({
-    mutationFn: (input: { name: string; direction: "up" | "down" }) =>
+    mutationFn: (input: { name: string; direction?: "up" | "down"; position?: number }) =>
       api.post<BeReorderSavedFilterViewPayload, BeSavedFilterViewList>(
         "/users/me/saved-filter-views/reorder",
-        { listKey, name: input.name, direction: input.direction },
+        {
+          listKey,
+          name: input.name,
+          ...(input.position !== undefined
+            ? { position: input.position }
+            : { direction: input.direction }),
+        },
       ),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKey(listKey) });
@@ -168,6 +175,15 @@ export function useSavedFilterViews(listKey: SavedFilterListKey): {
     [reorderMutation.mutateAsync],
   );
 
+  const reorderFilterView = useCallback(
+    async (name: string, position: number): Promise<void> => {
+      const trimmed = name.trim();
+      if (!trimmed || position < 0) return;
+      await reorderMutation.mutateAsync({ name: trimmed, position });
+    },
+    [reorderMutation.mutateAsync],
+  );
+
   const resetSaveError = useCallback(() => {
     saveMutation.reset();
   }, [saveMutation.reset]);
@@ -184,6 +200,7 @@ export function useSavedFilterViews(listKey: SavedFilterListKey): {
     saveFilterView,
     deleteFilterView,
     moveFilterView,
+    reorderFilterView,
     resetSaveError,
   };
 }
