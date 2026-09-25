@@ -45,9 +45,16 @@ export interface ResolvedAudiencePreview {
   total: number;
   isLoading: boolean;
   isError: boolean;
-  /** True when total > AUDIENCE_PREVIEW_MAX_PROJECTS and the list below was truncated. */
+  /** True when total exceeds the cap actually used for the last resolve() call. */
   truncated: boolean;
-  resolve: (projectIds: string[]) => Promise<void>;
+  /**
+   * maxProjects overrides AUDIENCE_PREVIEW_MAX_PROJECTS for this call only --
+   * every other call site keeps the default 200-project safety cap; a caller
+   * that explicitly wants to see further (e.g. an approver opting into "show
+   * the full audience" for a large send before approving) can raise it for
+   * just that one resolve.
+   */
+  resolve: (projectIds: string[], maxProjects?: number) => Promise<void>;
 }
 
 /**
@@ -64,16 +71,18 @@ export function useResolvedAudiencePreview(): ResolvedAudiencePreview {
   const authFetch = useAuthApiClient();
   const [projects, setProjects] = useState<ResolvedAudienceProject[]>([]);
   const [total, setTotal] = useState(0);
+  const [fetchLimit, setFetchLimit] = useState(AUDIENCE_PREVIEW_MAX_PROJECTS);
   const [isLoading, setIsLoading] = useState(false);
   const [isError, setIsError] = useState(false);
 
   const resolve = useCallback(
-    async (projectIds: string[]): Promise<void> => {
+    async (projectIds: string[], maxProjects: number = AUDIENCE_PREVIEW_MAX_PROJECTS): Promise<void> => {
       setIsLoading(true);
       setIsError(false);
       setTotal(projectIds.length);
+      setFetchLimit(maxProjects);
 
-      const toFetch = projectIds.slice(0, AUDIENCE_PREVIEW_MAX_PROJECTS);
+      const toFetch = projectIds.slice(0, maxProjects);
       const results = await settleWithConcurrencyLimit(
         toFetch,
         ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
@@ -108,7 +117,7 @@ export function useResolvedAudiencePreview(): ResolvedAudiencePreview {
     total,
     isLoading,
     isError,
-    truncated: total > AUDIENCE_PREVIEW_MAX_PROJECTS,
+    truncated: total > fetchLimit,
     resolve,
   };
 }

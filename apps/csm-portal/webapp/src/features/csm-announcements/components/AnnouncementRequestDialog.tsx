@@ -21,6 +21,7 @@ import {
   Button,
   Checkbox,
   Chip,
+  CircularProgress,
   DatePickers,
   Dialog,
   DialogActions,
@@ -188,18 +189,23 @@ export default function AnnouncementRequestDialog({
   const failedProjectLabel = (projectId: string): string =>
     failedProjectsPreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
-  // Caps how many audience projects get resolved and shown as chips below.
-  // A large "All customer projects" send can resolve into well over a
-  // thousand ids, and dumping all of them into one review box is unreadable
-  // regardless of whether each one shows a real key or a raw id. Resolving
-  // is a real GET /projects/{id} round trip per id (bounded 5 at a time,
-  // see useResolvedAudiencePreview), so this slices *before* calling
-  // resolve() rather than only capping what's displayed afterward --
-  // otherwise a 1500+ project audience would still cost up to 200
-  // individual round trips (useResolvedAudiencePreview's own resolve cap)
-  // just to throw away everything past the 100 this box ever shows.
+  // Caps how many audience projects get resolved and shown as chips below,
+  // by default. A large "All customer projects" send can resolve into well
+  // over a thousand ids, and dumping all of them into one review box is
+  // unreadable regardless of whether each one shows a real key or a raw id.
+  // showFullAudience is an explicit opt-in (a "Show all" click, never
+  // automatic) past this default -- an approver reviewing a large send has
+  // no way to inspect who's actually in it beyond the default cap
+  // otherwise, even though Publish still targets the complete frozen
+  // audience regardless of what this box displays.
   const AUDIENCE_DISPLAY_CAP = 100;
-  const visibleAudienceProjectIds = request?.resolvedProjectIds?.slice(0, AUDIENCE_DISPLAY_CAP) ?? [];
+  const [showFullAudience, setShowFullAudience] = useState(false);
+  useEffect(() => {
+    setShowFullAudience(false);
+  }, [request?.id]);
+  const visibleAudienceProjectIds = showFullAudience
+    ? (request?.resolvedProjectIds ?? [])
+    : (request?.resolvedProjectIds?.slice(0, AUDIENCE_DISPLAY_CAP) ?? []);
   const hiddenAudienceProjectCount = Math.max(
     (request?.resolvedProjectIds?.length ?? 0) - visibleAudienceProjectIds.length,
     0,
@@ -209,12 +215,25 @@ export default function AnnouncementRequestDialog({
   // as raw, meaningless UUIDs to whoever's reviewing/approving the request.
   // Same resolve-on-change pattern as failedProjectsPreview above; any id
   // that fails to resolve (a fetch error) just falls back to its raw id
-  // rather than blocking the rest of the list.
+  // rather than blocking the rest of the list. maxProjects is passed
+  // explicitly as however many are actually visible right now (100, or
+  // every one of them once showFullAudience is set) -- resolving anything
+  // beyond what's displayed would just be wasted round trips.
+  //
+  // Only resolves when the visible set has *grown* past what's already
+  // resolved (opening the dialog, or clicking "Show all") -- collapsing
+  // back via "Show fewer" shrinks visibleAudienceProjectIds without needing
+  // a new resolve at all, since every id it still shows was already fetched
+  // as part of the larger set. Without this guard, "Show fewer" would
+  // re-fetch the first 100 projects from scratch (audiencePreview.resolve
+  // replaces its result wholesale, it doesn't remember earlier calls),
+  // flashing back to "Resolving project names…" for data already in hand.
   const audiencePreview = useResolvedAudiencePreview();
   const visibleAudienceProjectIdsKey = visibleAudienceProjectIds.join(",");
+  const resolvedAudienceProjectCount = audiencePreview.projects.length;
   useEffect(() => {
-    if (visibleAudienceProjectIds.length > 0) {
-      void audiencePreview.resolve(visibleAudienceProjectIds);
+    if (visibleAudienceProjectIds.length > resolvedAudienceProjectCount) {
+      void audiencePreview.resolve(visibleAudienceProjectIds, visibleAudienceProjectIds.length);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleAudienceProjectIdsKey]);
@@ -615,9 +634,14 @@ export default function AnnouncementRequestDialog({
                 }}
               >
                 {audiencePreview.isLoading ? (
-                  <Typography variant="body2" color="text.secondary">
-                    Resolving project names…
-                  </Typography>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    <CircularProgress size={14} />
+                    <Typography variant="body2" color="text.secondary">
+                      {showFullAudience
+                        ? `Resolving all ${visibleAudienceProjectIds.length} projects — this can take a moment for a large audience…`
+                        : "Resolving project names…"}
+                    </Typography>
+                  </Box>
                 ) : (
                   <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
                     {visibleAudienceProjectIds.map((projectId) => (
@@ -630,10 +654,20 @@ export default function AnnouncementRequestDialog({
                     ))}
                     {hiddenAudienceProjectCount > 0 && (
                       <Chip
-                        label={`+${hiddenAudienceProjectCount} more`}
+                        label={`Show all (+${hiddenAudienceProjectCount} more)`}
                         size="small"
                         variant="outlined"
                         color="default"
+                        onClick={() => setShowFullAudience(true)}
+                      />
+                    )}
+                    {showFullAudience && visibleAudienceProjectIds.length > AUDIENCE_DISPLAY_CAP && (
+                      <Chip
+                        label="Show fewer"
+                        size="small"
+                        variant="outlined"
+                        color="default"
+                        onClick={() => setShowFullAudience(false)}
                       />
                     )}
                   </Box>
