@@ -96,7 +96,7 @@ func MapProjectFilterOptions(m entity.ProjectMetadataResponse) ProjectFilterOpti
 	return ProjectFilterOptions{
 		CaseStates:                  normalizeCaseStateChoices(mapChoiceListItems(m.CaseStates)),
 		Severities:                  normalizeCaseSeverityChoices(mapChoiceListItems(m.Severities)),
-		IssueTypes:                  mapChoiceListItems(m.IssueTypes),
+		IssueTypes:                  normalizeCaseIssueTypeChoices(mapChoiceListItems(m.IssueTypes)),
 		DeploymentTypes:             mapChoiceListItems(m.DeploymentTypes),
 		CallRequestStates:           mapChoiceListItems(m.CallRequestStates),
 		ChangeRequestStates:         changeRequestStates,
@@ -104,7 +104,7 @@ func MapProjectFilterOptions(m entity.ProjectMetadataResponse) ProjectFilterOpti
 		ConversationStates:          mapChoiceListItems(m.ConversationStates),
 		CaseTypes:                   mapReferenceTableItems(m.CaseTypes),
 		TimeCardStates:              mapChoiceListItems(m.TimeCardStates),
-		EngagementTypes:             mapChoiceListItems(m.EngagementTypes),
+		EngagementTypes:             normalizeCaseEngagementTypeChoices(mapChoiceListItems(m.EngagementTypes)),
 		EngagementPaymentTypes:      mapChoiceListItems(m.EngagementPaymentTypes),
 		SeverityBasedAllocationTime: m.SeverityBasedAllocationTime,
 	}
