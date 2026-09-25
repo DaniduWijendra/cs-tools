@@ -946,7 +946,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	if cfg.DataSource == config.DataSourceServiceNow {
 		activeTaskSlaSvc = service.NewServiceNowTaskSlaService(serviceNowIntegrationServiceClient)
 	} else {
-		activeTaskSlaSvc = service.NewTaskSlaService(taskSlaRepo)
+		activeTaskSlaSvc = service.NewTaskSlaService(taskSlaRepo, accessSvc)
 	}
 	taskSlaHandler := handler.NewTaskSlaHandler(activeTaskSlaSvc)
 
