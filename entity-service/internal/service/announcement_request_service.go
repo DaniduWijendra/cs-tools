@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -34,7 +35,27 @@ import (
 // failure — this staleness window only matters if the process holding it is
 // killed outright (e.g. the scheduled task's own process is terminated
 // mid-tick) and never gets to run that release at all.
-const autoPublishClaimStaleAfter = 5 * time.Minute
+//
+// Must stay comfortably above the handler's own request timeout
+// (entity-service/internal/handler/announcement_request_handler.go's
+// autoPublishHandlerTimeout, currently 11 minutes plus a write-deadline
+// buffer) — a still-legitimately-running attempt must never be mistaken for
+// a dead one and reclaimed out from under itself. 13 minutes leaves ~90s of
+// margin above that handler timeout, and still comfortably under the
+// scheduled task's own ~15-minute tick cadence, so a genuinely orphaned
+// claim (the scheduled task's process killed mid-attempt, never reaching
+// the release above) is recognized as stale close to the next tick anyway,
+// not several ticks later.
+const autoPublishClaimStaleAfter = 13 * time.Minute
+
+// autoPublishFanOutConcurrency bounds how many projects' case creation (and,
+// for a security announcement, tag attach) AutoPublish runs at once. Mirrors
+// the CSM portal webapp's own ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT for
+// the manual Publish path (usePublishAnnouncementRequest.ts) — the same
+// conservative starting point already proven safe there against the same
+// downstream (ServiceNow, via the dual-write path CreateCase/AddCaseTagAs
+// both go through), not a number invented fresh for this path.
+const autoPublishFanOutConcurrency = 5
 
 // autoPublishSecurityTagLabel must match the webapp's own
 // SECURITY_ANNOUNCEMENT_TAG_LABEL constant
@@ -331,23 +352,36 @@ func (s *announcementRequestService) Schedule(ctx context.Context, id, actorID, 
 // tick retries just what's left, identical to the manual "Retry failed
 // projects" button.
 //
-// Sequential, not concurrent, unlike the webapp's own fan-out (which limits
-// concurrency purely for a human's browser-side responsiveness) — this runs
-// as a background job with no one waiting on it, so the simplicity of one
-// project at a time outweighs any benefit from parallelizing here.
+// Bounded-concurrent (autoPublishFanOutConcurrency projects at once), not
+// fully sequential and not unbounded — mirroring the webapp's own fan-out
+// (usePublishAnnouncementRequest.ts), which limits concurrency for the same
+// reason this now does too: a large announcement's audience (well into the
+// thousands of projects) makes one-at-a-time impractically slow, but
+// unbounded concurrency would throw an unbounded burst of real ServiceNow
+// round trips (CreateCase/AddCaseTagAs both go through the dual-write path)
+// at a shared downstream system all at once.
 //
 // Every project's outcome is recorded to the delivery ledger the moment
 // it's known, not batched into one call at the end of the whole fan-out —
-// this request runs under entity-service's own 30s per-request timeout
-// (internal/middleware.Timeout), same as every other route, and a batch
-// large enough to exceed that would otherwise have every already-created
-// case for that pass silently lost from the ledger the instant the context
-// is cancelled, causing the next tick to recreate them. Each per-item
-// ledger write uses context.WithoutCancel(ctx) for the same reason: the
-// call it's recording already happened for real (a case now exists, or a
-// tag attach already failed) regardless of whether this request's own
-// deadline has since passed, so recording it must not be aborted by that
-// same cancellation.
+// this request runs under its own extended handler timeout (see
+// AutoPublishAnnouncementRequest's own doc comment), not the global 30s
+// default, but a batch large enough to still exceed even that would
+// otherwise have every already-created case for that pass silently lost
+// from the ledger the instant the context is cancelled, causing the next
+// tick to recreate them. Each per-item ledger write uses
+// context.WithoutCancel(ctx) for the same reason: the call it's recording
+// already happened for real (a case now exists, or a tag attach already
+// failed) regardless of whether this request's own deadline has since
+// passed, so recording it must not be aborted by that same cancellation.
+//
+// A ledger-write failure (recordNow returning an error) does not abort the
+// rest of the batch the way it once did when this loop was sequential —
+// every already-launched project's own outcome is still recorded
+// regardless, and only the first such error is returned once the whole
+// batch finishes. Aborting mid-batch would leave every concurrently
+// in-flight project's real outcome (a case that now genuinely exists)
+// unrecorded, which the next tick would then have no way to distinguish
+// from a project that was never attempted at all.
 //
 // Guarded by ClaimForAutoPublish/ReleaseAutoPublishClaim so two overlapping
 // AutoPublish attempts for the same row (e.g. a tick that's still running
@@ -443,63 +477,114 @@ func (s *announcementRequestService) AutoPublish(ctx context.Context, id string)
 		return err
 	}
 
-	var stillFailingTags []string
-
-	// Retry any earlier tag failures first, reusing the case that already
-	// exists rather than creating a second one for the same project.
-	for projectID, caseID := range failedTagCaseByProject {
-		caseID := caseID
-		if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
-			stillFailingTags = append(stillFailingTags, projectID)
-			if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusTagFailed}); err != nil {
-				return domain.AnnouncementRequest{}, err
-			}
-			continue
-		}
-		if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded}); err != nil {
-			return domain.AnnouncementRequest{}, err
+	// mu guards every piece of state below that's written from more than one
+	// goroutine: stillFailingTags/stillFailingCases (both phases), caseIDByProject
+	// (phase two only), and firstErr (both). recordNow's own network call
+	// and DB write need no locking of their own — s.repo's pool is already
+	// safe for concurrent use, and each call records a different project.
+	var (
+		mu               sync.Mutex
+		stillFailingTags []string
+		firstErr         error
+	)
+	recordFirstErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if firstErr == nil {
+			firstErr = err
 		}
 	}
 
+	// Retry any earlier tag failures first, reusing the case that already
+	// exists rather than creating a second one for the same project. Bounded
+	// concurrent, same as the fan-out below — see this method's own doc
+	// comment for why.
+	var tagRetryWG sync.WaitGroup
+	tagRetrySem := make(chan struct{}, autoPublishFanOutConcurrency)
+	for projectID, caseID := range failedTagCaseByProject {
+		tagRetryWG.Add(1)
+		tagRetrySem <- struct{}{}
+		go func(projectID, caseID string) {
+			defer tagRetryWG.Done()
+			defer func() { <-tagRetrySem }()
+			if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
+				mu.Lock()
+				stillFailingTags = append(stillFailingTags, projectID)
+				mu.Unlock()
+				if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusTagFailed}); err != nil {
+					recordFirstErr(err)
+				}
+				return
+			}
+			if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded}); err != nil {
+				recordFirstErr(err)
+			}
+		}(projectID, caseID)
+	}
+	tagRetryWG.Wait()
+
 	// Fan out to every resolved project with no successful delivery yet.
-	var stillFailingCases []string
+	// Bounded concurrent — see this method's own doc comment.
+	var (
+		fanOutWG          sync.WaitGroup
+		stillFailingCases []string
+	)
+	fanOutSem := make(chan struct{}, autoPublishFanOutConcurrency)
 	for _, projectID := range current.ResolvedProjectIDs {
 		if succeeded[projectID] {
 			continue
 		}
-		created, err := s.cases.CreateCase(ctx, domain.CreateCaseRequest{
-			CreatedBy:   current.CreatedBy,
-			Type:        "announcement",
-			ProjectID:   projectID,
-			Subject:     current.Subject,
-			Description: current.Description,
-		})
-		if err != nil {
-			stillFailingCases = append(stillFailingCases, projectID)
-			if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, Status: domain.AnnouncementRequestDeliveryStatusFailed}); err != nil {
-				return domain.AnnouncementRequest{}, err
-			}
-			continue
-		}
-		caseID := created.Case.ID
-		caseIDByProject[projectID] = caseID
-		if current.IsSecurityAnnouncement {
-			if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
-				// The case is real — this project must not be treated as
-				// delivered until the tag actually attaches (see the type
-				// doc comment on AnnouncementRequestDeliveryStatus), so it
-				// has to block MarkPublished below exactly like a retried
-				// tag failure does.
-				stillFailingTags = append(stillFailingTags, projectID)
-				if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusTagFailed}); err != nil {
-					return domain.AnnouncementRequest{}, err
+		fanOutWG.Add(1)
+		fanOutSem <- struct{}{}
+		go func(projectID string) {
+			defer fanOutWG.Done()
+			defer func() { <-fanOutSem }()
+
+			created, err := s.cases.CreateCase(ctx, domain.CreateCaseRequest{
+				CreatedBy:   current.CreatedBy,
+				Type:        "announcement",
+				ProjectID:   projectID,
+				Subject:     current.Subject,
+				Description: current.Description,
+			})
+			if err != nil {
+				mu.Lock()
+				stillFailingCases = append(stillFailingCases, projectID)
+				mu.Unlock()
+				if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, Status: domain.AnnouncementRequestDeliveryStatusFailed}); err != nil {
+					recordFirstErr(err)
 				}
-				continue
+				return
 			}
-		}
-		if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded}); err != nil {
-			return domain.AnnouncementRequest{}, err
-		}
+			caseID := created.Case.ID
+			mu.Lock()
+			caseIDByProject[projectID] = caseID
+			mu.Unlock()
+			if current.IsSecurityAnnouncement {
+				if _, err := s.cases.AddCaseTagAs(ctx, caseID, autoPublishSecurityTagLabel, actorEmail); err != nil {
+					// The case is real — this project must not be treated as
+					// delivered until the tag actually attaches (see the type
+					// doc comment on AnnouncementRequestDeliveryStatus), so it
+					// has to block MarkPublished below exactly like a retried
+					// tag failure does.
+					mu.Lock()
+					stillFailingTags = append(stillFailingTags, projectID)
+					mu.Unlock()
+					if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusTagFailed}); err != nil {
+						recordFirstErr(err)
+					}
+					return
+				}
+			}
+			if err := recordNow(domain.RecordAnnouncementRequestDeliveryInput{ProjectID: projectID, CaseID: &caseID, Status: domain.AnnouncementRequestDeliveryStatusSucceeded}); err != nil {
+				recordFirstErr(err)
+			}
+		}(projectID)
+	}
+	fanOutWG.Wait()
+
+	if firstErr != nil {
+		return domain.AnnouncementRequest{}, firstErr
 	}
 
 	if len(stillFailingCases) > 0 || len(stillFailingTags) > 0 {

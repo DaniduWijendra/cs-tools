@@ -18,6 +18,7 @@
 package middleware
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -36,6 +37,34 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// deadlineSetter matches the unexported interface net/http's response type
+// implements, which http.ResponseController relies on via a type assertion.
+type deadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+	SetReadDeadline(time.Time) error
+}
+
+// SetWriteDeadline and SetReadDeadline forward to the underlying
+// ResponseWriter, so http.NewResponseController(w).SetWriteDeadline still
+// works through this wrapper -- used by handlers whose own work can
+// legitimately exceed the server's global WriteTimeout (see
+// AutoPublishAnnouncementRequest).
+func (rw *responseWriter) SetWriteDeadline(deadline time.Time) error {
+	ds, ok := rw.ResponseWriter.(deadlineSetter)
+	if !ok {
+		return fmt.Errorf("underlying ResponseWriter does not support setting a write deadline")
+	}
+	return ds.SetWriteDeadline(deadline)
+}
+
+func (rw *responseWriter) SetReadDeadline(deadline time.Time) error {
+	ds, ok := rw.ResponseWriter.(deadlineSetter)
+	if !ok {
+		return fmt.Errorf("underlying ResponseWriter does not support setting a read deadline")
+	}
+	return ds.SetReadDeadline(deadline)
 }
 
 // sanitizePath strips newline characters from a URL path to prevent log injection.

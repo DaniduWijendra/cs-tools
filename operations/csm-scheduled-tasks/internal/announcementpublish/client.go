@@ -47,6 +47,16 @@ import (
 // Overridden in tests to keep them fast.
 var tokenFetchTimeout = 10 * time.Second
 
+// autoPublishTimeout bounds the single AutoPublish HTTP call this client
+// makes. See its own use, below, for why this is minutes rather than the
+// usual few-seconds REST-call budget. Kept above entity-service's own
+// total server-side budget (currently 11m30s: autoPublishHandlerTimeout +
+// autoPublishWriteDeadlineBuffer, announcement_request_handler.go) so this
+// client is never the one giving up first, and below both that service's
+// own autoPublishClaimStaleAfter (13m) and this task's own ~15-minute tick
+// cadence.
+var autoPublishTimeout = 12 * time.Minute
+
 // Config holds this client's configuration.
 type Config struct {
 	BaseURL      string
@@ -92,7 +102,16 @@ func NewClient(cfg Config) (*Client, error) {
 	httpsec.RejectInsecureRedirects(tokenHTTPClient)
 	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
 	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 25 * time.Second
+	// autoPublishTimeout, not a generic short REST-call timeout: the single
+	// AutoPublish call this client makes fans out into a real ServiceNow
+	// round trip per target project, sequentially, entirely inside
+	// entity-service's own request -- a large announcement (upward of a
+	// thousand projects) needs real wall-clock minutes to make useful
+	// progress per call, not seconds. Kept a little above entity-service's
+	// own AutoPublishAnnouncementRequest handler timeout (currently 11m,
+	// see that handler's own doc comment) so this client is never the one
+	// giving up first.
+	httpClient.Timeout = autoPublishTimeout
 	httpsec.RejectInsecureRedirects(httpClient)
 
 	return &Client{
