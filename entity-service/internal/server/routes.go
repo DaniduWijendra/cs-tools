@@ -735,9 +735,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// Update/DeleteTimeCard do not (Postgres-first CREATE means
 		// time_card.id has no ServiceNow counterpart to target).
 		snTimeCardMirrorSvc := service.NewServiceNowTimeCardService(serviceNowIntegrationServiceClient)
-		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, snWritebackDispatcher, snTimeCardMirrorSvc)
+		activeTimeCardSvc = service.NewTimeCardServiceWithSNWriteback(timeCardRepo, userRepo, accessSvc, snWritebackDispatcher, snTimeCardMirrorSvc)
 	default:
-		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
+		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo, accessSvc)
 	}
 	timeCardHandler := handler.NewTimeCardHandler(activeTimeCardSvc)
 
