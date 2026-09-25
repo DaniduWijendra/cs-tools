@@ -349,7 +349,7 @@ export default function CsmAnnouncementsPage(): JSX.Element {
         sx={{ borderBottom: 1, borderColor: "divider" }}
       >
         <Tab value="announcements" label="Announcements" />
-        <Tab value="pending" label="Pending" />
+        <Tab value="pending" label="Requests" />
       </Tabs>
 
       {tab === "announcements" && (
