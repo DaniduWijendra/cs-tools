@@ -951,13 +951,13 @@ func (s *caseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReque
 	// source. State/Severity/WorkState are mutually exclusive on this
 	// request (fieldCount above), so at most one of these three fires.
 	if req.State != nil && before != nil && derefState(before.State) != *req.State {
-		s.recordFieldChangeActivity(ctx, req.ID, "state", string(derefState(before.State)), string(*req.State), actorEmail)
+		s.recordFieldChangeActivity(ctx, req.ID, "state", caseStateDisplayLabel[derefState(before.State)], caseStateDisplayLabel[*req.State], actorEmail)
 	}
 	if req.Severity != nil && c.Severity != nil && derefSeverity(oldSeverity) != *c.Severity {
-		s.recordFieldChangeActivity(ctx, req.ID, "severity", string(derefSeverity(oldSeverity)), string(*c.Severity), actorEmail)
+		s.recordFieldChangeActivity(ctx, req.ID, "severity", humanizeSnakeCase(string(derefSeverity(oldSeverity))), humanizeSnakeCase(string(*c.Severity)), actorEmail)
 	}
 	if req.WorkState != nil && before != nil && c.WorkState != nil && derefWorkState(before.WorkState) != *c.WorkState {
-		s.recordFieldChangeActivity(ctx, req.ID, "work_state", string(derefWorkState(before.WorkState)), string(*c.WorkState), actorEmail)
+		s.recordFieldChangeActivity(ctx, req.ID, "work_state", humanizeSnakeCase(string(derefWorkState(before.WorkState))), humanizeSnakeCase(string(*c.WorkState)), actorEmail)
 	}
 
 	// Event publishing follows the write, not DATA_SOURCE -- see
@@ -1131,9 +1131,13 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 	// it can lag under a genuine concurrent race (another call reassigning
 	// the case between this read and the write below), but that only means
 	// an activity entry's "old" value is stale, never a duplicate
-	// publish/activity write. A fetch failure just leaves it at
-	// "Unassigned" rather than failing the assignment.
-	previousAssigneeName := "Unassigned"
+	// publish/activity write. Left "" (rather than a literal "Unassigned"
+	// placeholder) when there was no previous assignee, or on a fetch
+	// failure: CaseActivitiesFeed.tsx/describeAuditEntry (csm-portal webapp)
+	// already render a field-change entry with no "from" arrow at all when
+	// previousValue is empty, which reads as "Assigned to: X" rather than
+	// the confusing "Assigned to: Unassigned -> X".
+	previousAssigneeName := ""
 	if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
 		slog.ErrorContext(ctx, "update case: enrich case for case.assigned activity failed", "caseId", req.ID)
 	} else if cv.AssignedEngineer != nil {
@@ -1774,6 +1778,25 @@ func (s *caseService) recordFieldChangeActivity(ctx context.Context, caseID, fie
 	if err := s.repo.RecordCaseFieldChangeActivity(ctx, caseID, fieldName, oldValue, newValue, actorEmail); err != nil {
 		slog.ErrorContext(ctx, "update case: record field change activity failed", "caseId", caseID, "field", fieldName, "error", err)
 	}
+}
+
+// humanizeSnakeCase renders a lowercase snake_case domain enum value (e.g.
+// "ongoing", "catastrophic") as a space-separated Title Case display string
+// (e.g. "Ongoing", "Catastrophic") for the case activity feed -- the raw
+// value read poorly there next to "state"'s own caseStateDisplayLabel
+// lookup, which this doesn't replace: a couple of that map's labels don't
+// title-case cleanly (e.g. "waiting_on_wso2" -> "Waiting on WSO2", not
+// "Waiting On Wso2"), but severity/workState's values are single words with
+// no such irregularity, so a plain generic rendering is enough for them.
+func humanizeSnakeCase(value string) string {
+	words := strings.Split(value, "_")
+	for i, w := range words {
+		if w == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(w[:1]) + w[1:]
+	}
+	return strings.Join(words, " ")
 }
 
 // CreateCaseAttachment implements CaseService for the CSM-native (Postgres)
