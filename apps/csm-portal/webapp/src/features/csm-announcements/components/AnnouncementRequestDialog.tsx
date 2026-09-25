@@ -188,6 +188,23 @@ export default function AnnouncementRequestDialog({
   const failedProjectLabel = (projectId: string): string =>
     failedProjectsPreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
+  // Resolves the frozen resolvedProjectIds snapshot to real short keys for
+  // the Audience box below -- otherwise shown as raw, meaningless UUIDs to
+  // whoever's reviewing/approving the request. Same resolve-on-change
+  // pattern as failedProjectsPreview above; any id that fails to resolve (a
+  // fetch error, or past the 200-project preview cap) just falls back to its
+  // raw id rather than blocking the rest of the list.
+  const audiencePreview = useResolvedAudiencePreview();
+  const resolvedProjectIdsKey = request?.resolvedProjectIds?.join(",") ?? "";
+  useEffect(() => {
+    if (request?.resolvedProjectIds && request.resolvedProjectIds.length > 0) {
+      void audiencePreview.resolve(request.resolvedProjectIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedProjectIdsKey]);
+  const audienceProjectLabel = (projectId: string): string =>
+    audiencePreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
+
   // Schedule: an alternative to clicking Publish immediately — pick a
   // future date/time and operations/csm-scheduled-tasks' own sub-cron
   // publishes automatically once it arrives. Purely additive: Publish
@@ -584,7 +601,9 @@ export default function AnnouncementRequestDialog({
                   color="text.secondary"
                   sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap" }}
                 >
-                  {request.resolvedProjectIds.join(", ")}
+                  {audiencePreview.isLoading
+                    ? "Resolving project names…"
+                    : request.resolvedProjectIds.map(audienceProjectLabel).join(", ")}
                 </Typography>
               </Box>
             )}

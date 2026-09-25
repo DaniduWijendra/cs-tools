@@ -378,7 +378,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
     render(<CsmAnnouncementsPage />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Requests" }));
 
     expect(screen.getByText("Upcoming maintenance")).toBeInTheDocument();
     // state is the 1st arg of useSearchAnnouncementRequests(state, page, pageSize).
@@ -405,7 +405,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
     render(<CsmAnnouncementsPage />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Requests" }));
 
     expect(screen.getAllByText("Security")).toHaveLength(1);
   });
@@ -429,7 +429,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     fireEvent.click(screen.getByText("Upcoming maintenance window"));
     fireEvent.click(screen.getByText("close dialog"));
 
-    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Requests" }));
     fireEvent.click(screen.getByText("Upcoming maintenance"));
 
     expect(screen.getByText(`request dialog: ${PENDING_REQUEST.id}`)).toBeInTheDocument();
@@ -443,7 +443,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
   it("shows the empty state text for the selected pending state", () => {
     mockResult({ data: { rows: [], total: 0, limit: 20, offset: 0, hasMore: false } });
     render(<CsmAnnouncementsPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Requests" }));
     expect(screen.getByText(/no pending approval requests/i)).toBeInTheDocument();
   });
 
@@ -469,7 +469,7 @@ describe("CsmAnnouncementsPage — Pending tab", () => {
     } as unknown as ReturnType<typeof useSearchAnnouncementRequests>);
     render(<CsmAnnouncementsPage />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Pending" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Requests" }));
     fireEvent.mouseDown(screen.getByRole("combobox", { name: /state/i }));
     fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Published" }));
 
