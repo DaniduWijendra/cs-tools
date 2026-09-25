@@ -80,6 +80,10 @@ type IncidentCreator interface {
 	// contract (an empty, error-free result is a confirmed zero-result
 	// search, not a failure).
 	SearchServices(ctx context.Context, label string) ([]csmclient.ITService, error)
+	// UpdateIncident pushes workNotes onto an already-existing incident. See
+	// pushGroupAttachWorkNote's doc comment for when and why this is called,
+	// and its best-effort, non-blocking contract.
+	UpdateIncident(ctx context.Context, incidentID, workNotes string) error
 }
 
 // Escalator is the subset of internal/notifications.TwilioClient the worker
@@ -532,8 +536,62 @@ func (w *Worker) tryGroup(ctx context.Context, row store.AlertRecord, bp alertpa
 	}
 
 	slog.InfoContext(ctx, "worker: grouping alert onto an earlier alert's still-open incident within the group window", "id", row.ID, "alertNumber", row.AlertNumber, "incidentID", existing.IncidentID, "incidentNumber", existing.IncidentNumber, "groupWindow", w.cfg.GroupWindow.String())
+	w.pushGroupAttachWorkNote(ctx, row, bp, existing.IncidentID)
 	w.recordMapping(ctx, row, bp, existing.IncidentID, existing.IncidentNumber)
 	return existing.IncidentID, existing.IncidentNumber, true
+}
+
+// buildGroupAttachWorkNotes composes the work note pushGroupAttachWorkNote
+// pushes onto an already-existing incident when row/bp — a new alert — is
+// found (via tryGroup) to report the same condition: so an engineer looking
+// at the incident sees "this condition fired again" history, not silence.
+//
+// Reuses bp.CreateIncidentRequest.WorkNotes/AdditionalComments — exactly
+// what internal/handler.buildWorkNotes and this alert's own Description
+// already produced when this row was buffered — rather than re-deriving the
+// same source/severity/metric/environment/identifier fields a second time;
+// only the leading line (row.AlertNumber, row.ReceivedAt — neither available
+// to buildWorkNotes, which only ever sees the inbound AlertRequest) is new
+// here. The leading line alone means this never returns "" in practice —
+// pushGroupAttachWorkNote still guards on an empty result defensively,
+// treating it the same as any other "nothing worth pushing" case rather than
+// assuming this function can never produce one.
+func buildGroupAttachWorkNotes(row store.AlertRecord, bp alertpayload.Payload) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "This condition fired again — alert %s (received %s).\n", row.AlertNumber, row.ReceivedAt.UTC().Format(time.RFC3339))
+	if bp.CreateIncidentRequest.WorkNotes != nil && *bp.CreateIncidentRequest.WorkNotes != "" {
+		b.WriteString(*bp.CreateIncidentRequest.WorkNotes)
+		b.WriteString("\n")
+	}
+	if bp.CreateIncidentRequest.AdditionalComments != nil && *bp.CreateIncidentRequest.AdditionalComments != "" {
+		fmt.Fprintf(&b, "Description: %s\n", *bp.CreateIncidentRequest.AdditionalComments)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// pushGroupAttachWorkNote calls csmclient.UpdateIncident to push a work note
+// summarizing row/bp onto incidentID — the incident tryGroup just attached
+// this alert to, instead of creating a new one. Without this, that attach
+// was silent: csmclient.CreateAlertIncidentMapping (see recordMapping below)
+// records the relationship in this service's own Postgres, but nothing ever
+// showed up on the incident itself for an engineer to see.
+//
+// Best-effort and non-blocking by design, matching recordMapping's own exact
+// philosophy immediately below (see that method's doc comment): every call
+// site treats a failure here purely as a logged warning, never as a reason
+// to fail the overall delivery or hold back Store.MarkDelivered — the
+// primary goal (this alert is attached to the right incident) is already
+// achieved by the time this is called. A missed work note just means an
+// engineer sees one fewer line of history on the incident, not a
+// correctness bug.
+func (w *Worker) pushGroupAttachWorkNote(ctx context.Context, row store.AlertRecord, bp alertpayload.Payload, incidentID string) {
+	notes := buildGroupAttachWorkNotes(row, bp)
+	if notes == "" {
+		return
+	}
+	if err := w.csm.UpdateIncident(ctx, incidentID, notes); err != nil {
+		slog.WarnContext(ctx, "worker: failed to push work note onto the incident this alert attached to (best-effort, non-blocking — attach already succeeded)", "id", row.ID, "alertNumber", row.AlertNumber, "incidentID", incidentID, "err", err)
+	}
 }
 
 // resolveServiceID resolves the CMDB service UUID for a row whose stored

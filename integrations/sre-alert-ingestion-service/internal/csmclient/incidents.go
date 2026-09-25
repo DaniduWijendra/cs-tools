@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // CreateIncidentRequest is the request body for csm-integration-service's
@@ -145,4 +146,48 @@ func (c *Client) CreateIncident(ctx context.Context, req CreateIncidentRequest) 
 		IncidentID:     resp.Incident.ID,
 		IncidentNumber: resp.Incident.Number,
 	}, nil
+}
+
+// updateIncidentRequest is the request body for csm-integration-service's
+// PATCH /incidents/{id} — a thin proxy of entity-service's own
+// UpdateIncidentRequest, matching CreateIncidentRequest's own
+// copied-verbatim convention. This service only ever sends WorkNotes (see
+// UpdateIncident below), so every other field that request shape accepts is
+// left unmodeled rather than a source of drift to keep in sync by hand.
+type updateIncidentRequest struct {
+	WorkNotes string `json:"workNotes"`
+}
+
+// UpdateIncident calls PATCH /incidents/{id} on csm-integration-service to
+// push workNotes onto an already-existing incident.
+//
+// This backs internal/worker.tryGroup's group-attach path: when a new alert
+// is found to be reporting the same condition as an earlier, still-open
+// incident, this alert attaches to it instead of creating a new one — but
+// until this method existed, that attach was silent: nothing was pushed to
+// the incident itself, so an engineer looking at it had no record the
+// condition fired again. workNotes is internal, engineer-facing metadata,
+// never customer-visible — matching how internal/handler.MapToIncident
+// already splits WorkNotes (internal) from AdditionalComments
+// (customer-facing) for a freshly-created incident; this call only ever sets
+// WorkNotes, never AdditionalComments.
+//
+// Like CreateIncident and every csmclient search call in this package, the
+// underlying entity-service operation has a documented M2M-credential
+// fallback on the ServiceNow data source (see csm-integration-service's own
+// CLAUDE.md) — a 401 is possible but not unconditional. Unlike
+// CreateIncident, though, there is no Postgres-data-source fallback at all:
+// on that data source csm-integration-service reports a mapped 503. Callers
+// in this package treat any error from this method as a candidate for their
+// own best-effort/non-blocking handling (see internal/worker.tryGroup's call
+// site) rather than inspecting the status code here — this method itself
+// does no special-casing beyond returning whatever c.do reports.
+func (c *Client) UpdateIncident(ctx context.Context, incidentID, workNotes string) error {
+	body, err := json.Marshal(updateIncidentRequest{WorkNotes: workNotes})
+	if err != nil {
+		return fmt.Errorf("csmclient: marshal UpdateIncident request: %w", err)
+	}
+
+	_, err = c.do(ctx, http.MethodPatch, "/incidents/"+url.PathEscape(incidentID), body)
+	return err
 }

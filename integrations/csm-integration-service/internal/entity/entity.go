@@ -202,6 +202,26 @@ func (c *Client) LookupAlertIncidentMappings(ctx context.Context, body []byte) (
 	return c.do(ctx, http.MethodPost, "/alert-incident-mappings/lookup", body)
 }
 
+// UpdateIncident calls PATCH /incidents/{id} on the entity service. Unlike
+// PatchCase, this operation has no Postgres-data-source path at all: on
+// DATA_SOURCE=postgres, entity-service's incidentService.UpdateIncident
+// unconditionally returns a 503 (not supported on this data source yet, no
+// field combination succeeds — several fields have no backing Postgres
+// column, and others would need comment-table side effects not implemented
+// there); on DATA_SOURCE=servicenow, it goes through the same M2M-fallback
+// mechanism as CreateIncident/SearchIncidents/SearchITServices above (a
+// separately-configured M2M ServiceNow credential is used when no end-user
+// identity token is forwarded, and only 401s if that fallback credential is
+// itself unconfigured in the target environment). So this call is
+// unconditionally ServiceNow-backed with no Postgres fallback path: whether
+// it succeeds depends entirely on the target environment's data source and,
+// on ServiceNow, its M2M credential configuration — not on which fields are
+// sent, unlike PatchCase's field-dependent behavior. Response is returned as
+// raw JSON; typed response structs are deferred.
+func (c *Client) UpdateIncident(ctx context.Context, id string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/incidents/%s", url.PathEscape(id)), body)
+}
+
 // SearchITServices calls POST /services/search on the entity service. This
 // targets a ServiceNow-backed operation with the same M2M-fallback
 // mechanism as CreateIncident/SearchIncidents above: when no end-user

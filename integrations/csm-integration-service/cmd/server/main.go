@@ -79,6 +79,7 @@ func main() {
 	mux.HandleFunc("GET /invoices/{id}", invoiceHandler.GetInvoice)
 	mux.HandleFunc("POST /project-opportunity-links/search", projectOpportunityLinkHandler.SearchProjectOpportunityLinks)
 	mux.HandleFunc("POST /incidents", incidentHandler.CreateIncident)
+	mux.HandleFunc("PATCH /incidents/{id}", incidentHandler.PatchIncident)
 	mux.HandleFunc("POST /incidents/search", incidentHandler.SearchIncidents)
 	mux.HandleFunc("POST /services/search", itServiceHandler.SearchITServices)
 	mux.HandleFunc("POST /alert-incident-mappings", alertIncidentMappingHandler.CreateAlertIncidentMapping)

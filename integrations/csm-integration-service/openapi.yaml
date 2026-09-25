@@ -857,6 +857,94 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /incidents/{id}:
+    patch:
+      summary: Update an incident (e.g. push a work note or additional comment).
+      description: >
+        Unlike PATCH /cases/{id}, this operation has no Postgres-data-source
+        path at all: on a Postgres data source, entity-service rejects every
+        call outright (503, not supported on this data source yet — several
+        fields have no backing column, and others would need comment-table
+        side effects not implemented there). On a ServiceNow data source, it
+        goes through the same M2M-fallback mechanism as POST /incidents and
+        POST /incidents/search above: this service is strictly M2M with no
+        mechanism to forward an end-user identity token, but the
+        entity-service operation falls back to a separately-configured M2M
+        ServiceNow credential when no end-user token is present, and only
+        returns 401 if that fallback credential is itself unconfigured in the
+        target environment. So this call is unconditionally ServiceNow-backed
+        with no Postgres fallback — whether it succeeds depends on the target
+        environment's data source and, on ServiceNow, its M2M credential
+        configuration, not on which fields are sent (contrast PATCH
+        /cases/{id}, whose Postgres path narrows to specific fields instead
+        of failing outright). The request body is forwarded to the entity
+        service verbatim; it enforces its own field validation and 400s
+        otherwise, so this service does not re-validate that.
+      operationId: patchIncident
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        description: Incident fields to update (e.g. workNotes, additionalComments).
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentUpdateRequest'
+      responses:
+        "200":
+          description: The incident was updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentUpdateResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (entity-service is running a Postgres data source, which does not support this operation yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /incidents/search:
     post:
       summary: Search incidents.
@@ -1769,6 +1857,53 @@ components:
               format: date-time
             createdBy:
               type: string
+
+    IncidentUpdateRequest:
+      type: object
+      description: >
+        Incident fields to update — a thin proxy of entity-service's own
+        UpdateIncidentRequest, forwarded verbatim. All fields are optional,
+        but entity-service requires at least one. Not enumerated exhaustively
+        here (e.g. priority/state/resolutionCode key values); see
+        entity-service's own domain.UpdateIncidentRequest for the complete,
+        authoritative field set.
+      properties:
+        subject:
+          type: string
+        impact:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        urgency:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        assignmentGroupId:
+          type: string
+          format: uuid
+        assignedEngineerId:
+          type: string
+          format: uuid
+        serviceId:
+          type: string
+          format: uuid
+        additionalComments:
+          type: string
+        workNotes:
+          type: string
+        watchList:
+          type: array
+          items:
+            type: string
+
+    IncidentUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        incident:
+          type: object
+          description: >
+            The full updated incident representation (entity-service's own
+            IncidentView), not enumerated exhaustively here.
 
     SearchIncidentsRequest:
       type: object

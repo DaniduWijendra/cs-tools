@@ -127,6 +127,14 @@ type mockIncidentCreator struct {
 	searchServicesFn     func(ctx context.Context, label string) ([]csmclient.ITService, error)
 	searchServicesCalls  int
 	searchServicesLabels []string
+
+	// updateIncidentFn is optional; when nil, UpdateIncident reports success
+	// with no error — the common case for tests that don't care about the
+	// group-attach work-note push at all.
+	updateIncidentFn    func(ctx context.Context, incidentID, workNotes string) error
+	updateIncidentCalls int
+	updateIncidentIDs   []string
+	updateIncidentNotes []string
 }
 
 func (m *mockIncidentCreator) CreateIncident(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
@@ -169,6 +177,16 @@ func (m *mockIncidentCreator) SearchServices(ctx context.Context, label string) 
 		return m.searchServicesFn(ctx, label)
 	}
 	return nil, nil
+}
+
+func (m *mockIncidentCreator) UpdateIncident(ctx context.Context, incidentID, workNotes string) error {
+	m.updateIncidentCalls++
+	m.updateIncidentIDs = append(m.updateIncidentIDs, incidentID)
+	m.updateIncidentNotes = append(m.updateIncidentNotes, workNotes)
+	if m.updateIncidentFn != nil {
+		return m.updateIncidentFn(ctx, incidentID, workNotes)
+	}
+	return nil
 }
 
 // mockEscalator is a hand-rolled Escalator double.
@@ -709,6 +727,49 @@ func TestRunOnce_GroupsOntoEarlierOpenIncident_SkipsCreate(t *testing.T) {
 	if len(s.delivered) != 1 || s.delivered[0].id != "alert-2" || s.delivered[0].incidentID != "inc-old" {
 		t.Errorf("delivered = %+v, want one row for alert-2/inc-old", s.delivered)
 	}
+	if csm.updateIncidentCalls != 1 {
+		t.Fatalf("UpdateIncident called %d times, want 1 (group-attach must push a work note onto the existing incident)", csm.updateIncidentCalls)
+	}
+	if csm.updateIncidentIDs[0] != "inc-old" {
+		t.Errorf("UpdateIncident incidentID = %q, want %q", csm.updateIncidentIDs[0], "inc-old")
+	}
+	if csm.updateIncidentNotes[0] == "" {
+		t.Error("UpdateIncident workNotes = \"\", want a non-empty summary of the new alert")
+	}
+}
+
+// TestRunOnce_GroupAttachWorkNoteFailureDoesNotBlockDelivery mirrors
+// recordMapping's own already-tested failure-tolerance pattern: a failed
+// UpdateIncident call must not prevent MarkDelivered or the
+// CreateAlertIncidentMapping call — this is a best-effort, non-blocking side
+// effect, not a precondition for the alert being considered delivered.
+func TestRunOnce_GroupAttachWorkNoteFailureDoesNotBlockDelivery(t *testing.T) {
+	row := rowWithGroupablePayload(t, "alert-2", "azure", "uid-123")
+	s := &mockStore{pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+		return []store.AlertRecord{row}, nil
+	}}
+	csm := &mockIncidentCreator{
+		searchGroupFn: func(ctx context.Context, tag string, since time.Time) (*csmclient.CreateIncidentResult, bool, error) {
+			return &csmclient.CreateIncidentResult{IncidentID: "inc-old", IncidentNumber: "INC0009999"}, true, nil
+		},
+		updateIncidentFn: func(ctx context.Context, incidentID, workNotes string) error {
+			return errors.New("upstream unavailable")
+		},
+	}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3})
+	w.RunOnce(context.Background())
+
+	if csm.updateIncidentCalls != 1 {
+		t.Fatalf("UpdateIncident called %d times, want 1", csm.updateIncidentCalls)
+	}
+	if len(s.delivered) != 1 || s.delivered[0].id != "alert-2" || s.delivered[0].incidentID != "inc-old" {
+		t.Errorf("delivered = %+v, want one row for alert-2/inc-old despite UpdateIncident failing", s.delivered)
+	}
+	if csm.createMappingCalls != 1 {
+		t.Errorf("CreateAlertIncidentMapping called %d times, want 1 (must still run after UpdateIncident fails)", csm.createMappingCalls)
+	}
 }
 
 // TestRunOnce_GroupSearchUsesConfiguredWindow confirms the "since" argument
@@ -817,6 +878,9 @@ func TestRunOnce_NoUniqueIdentifierSkipsGroupingEntirely(t *testing.T) {
 	}
 	if csm.calls != 1 {
 		t.Errorf("CreateIncident called %d times, want 1", csm.calls)
+	}
+	if csm.updateIncidentCalls != 0 {
+		t.Errorf("UpdateIncident called %d times, want 0 (this row never groups, so there is no group-attach work note to push)", csm.updateIncidentCalls)
 	}
 }
 
