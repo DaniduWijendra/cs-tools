@@ -15067,6 +15067,10 @@ components:
           type: string
         createdBy:
           type: string
+          description: >-
+            The creator's resolved display email when known, falling back to
+            the raw IdP account id otherwise. For kind=case this already came
+            from the case's own resolved name/email; kind=batch now matches.
         createdOn:
           type: string
           format: date-time
