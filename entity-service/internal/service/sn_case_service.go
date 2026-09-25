@@ -1093,6 +1093,19 @@ func publishCaseCreatedEvent(ctx context.Context, publisher EventPublisherServic
 		return
 	}
 
+	// A case with no severity has no priority to report -- CaseCreatedPayload.
+	// Priority has no omitempty (a consumer always expects a real value), and
+	// "" is not a real priority, just derefSeverity's zero value standing in
+	// for "unset". Applies to every type this function serves (case/
+	// engagement/service_request/security_report_analysis/announcement): the
+	// four non-case types never have a severity at all (case_service.go's
+	// own "case"-only field), so this also means those never publish
+	// case.created -- explicit, requested behavior, not an oversight.
+	if cv.Severity == nil {
+		slog.InfoContext(ctx, "create case: case.created not published, case has no severity", "caseId", caseID)
+		return
+	}
+
 	recipients := watchListUserEmails(cv.WatchList)
 	if len(recipients) == 0 {
 		slog.InfoContext(ctx, "create case: case.created not published, case has no watchers to email", "caseId", caseID)
