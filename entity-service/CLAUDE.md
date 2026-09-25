@@ -3187,6 +3187,27 @@ uses for this exact column), `active: false` matches `is_active = FALSE`
 strictly — a row with no `is_active` recorded at all is not known to be
 inactive, so it must not satisfy that filter.
 
+## POST /users/search userIds/groupIds/groupNames filters on the Postgres data source
+
+Same shape of gap as the `active` filter above, found by proactively auditing
+`SearchUsersFilters` for other fields still rejected outright on Postgres
+rather than waiting for another endpoint to hit one: `userIds`, `groupIds`
+and `groupNames` were all bundled into one blanket rejection, even though
+each has a real backing column/table already read elsewhere. `userRepo.
+SearchUsers` now filters on them:
+- `userIds` — `u.id = ANY($n::uuid[])`.
+- `groupIds` — `EXISTS (SELECT 1 FROM team_member tm WHERE tm.user_id = u.id
+  AND tm.team_id = ANY($n::uuid[]))` (migration 000028, the same table
+  `GetUserGroups` reads).
+- `groupNames` — the same `EXISTS` joined to `team` on `t.id = tm.team_id`,
+  matching `t.name = ANY($n::text[])` instead of the id; kept alongside
+  `groupIds` because callers' team registries are keyed by name (ids differ
+  per environment and not every configured team has one).
+
+`userService.SearchUsers` still validates `userIds`/`groupIds` as UUIDs
+(`validateUUIDs`) before they reach the repository — only the "unsupported on
+Postgres" rejection was removed, not the format check.
+
 ## POST /users/search returns each user's roles (Postgres data source)
 
 The Postgres `User` had no roles, so the CSM users page showed none even though
