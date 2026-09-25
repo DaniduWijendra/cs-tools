@@ -80,9 +80,9 @@ function renderPage(initialPath: string): ReturnType<typeof render> {
 }
 
 /**
- * Same as {@link renderPage}, plus marker routes for the destinations a row
- * or a role chip can navigate to — used to assert *which* route a click
- * actually lands on, not just that some navigation happened.
+ * Same as {@link renderPage}, plus a marker route for where a row navigates
+ * to — used to assert *which* route a click actually lands on, not just that
+ * some navigation happened.
  */
 function renderPageWithDestinations(
   initialPath: string,
@@ -93,7 +93,6 @@ function renderPageWithDestinations(
       <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/admin/users" element={<CsmUsersPage />} />
-          <Route path="/admin/roles/:id" element={<div>Role members page</div>} />
           <Route path="/people/:id" element={<div>User profile page</div>} />
         </Routes>
       </MemoryRouter>
@@ -144,14 +143,6 @@ describe("CsmUsersPage", () => {
     authFetchMock.mockReset();
     postMock.mockReset();
     postMock.mockImplementation((path: string) => {
-      if (path === "/roles/search") {
-        return Promise.resolve({
-          roles: [{ id: "agent", name: "Agent" }],
-          total: 1,
-          limit: 50,
-          offset: 0,
-        });
-      }
       if (path === "/teams/search") {
         return Promise.resolve({
           teams: [{ id: "alpha", name: "Alpha" }],
@@ -167,9 +158,9 @@ describe("CsmUsersPage", () => {
     );
   });
 
-  it("combines name/email search, role, group, team and status into one request with every key set", async () => {
+  it("combines name/email search, group, team and status into one request with every key set", async () => {
     renderPage(
-      "/admin/users?search=jane&roles=agent&groups=11111111-1111-1111-1111-111111111111&teams=alpha&active=active",
+      "/admin/users?search=jane&groups=11111111-1111-1111-1111-111111111111&teams=alpha&active=active",
     );
 
     await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
@@ -182,7 +173,6 @@ describe("CsmUsersPage", () => {
     const body = JSON.parse(requestInit.body as string);
     expect(body.filters).toEqual({
       searchQuery: "jane",
-      roleIds: ["agent"],
       groupIds: ["11111111-1111-1111-1111-111111111111"],
       teamIds: ["alpha"],
       active: true,
@@ -198,16 +188,9 @@ describe("CsmUsersPage", () => {
     expect(body.filters).toEqual({});
   });
 
-  it("clears selected role and team filters from their controls", async () => {
-    renderPage("/admin/users?roles=agent&teams=alpha");
+  it("clears the selected team filter from its control", async () => {
+    renderPage("/admin/users?teams=alpha");
     await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
-
-    fireEvent.click(screen.getByRole("button", { name: "Clear roles filter" }));
-    await waitFor(() => {
-      const body = JSON.parse(authFetchMock.mock.calls.at(-1)?.[1].body as string);
-      expect(body.filters.roleIds).toBeUndefined();
-      expect(body.filters.teamIds).toEqual(["alpha"]);
-    });
 
     fireEvent.click(screen.getByRole("button", { name: "Clear teams filter" }));
     await waitFor(() => {
@@ -217,14 +200,14 @@ describe("CsmUsersPage", () => {
   });
 });
 
-describe("CsmUsersPage — role truncation and row navigation", () => {
-  const MANY_ROLES_USER = {
+describe("CsmUsersPage — type column and row navigation", () => {
+  const INTERNAL_USER = {
     id: "user-1",
     userName: "jane.doe",
     name: "Jane Doe",
     email: "jane.doe@example.com",
     active: true,
-    roles: ["agent", "admin", "commenter", "partner", "customer_admin"],
+    userType: "internal",
     createdOn: "2025-01-01T00:00:00Z",
     updatedOn: "2025-06-01T00:00:00Z",
   };
@@ -234,7 +217,7 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
     name: "John Smith",
     email: "john.smith@example.com",
     active: true,
-    roles: ["snc_internal", "admin"],
+    userType: "customer",
     createdOn: "2025-01-01T00:00:00Z",
     updatedOn: "2025-06-01T00:00:00Z",
   };
@@ -244,21 +227,6 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
     authFetchMock.mockReset();
     postMock.mockReset();
     postMock.mockImplementation((path: string) => {
-      if (path === "/roles/search") {
-        return Promise.resolve({
-          roles: [
-            { id: "agent", name: "Agent" },
-            { id: "admin", name: "Admin" },
-            { id: "commenter", name: "Commenter" },
-            { id: "partner", name: "Partner" },
-            { id: "customer_admin", name: "Customer Admin" },
-            { id: "internal", name: "Internal" },
-          ],
-          total: 5,
-          limit: 50,
-          offset: 0,
-        });
-      }
       if (path === "/teams/search") {
         return Promise.resolve({ teams: [], total: 0, limit: 50, offset: 0 });
       }
@@ -266,7 +234,7 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
     });
     authFetchMock.mockResolvedValue(
       jsonResponse({
-        users: [MANY_ROLES_USER, FEW_ROLES_USER],
+        users: [INTERNAL_USER, FEW_ROLES_USER],
         total: 2,
         limit: 20,
         offset: 0,
@@ -274,46 +242,17 @@ describe("CsmUsersPage — role truncation and row navigation", () => {
     );
   });
 
-  it("keeps roles on one line and provides a more chip for roles that do not fit", async () => {
+  it("shows the user's type instead of a roles column", async () => {
     renderPage("/admin/users");
 
-    // Wait until the role-name catalogue has resolved the raw keys before asserting.
-    await waitFor(() => expect(screen.getAllByText("Agent").length).toBeGreaterThan(0));
-
+    await waitFor(() => expect(screen.getByText("Jane Doe")).toBeInTheDocument());
     const janeRow = screen.getByText("Jane Doe").closest("tr") as HTMLElement;
     const johnRow = screen.getByText("John Smith").closest("tr") as HTMLElement;
-    const janeRoles = within(janeRow).getByTestId("role-measure").previousElementSibling as HTMLElement;
-    const johnRoles = within(johnRow).getByTestId("role-measure").previousElementSibling as HTMLElement;
 
-    // jsdom has no layout width, so the responsive list uses its safe
-    // one-chip fallback and exposes the remainder through a legible chip.
-    expect(within(janeRoles).getByText("Agent")).toBeInTheDocument();
-    expect(within(janeRoles).getByText("+4 more")).toBeInTheDocument();
-    expect(within(janeRoles).queryByText("Admin")).not.toBeInTheDocument();
-    expect(within(janeRoles).queryByText("Commenter")).not.toBeInTheDocument();
-    expect(within(janeRoles).queryByText("Partner")).not.toBeInTheDocument();
-    expect(within(janeRoles).queryByText("Customer Admin")).not.toBeInTheDocument();
-
-    // The same fallback remains a single line for a shorter role list.
-    // Fully-qualified ServiceNow keys resolve through the same short-key
-    // catalogue used by the role filter.
-    expect(within(johnRoles).getByText("Internal")).toBeInTheDocument();
-    expect(within(johnRoles).queryByText("Admin")).not.toBeInTheDocument();
-    expect(within(johnRoles).getByText("+1 more")).toBeInTheDocument();
-  });
-
-  it("treats role chips as row content and navigates their row to the user profile", async () => {
-    renderPageWithDestinations("/admin/users");
-
-    await waitFor(() => expect(screen.getAllByText("Agent").length).toBeGreaterThan(0));
-    const janeRow = screen.getByText("Jane Doe").closest("tr") as HTMLElement;
-    const janeRoles = within(janeRow).getByTestId("role-measure").previousElementSibling as HTMLElement;
-
-    // Role chips are informational in this table; clicking one follows the
-    // containing row to the user rather than opening the role directory.
-    fireEvent.click(within(janeRoles).getByText("Agent"));
-    expect(await screen.findByText("User profile page")).toBeInTheDocument();
-    expect(screen.queryByText("Role members page")).not.toBeInTheDocument();
+    expect(within(janeRow).getByText("Internal")).toBeInTheDocument();
+    expect(within(johnRow).getByText("External (customer)")).toBeInTheDocument();
+    expect(screen.queryByText("Roles")).not.toBeInTheDocument();
+    expect(screen.getByText("Type")).toBeInTheDocument();
   });
 
   it("navigates a whole-row click (outside any nested chip/link) to the user's profile", async () => {
@@ -391,9 +330,6 @@ describe("CsmUsersPage — Add User (admin only)", () => {
     authFetchMock.mockReset();
     postMock.mockReset();
     postMock.mockImplementation((path: string) => {
-      if (path === "/roles/search") {
-        return Promise.resolve({ roles: [], total: 0, limit: 50, offset: 0 });
-      }
       if (path === "/teams/search") {
         return Promise.resolve({ teams: [], total: 0, limit: 50, offset: 0 });
       }
