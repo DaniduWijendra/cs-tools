@@ -47,6 +47,24 @@ import (
 // Overridden in tests to keep them fast.
 var tokenFetchTimeout = 10 * time.Second
 
+// autoPublishTimeout bounds the single AutoPublish HTTP call this client
+// makes -- applied per-call via context.WithTimeout in AutoPublish below,
+// not as this client's shared http.Client.Timeout, since that field would
+// apply to every request this client makes, including SearchDueIDs (see
+// searchTimeout below), which needs a much shorter budget. See its own use
+// for why this one is minutes rather than the usual few-seconds REST-call
+// budget. Kept above entity-service's own total server-side budget
+// (currently 11m30s: autoPublishHandlerTimeout + autoPublishWriteDeadlineBuffer,
+// announcement_request_handler.go) so this client is never the one giving up
+// first, and below both that service's own autoPublishClaimStaleAfter (13m)
+// and this task's own ~15-minute tick cadence.
+var autoPublishTimeout = 12 * time.Minute
+
+// searchTimeout bounds each SearchDueIDs page request -- a plain, fast REST
+// call (unlike AutoPublish), so it keeps the usual short budget rather than
+// inheriting autoPublishTimeout's multi-minute one.
+var searchTimeout = 25 * time.Second
+
 // Config holds this client's configuration.
 type Config struct {
 	BaseURL      string
@@ -92,7 +110,9 @@ func NewClient(cfg Config) (*Client, error) {
 	httpsec.RejectInsecureRedirects(tokenHTTPClient)
 	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
 	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 25 * time.Second
+	// No blanket httpClient.Timeout here -- SearchDueIDs and AutoPublish need
+	// very different budgets (see searchTimeout/autoPublishTimeout above),
+	// applied per-call via context.WithTimeout in each method instead.
 	httpsec.RejectInsecureRedirects(httpClient)
 
 	return &Client{
@@ -181,7 +201,9 @@ func (c *Client) SearchDueIDs(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("announcementpublish: encode search request: %w", err)
 		}
 
-		respBody, err := c.do(ctx, http.MethodPost, "/announcement-requests/search", reqBody)
+		pageCtx, cancel := context.WithTimeout(ctx, searchTimeout)
+		respBody, err := c.do(pageCtx, http.MethodPost, "/announcement-requests/search", reqBody)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -215,6 +237,8 @@ func (c *Client) SearchDueIDs(ctx context.Context) ([]string, error) {
 // whether that's a Handler-level failure worth alerting on) or any other
 // non-2xx status.
 func (c *Client) AutoPublish(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, autoPublishTimeout)
+	defer cancel()
 	_, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/announcement-requests/%s/auto-publish", url.PathEscape(id)), nil)
 	return err
 }

@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,7 @@ type fakeAnnouncementRequestRepo struct {
 
 	gotUpsertDeliveriesID  string
 	gotUpsertDeliveriesReq []domain.RecordAnnouncementRequestDeliveryInput
+	upsertDeliveriesCalls  int
 	upsertDeliveriesResult []domain.AnnouncementRequestDelivery
 	upsertDeliveriesErr    error
 
@@ -90,6 +92,12 @@ type fakeAnnouncementRequestRepo struct {
 	gotReleaseID  string
 	releaseCalled int
 	releaseErr    error
+
+	// mu guards every field UpsertDeliveries touches -- AutoPublish now
+	// calls it concurrently, one goroutine per project (see its own doc
+	// comment), so this fake needs to be as safe for concurrent use as the
+	// real repository already is.
+	mu sync.Mutex
 }
 
 func (f *fakeAnnouncementRequestRepo) Create(_ context.Context, req domain.CreateAnnouncementRequestRequest) (domain.AnnouncementRequest, error) {
@@ -189,16 +197,21 @@ func (f *fakeAnnouncementRequestRepo) ListUpdates(_ context.Context, announcemen
 }
 
 func (f *fakeAnnouncementRequestRepo) UpsertDeliveries(_ context.Context, announcementRequestID string, deliveries []domain.RecordAnnouncementRequestDeliveryInput) ([]domain.AnnouncementRequestDelivery, error) {
+	f.mu.Lock()
 	f.gotUpsertDeliveriesID = announcementRequestID
+	f.upsertDeliveriesCalls++
 	// AutoPublish now records one project's outcome per call (see its own
 	// doc comment for why), so this accumulates across every call within a
 	// test rather than keeping only the most recent one.
 	f.gotUpsertDeliveriesReq = append(f.gotUpsertDeliveriesReq, deliveries...)
-	if f.upsertDeliveriesErr != nil {
-		return nil, f.upsertDeliveriesErr
+	upsertDeliveriesErr := f.upsertDeliveriesErr
+	upsertDeliveriesResult := f.upsertDeliveriesResult
+	f.mu.Unlock()
+	if upsertDeliveriesErr != nil {
+		return nil, upsertDeliveriesErr
 	}
-	if f.upsertDeliveriesResult != nil {
-		return f.upsertDeliveriesResult, nil
+	if upsertDeliveriesResult != nil {
+		return upsertDeliveriesResult, nil
 	}
 	result := make([]domain.AnnouncementRequestDelivery, len(deliveries))
 	for i, d := range deliveries {
@@ -229,22 +242,35 @@ type fakeCaseFanOutClient struct {
 	taggedCases       []string
 	taggedActorEmails []string
 	nextCaseNum       int
+
+	// mu guards every field above -- AutoPublish now calls CreateCase/
+	// AddCaseTagAs concurrently, one goroutine per project (see its own doc
+	// comment), so this fake needs to be as safe for concurrent use as the
+	// real client already is.
+	mu sync.Mutex
 }
 
 func (f *fakeCaseFanOutClient) CreateCase(ctx context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
+	f.mu.Lock()
 	f.createdCases = append(f.createdCases, req)
-	if f.createCaseFn != nil {
-		return f.createCaseFn(ctx, req)
-	}
 	f.nextCaseNum++
-	return domain.CreateCaseResponse{Case: domain.CreateCaseDetails{ID: fmt.Sprintf("case-%d", f.nextCaseNum)}}, nil
+	caseNum := f.nextCaseNum
+	fn := f.createCaseFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return domain.CreateCaseResponse{Case: domain.CreateCaseDetails{ID: fmt.Sprintf("case-%d", caseNum)}}, nil
 }
 
 func (f *fakeCaseFanOutClient) AddCaseTagAs(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error) {
+	f.mu.Lock()
 	f.taggedCases = append(f.taggedCases, caseID)
 	f.taggedActorEmails = append(f.taggedActorEmails, actorEmail)
-	if f.addTagFn != nil {
-		return f.addTagFn(ctx, caseID, label)
+	fn := f.addTagFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, caseID, label)
 	}
 	return domain.Tag{}, nil
 }
@@ -858,14 +884,8 @@ func TestAnnouncementRequestService_AutoPublish(t *testing.T) {
 
 	t.Run("records each project's outcome as it happens, not batched at the end", func(t *testing.T) {
 		repo := &fakeAnnouncementRequestRepo{getResult: dueApproved()}
-		var recordedAfterEachCreate int
 		cases := &fakeCaseFanOutClient{
 			createCaseFn: func(_ context.Context, req domain.CreateCaseRequest) (domain.CreateCaseResponse, error) {
-				// Whatever was recorded so far reflects only *earlier*
-				// projects in this loop, never the one about to be created
-				// — proving deliveries are persisted incrementally rather
-				// than accumulated and flushed once at the very end.
-				recordedAfterEachCreate = len(repo.gotUpsertDeliveriesReq)
 				return domain.CreateCaseResponse{Case: domain.CreateCaseDetails{ID: "case-" + req.ProjectID}}, nil
 			},
 		}
@@ -874,8 +894,15 @@ func TestAnnouncementRequestService_AutoPublish(t *testing.T) {
 		if _, err := svc.AutoPublish(context.Background(), "req-1"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if recordedAfterEachCreate >= 2 {
-			t.Fatalf("expected the first project's case creation to see fewer than 2 already-recorded deliveries, got %d", recordedAfterEachCreate)
+		// Proves deliveries are persisted incrementally, one call per
+		// project, rather than accumulated and flushed once in a single
+		// batched call at the end — the property this test is actually
+		// about. It no longer asserts a specific project ever saw fewer
+		// than N deliveries already recorded: now that the fan-out is
+		// bounded-concurrent (see AutoPublish's own doc comment), the
+		// order in which projects finish is no longer deterministic.
+		if repo.upsertDeliveriesCalls != 2 {
+			t.Fatalf("expected 2 separate UpsertDeliveries calls (one per project), got %d", repo.upsertDeliveriesCalls)
 		}
 		if len(repo.gotUpsertDeliveriesReq) != 2 {
 			t.Fatalf("expected both projects recorded by the end, got %+v", repo.gotUpsertDeliveriesReq)
