@@ -2490,7 +2490,21 @@ func (r *caseRepo) SearchTags(ctx context.Context, searchQuery, _ string, limit 
 // taskSlaStageDisplay (task_sla_repo.go) already uses for a raw enum label,
 // applied here to a raw column name instead. No field-name -> display-label
 // mapping exists anywhere else in this schema to defer to.
+// caseActivityFieldChangeLabelOverrides holds field_name -> display label
+// pairs where the generic space-separated-title-case rendering below reads
+// badly: an "_id" suffix is natural in a column name but not in a label a
+// person reads ("Assigned To Id"), and English keeps an assignment's own
+// preposition lowercase ("Assigned to", not "Assigned To").
+var caseActivityFieldChangeLabelOverrides = map[string]string{
+	"assigned_to_id":          "Assigned to",
+	"acknowledged_by_user_id": "Acknowledged by",
+	"parent_id":               "Parent case",
+}
+
 func caseActivityFieldChangeLabel(fieldName string) string {
+	if label, ok := caseActivityFieldChangeLabelOverrides[fieldName]; ok {
+		return label
+	}
 	words := strings.Split(fieldName, "_")
 	for i, w := range words {
 		if w == "" {
