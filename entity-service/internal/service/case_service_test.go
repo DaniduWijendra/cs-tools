@@ -63,7 +63,7 @@ type stubCaseRepo struct {
 	addCaseTag                    func(ctx context.Context, caseID, label, actorEmail string) (domain.Tag, error)
 	setCaseWatchList              func(ctx context.Context, caseID string, userIDs []string, actorEmail string) ([]domain.WatchListUser, time.Time, error)
 	accountDefaultWatcherIDs      func(ctx context.Context, projectID string) ([]string, error)
-	updateCaseAssignee            func(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error)
+	updateCaseAssignee            func(ctx context.Context, caseID, userID, callerEmail string) (time.Time, bool, error)
 	acknowledgeCase               func(ctx context.Context, caseID, actorID, actorEmail string) (bool, domain.AssignedEngineerRef, string, time.Time, error)
 	updateCaseParent              func(ctx context.Context, caseID, parentID, callerEmail string) (time.Time, error)
 	updateCaseFields              func(ctx context.Context, req domain.UpdateCaseRequest, actorID, actorEmail string) (time.Time, error)
@@ -178,7 +178,7 @@ func (s *stubCaseRepo) AccountDefaultWatcherIDs(ctx context.Context, projectID s
 	}
 	return nil, nil
 }
-func (s *stubCaseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+func (s *stubCaseRepo) UpdateCaseAssignee(ctx context.Context, caseID, userID, callerEmail string) (time.Time, bool, error) {
 	if s.updateCaseAssignee != nil {
 		return s.updateCaseAssignee(ctx, caseID, userID, callerEmail)
 	}
@@ -674,17 +674,16 @@ func TestCaseService_UpdateCase_UpdatesAssignee(t *testing.T) {
 	repo := &stubCaseRepo{
 		getCaseByID: func(_ context.Context, id string, _ repository.SearchScope) (domain.CaseView, error) {
 			// Unassigned before this call, matching this test's intent
-			// (assignee changes from nobody to John Roe): updateCaseAssignee
-			// now always fetches this pre-write, not just when a publisher
-			// is configured, to detect the no-op case for the activity log
-			// too.
+			// (assignee changes from nobody to John Roe) -- purely display
+			// data for the activity-feed entry now; the actual no-op
+			// decision comes from updateCaseAssignee's own "changed" return.
 			return domain.CaseView{ID: id, Number: "CS0001"}, nil
 		},
-		updateCaseAssignee: func(_ context.Context, caseID, userID, callerEmail string) (time.Time, error) {
+		updateCaseAssignee: func(_ context.Context, caseID, userID, callerEmail string) (time.Time, bool, error) {
 			if userID != "assignee-id" {
 				t.Errorf("userID = %q, want assignee-id", userID)
 			}
-			return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC), nil
+			return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC), true, nil
 		},
 	}
 	userRepo := stubUserRepo{getUserByEmail: func(_ context.Context, email string) (domain.User, error) {

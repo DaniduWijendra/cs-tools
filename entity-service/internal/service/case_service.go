@@ -1126,31 +1126,31 @@ func (s *caseService) updateCaseAssignee(ctx context.Context, req domain.UpdateC
 		return domain.UpdateCaseResponse{}, err
 	}
 
-	// before is fetched to detect a genuine assignee change -- a caller
-	// re-PATCHing the case's current assignee (a no-op as far as anyone
-	// downstream cares) must not send every watcher a false "case assigned"
-	// notification, nor gain a spurious activity-feed entry, the same guard
-	// snCaseService.UpdateCase's own AssigneeEmail path applies.
-	// CaseRepository.UpdateCaseAssignee itself has no such guard (it always
-	// writes assigned_to_id), so this data source detects the no-op here
-	// instead, before the write, the same way snCaseService.UpdateCase
-	// compares its own pre-PATCH GetCaseByID against req.AssigneeEmail.
-	// Always fetched (not gated on s.publisher), since the activity-feed
-	// write below needs it regardless of whether Event Hub is configured.
-	changed := false
+	// previousAssigneeName is best-effort DISPLAY data only, for the
+	// activity-feed entry's old value below -- fetched before the write, so
+	// it can lag under a genuine concurrent race (another call reassigning
+	// the case between this read and the write below), but that only means
+	// an activity entry's "old" value is stale, never a duplicate
+	// publish/activity write. A fetch failure just leaves it at
+	// "Unassigned" rather than failing the assignment.
 	previousAssigneeName := "Unassigned"
 	if cv, err := s.GetCaseByID(ctx, req.ID); err != nil {
-		slog.ErrorContext(ctx, "update case: enrich case for case.assigned publish/activity failed", "caseId", req.ID)
-	} else {
-		if cv.AssignedEngineer != nil {
-			previousAssigneeName = cv.AssignedEngineer.Name
-			changed = !strings.EqualFold(cv.AssignedEngineer.Email, assignee.Email)
-		} else {
-			changed = true
-		}
+		slog.ErrorContext(ctx, "update case: enrich case for case.assigned activity failed", "caseId", req.ID)
+	} else if cv.AssignedEngineer != nil {
+		previousAssigneeName = cv.AssignedEngineer.Name
 	}
 
-	updatedOn, err := s.repo.UpdateCaseAssignee(ctx, req.ID, assignee.ID, actor.Email)
+	// changed is the ONLY signal that gates the publish/activity-log calls
+	// below, and comes from the write itself (CaseRepository.
+	// UpdateCaseAssignee's own atomic UPDATE...WHERE assigned_to_id IS
+	// DISTINCT FROM...RETURNING), not a separate pre-write read -- two
+	// concurrent requests assigning the same case to the same engineer
+	// can't both observe "unchanged" (or both "changed") this way, unlike a
+	// check-then-act GetCaseByID comparison, which could let both calls see
+	// a stale "not yet assigned" state and both publish/mirror the same
+	// no-op, sending watchers a duplicate "case assigned" notification
+	// (CodeRabbit finding on PR #1989).
+	updatedOn, changed, err := s.repo.UpdateCaseAssignee(ctx, req.ID, assignee.ID, actor.Email)
 	if err != nil {
 		return domain.UpdateCaseResponse{}, err
 	}

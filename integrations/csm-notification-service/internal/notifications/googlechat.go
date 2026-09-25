@@ -406,6 +406,12 @@ func (c *GoogleChatClient) SendSecurityReportAnalysisAlert(ctx context.Context, 
 				},
 			},
 		},
+		// A security_report_analysis case can still be acknowledged (see
+		// SendCaseAcknowledgedAlert's own doc comment) -- without this, its
+		// case.acknowledged alert would fall back to a new thread instead
+		// of replying to this creation alert, the same reasoning
+		// SendCaseCreatedAlert's own Thread field documents.
+		Thread: &chatThread{ThreadKey: chatThreadKey(caseNumber)},
 	}
 	return c.sendCard(ctx, product, msg)
 }
