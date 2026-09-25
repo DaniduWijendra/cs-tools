@@ -806,9 +806,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// succeeds -- see NewIncidentServiceWithSNMirror's own doc comment
 		// and publishIncidentCreatedEvent's.
 		snIncidentMirrorSvc := service.NewServiceNowIncidentService(serviceNowIntegrationServiceClient, nil)
-		activeIncidentSvc = service.NewIncidentServiceWithSNMirror(incidentRepo, snIncidentMirrorSvc, eventPublisher)
+		activeIncidentSvc = service.NewIncidentServiceWithSNMirror(incidentRepo, accessSvc, snIncidentMirrorSvc, eventPublisher)
 	default:
-		activeIncidentSvc = service.NewIncidentService(incidentRepo)
+		activeIncidentSvc = service.NewIncidentService(incidentRepo, accessSvc)
 	}
 	incidentHandler := handler.NewIncidentHandler(activeIncidentSvc)
 
@@ -825,9 +825,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// snProblemMirrorSvc's CreateProblem is the only method of it this
 		// mode ever calls.
 		snProblemMirrorSvc := service.NewServiceNowProblemService(serviceNowIntegrationServiceClient)
-		activeProblemSvc = service.NewProblemServiceWithSNMirror(problemRepo, snProblemMirrorSvc)
+		activeProblemSvc = service.NewProblemServiceWithSNMirror(problemRepo, accessSvc, snProblemMirrorSvc)
 	default:
-		activeProblemSvc = service.NewProblemService(problemRepo)
+		activeProblemSvc = service.NewProblemService(problemRepo, accessSvc)
 	}
 	problemHandler := handler.NewProblemHandler(activeProblemSvc)
 
@@ -846,7 +846,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	if cfg.DataSource == config.DataSourceServiceNow {
 		activeIncidentTaskSvc = service.NewServiceNowIncidentTaskService(serviceNowIntegrationServiceClient)
 	} else {
-		activeIncidentTaskSvc = service.NewIncidentTaskService(incidentTaskRepo)
+		activeIncidentTaskSvc = service.NewIncidentTaskService(incidentTaskRepo, accessSvc)
 	}
 	incidentTaskHandler := handler.NewIncidentTaskHandler(activeIncidentTaskSvc)
 
