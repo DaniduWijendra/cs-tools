@@ -128,3 +128,80 @@ func TestNormalizeChoices_EmptyInputIsEmptyNotNil(t *testing.T) {
 		t.Error("nil input must produce an empty slice, not nil -- it serialises as [] not null")
 	}
 }
+
+// The create-case form's resolveIssueTypeKey (webapp) does
+// parseInt(item.id, 10) || 0 to build issueTypeKey, then treats 0 as "no
+// issue type selected". Postgres's case_issue_type_enum labels
+// (ERROR/PARTIAL_OUTAGE/PERFORMANCE_DEGRADATION/QUESTION/
+// SECURITY_OR_COMPLIANCE/TOTAL_OUTAGE) are not numeric, so without this
+// translation every issue type parses to NaN -> 0 and the form rejects
+// every selection with "Please select an issue type," even though one was
+// picked.
+func TestNormalizeCaseIssueTypeChoices_PostgresEnumLabels(t *testing.T) {
+	in := []ReferenceItem{
+		{ID: "TOTAL_OUTAGE", Label: "TOTAL_OUTAGE"},
+		{ID: "PARTIAL_OUTAGE", Label: "PARTIAL_OUTAGE"},
+		{ID: "PERFORMANCE_DEGRADATION", Label: "PERFORMANCE_DEGRADATION"},
+		{ID: "QUESTION", Label: "QUESTION"},
+		{ID: "SECURITY_OR_COMPLIANCE", Label: "SECURITY_OR_COMPLIANCE"},
+		{ID: "ERROR", Label: "ERROR"},
+	}
+	want := []ReferenceItem{
+		{ID: "1", Label: "Total Outage"},
+		{ID: "2", Label: "Partial Outage"},
+		{ID: "3", Label: "Performance Degradation"},
+		{ID: "4", Label: "Question"},
+		{ID: "5", Label: "Security Or Compliance"},
+		{ID: "6", Label: "Error"},
+	}
+
+	got := normalizeCaseIssueTypeChoices(in)
+	if len(got) != len(want) {
+		t.Fatalf("got %d items, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID || got[i].Label != want[i].Label {
+			t.Errorf("[%d] = {%s, %s}, want {%s, %s}", i, got[i].ID, got[i].Label, want[i].ID, want[i].Label)
+		}
+	}
+}
+
+// ServiceNow-mode already returns numeric ids -- an id this table doesn't
+// recognise passes through untouched, same as severity/state.
+func TestNormalizeCaseIssueTypeChoices_ServiceNowIDsPassThrough(t *testing.T) {
+	in := []ReferenceItem{{ID: "3", Label: "Performance Degradation"}}
+	got := normalizeCaseIssueTypeChoices(in)
+	if got[0].ID != in[0].ID || got[0].Label != in[0].Label {
+		t.Errorf("got {%s, %s}, want it unchanged {%s, %s}", got[0].ID, got[0].Label, in[0].ID, in[0].Label)
+	}
+}
+
+// engagement_type_enum's Postgres labels have the same non-numeric-id problem
+// as issue type, for the same resolveIssueTypeKey-style numeric-key
+// assumption on engagementTypeKeys filters.
+func TestNormalizeCaseEngagementTypeChoices_PostgresEnumLabels(t *testing.T) {
+	in := []ReferenceItem{
+		{ID: "MIGRATION", Label: "MIGRATION"},
+		{ID: "CONSULTANCY", Label: "CONSULTANCY"},
+		{ID: "NEW_FEATURE_IMPROVEMENT", Label: "NEW_FEATURE_IMPROVEMENT"},
+		{ID: "FOLLOW_UP", Label: "FOLLOW_UP"},
+		{ID: "ONBOARDING", Label: "ONBOARDING"},
+	}
+	want := []ReferenceItem{
+		{ID: "1", Label: "Migration"},
+		{ID: "2", Label: "Consultancy"},
+		{ID: "3", Label: "New Feature Improvement"},
+		{ID: "4", Label: "Follow Up"},
+		{ID: "5", Label: "Onboarding"},
+	}
+
+	got := normalizeCaseEngagementTypeChoices(in)
+	if len(got) != len(want) {
+		t.Fatalf("got %d items, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID || got[i].Label != want[i].Label {
+			t.Errorf("[%d] = {%s, %s}, want {%s, %s}", i, got[i].ID, got[i].Label, want[i].ID, want[i].Label)
+		}
+	}
+}

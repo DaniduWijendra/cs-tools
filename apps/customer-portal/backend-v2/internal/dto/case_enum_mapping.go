@@ -193,6 +193,31 @@ var caseSeverityDisplayLabels = map[string]string{
 	"low":          "Low (P4)",
 }
 
+// caseIssueTypeDisplayLabels turns the issue type enum back into ServiceNow's
+// own human label (see snIssueTypeToEnum's doc comment in
+// sn_case_service.go: SN sends "Error", "Total Outage", etc. as issueType.name) —
+// the same restoration caseStateDisplayLabels does for case state.
+var caseIssueTypeDisplayLabels = map[string]string{
+	"total_outage":            "Total Outage",
+	"partial_outage":          "Partial Outage",
+	"performance_degradation": "Performance Degradation",
+	"question":                "Question",
+	"security_or_compliance":  "Security Or Compliance",
+	"error":                   "Error",
+}
+
+// caseEngagementTypeDisplayLabels turns the engagement type enum into the
+// Title Case label the frontend renders verbatim, matching this backend's own
+// caseEngagementTypeRef transform (lowercase, spaces/slashes to underscores)
+// in reverse.
+var caseEngagementTypeDisplayLabels = map[string]string{
+	"migration":               "Migration",
+	"consultancy":             "Consultancy",
+	"new_feature_improvement": "New Feature Improvement",
+	"follow_up":               "Follow Up",
+	"onboarding":              "Onboarding",
+}
+
 // displayLabelOr returns the mapped display label for enum, falling back to the
 // value as received. Falling back rather than blanking means an enum this table
 // does not know still renders something, the same tolerance the *Ref helpers use
@@ -407,6 +432,31 @@ func normalizeCaseSeverityChoices(items []ReferenceItem) []ReferenceItem {
 // half.
 func normalizeCaseStateChoices(items []ReferenceItem) []ReferenceItem {
 	return normalizeChoices(items, nil, caseStateIDs, caseStateDisplayLabels)
+}
+
+// normalizeCaseIssueTypeChoices is normalizeCaseSeverityChoices for issue
+// types. Like case state, case_issue_type_enum's Postgres labels are just the
+// UPPER_SNAKE form of the domain values (confirmed against the enum itself:
+// ERROR/PARTIAL_OUTAGE/PERFORMANCE_DEGRADATION/QUESTION/
+// SECURITY_OR_COMPLIANCE/TOTAL_OUTAGE), so no enum-to-domain table is needed
+// here either.
+//
+// Without this, GET /projects/{id}/filters returned issueTypes.id as the raw
+// Postgres label (e.g. "PERFORMANCE_DEGRADATION") whenever entity-service ran
+// in Postgres/dual-write mode, instead of the numeric ServiceNow-style id the
+// frontend's resolveIssueTypeKey expects -- parseInt on a non-numeric id
+// silently returns 0, which the create-case form treats as "no issue type
+// selected" even though the caller picked one.
+func normalizeCaseIssueTypeChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseIssueTypeIDs, caseIssueTypeDisplayLabels)
+}
+
+// normalizeCaseEngagementTypeChoices is normalizeCaseSeverityChoices for
+// engagement types. engagement_type_enum's Postgres labels are the UPPER_SNAKE
+// form of the domain values too (CONSULTANCY/NEW_FEATURE_IMPROVEMENT/
+// FOLLOW_UP/ONBOARDING/MIGRATION), so again no enum-to-domain table is needed.
+func normalizeCaseEngagementTypeChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseEngagementTypeIDs, caseEngagementTypeDisplayLabels)
 }
 
 // normalizeChoices maps each item's id to the frontend's {id, label} pair.
