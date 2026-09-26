@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import {
   AdapterDateFns,
   Box,
@@ -200,9 +200,20 @@ export default function AnnouncementRequestDialog({
   // audience regardless of what this box displays.
   const AUDIENCE_DISPLAY_CAP = 100;
   const [showFullAudience, setShowFullAudience] = useState(false);
-  useEffect(() => {
+  // Reset showFullAudience *during render* when request?.id changes, not in
+  // a useEffect -- an effect-based reset still commits one render late: the
+  // very first render for a new request would compute
+  // visibleAudienceProjectIds from the *previous* request's leftover
+  // showFullAudience=true before the reset effect gets a chance to run,
+  // potentially kicking off a full-audience resolve for the wrong request.
+  // This is React's own documented pattern for adjusting state in response
+  // to a prop change without an effect (bail out and re-render immediately,
+  // never committing the stale value).
+  const [showFullAudienceForRequestId, setShowFullAudienceForRequestId] = useState(request?.id);
+  if (showFullAudienceForRequestId !== request?.id) {
+    setShowFullAudienceForRequestId(request?.id);
     setShowFullAudience(false);
-  }, [request?.id]);
+  }
   const visibleAudienceProjectIds = showFullAudience
     ? (request?.resolvedProjectIds ?? [])
     : (request?.resolvedProjectIds?.slice(0, AUDIENCE_DISPLAY_CAP) ?? []);
@@ -220,23 +231,34 @@ export default function AnnouncementRequestDialog({
   // every one of them once showFullAudience is set) -- resolving anything
   // beyond what's displayed would just be wasted round trips.
   //
-  // Only resolves when the visible set has *grown* past what's already
-  // resolved (opening the dialog, or clicking "Show all") -- collapsing
-  // back via "Show fewer" shrinks visibleAudienceProjectIds without needing
-  // a new resolve at all, since every id it still shows was already fetched
-  // as part of the larger set. Without this guard, "Show fewer" would
-  // re-fetch the first 100 projects from scratch (audiencePreview.resolve
-  // replaces its result wholesale, it doesn't remember earlier calls),
+  // Only skips resolving when collapsing back within the *same* request
+  // (fewer ids than what's already been resolved for it) -- switching to a
+  // different request always resolves fresh, even if it happens to have the
+  // same resolved-project count as the last one (comparing count alone,
+  // ignoring which request it belongs to, would wrongly keep showing the
+  // previous request's resolved keys). Collapsing via "Show fewer" skips
+  // re-resolving because every id it still shows was already fetched as
+  // part of the larger set -- audiencePreview.resolve replaces its result
+  // wholesale rather than remembering earlier calls, so without this guard
+  // "Show fewer" would re-fetch the first 100 projects from scratch,
   // flashing back to "Resolving project names…" for data already in hand.
   const audiencePreview = useResolvedAudiencePreview();
   const visibleAudienceProjectIdsKey = visibleAudienceProjectIds.join(",");
-  const resolvedAudienceProjectCount = audiencePreview.projects.length;
+  const lastAudienceResolve = useRef<{ requestId: string | undefined; count: number }>({
+    requestId: undefined,
+    count: 0,
+  });
   useEffect(() => {
-    if (visibleAudienceProjectIds.length > resolvedAudienceProjectCount) {
+    const isSameRequest = lastAudienceResolve.current.requestId === request?.id;
+    const needsResolve =
+      visibleAudienceProjectIds.length > 0 &&
+      (!isSameRequest || visibleAudienceProjectIds.length > lastAudienceResolve.current.count);
+    if (needsResolve) {
+      lastAudienceResolve.current = { requestId: request?.id, count: visibleAudienceProjectIds.length };
       void audiencePreview.resolve(visibleAudienceProjectIds, visibleAudienceProjectIds.length);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleAudienceProjectIdsKey]);
+  }, [visibleAudienceProjectIdsKey, request?.id]);
   const audienceProjectLabel = (projectId: string): string =>
     audiencePreview.projects.find((p) => p.id === projectId)?.key ?? projectId;
 
@@ -634,7 +656,7 @@ export default function AnnouncementRequestDialog({
                 }}
               >
                 {audiencePreview.isLoading ? (
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                  <Box role="status" aria-live="polite" sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                     <CircularProgress size={14} />
                     <Typography variant="body2" color="text.secondary">
                       {showFullAudience

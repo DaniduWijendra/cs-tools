@@ -446,12 +446,32 @@ describe("AnnouncementRequestDialog — approved", () => {
     expect(within(audienceBox()).queryByText(/show all/i)).not.toBeInTheDocument();
 
     fireEvent.click(within(audienceBox()).getByText("Show fewer"));
-    // Collapsing re-triggers a resolve for just the 100-project slice (a
-    // fresh loading state), so wait for that to settle before asserting --
-    // asserting immediately after the click can still see the interim
-    // "Resolving project names…" state.
+    // Collapsing doesn't re-trigger a resolve (every id it still shows was
+    // already fetched as part of the larger "Show all" set), so this
+    // shouldn't need to wait out a loading state -- vi.waitFor here is just
+    // the usual safety margin for a state update to flush, not a real delay.
     await vi.waitFor(() => expect(within(audienceBox()).getByText("Show all (+5 more)")).toBeInTheDocument());
     expect(within(audienceBox()).queryByText("P-104")).not.toBeInTheDocument();
+  });
+
+  it("resolves fresh audience keys when switching to a different request with the same resolved-project count", async () => {
+    // Both requests resolve to exactly 2 projects -- a count-only "already
+    // resolved enough" check can't tell these two apart, and would wrongly
+    // keep showing request A's resolved keys for request B.
+    mockGet({ id: "req-1", state: "approved", resolvedProjectIds: ["p-1", "p-2"], resolvedProjectCount: 2 });
+    const { rerender } = render(<AnnouncementRequestDialog requestId="req-1" onClose={vi.fn()} />);
+    const audienceBox = () => screen.getByRole("group", { name: "Audience projects" });
+    await vi.waitFor(() => expect(within(audienceBox()).getByText("P-1")).toBeInTheDocument());
+
+    mockGet({ id: "req-2", state: "approved", resolvedProjectIds: ["q-1", "q-2"], resolvedProjectCount: 2 });
+    rerender(
+      <MemoryRouter>
+        <AnnouncementRequestDialog requestId="req-2" onClose={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await vi.waitFor(() => expect(within(audienceBox()).getByText("Q-1")).toBeInTheDocument());
+    expect(within(audienceBox()).queryByText("P-1")).not.toBeInTheDocument();
   });
 
   it("opens a confirmation popup before calling handlePublish, showing what's about to be sent", async () => {
