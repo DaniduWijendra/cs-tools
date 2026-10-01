@@ -41,3 +41,14 @@ func RequireInternalCaller(ctx context.Context, access AccessService, forbiddenM
 	}
 	return nil
 }
+
+// RequireProjectAccess is the "this caller may act on this project" check as a
+// reusable primitive for route-level guards: internal callers pass for any
+// project, an external caller only for a project they are registered on (a
+// project they are not on is reported as NotFound, never confirming it exists),
+// and a malformed id is a ValidationError. It delegates to authorizeProject, the
+// same check the project, case and stats services already make.
+func RequireProjectAccess(ctx context.Context, access AccessService, projectID string) error {
+	_, err := authorizeProject(ctx, access, projectID)
+	return err
+}

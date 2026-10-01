@@ -1276,17 +1276,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("POST /users", userHandler.CreateUser)
 	}
 	if snAccountHandler != nil {
-		mux.HandleFunc("GET /accounts/{id}", snAccountHandler.GetAccount)
-		mux.HandleFunc("POST /accounts/search", snAccountHandler.SearchAccounts)
+		mux.HandleFunc("GET /accounts/{id}", internalOnly(accessSvc, snAccountHandler.GetAccount))
+		mux.HandleFunc("POST /accounts/search", internalOnly(accessSvc, snAccountHandler.SearchAccounts))
 	} else {
-		mux.HandleFunc("GET /accounts/{id}", accountHandler.GetAccount)
-		mux.HandleFunc("POST /accounts/search", accountHandler.SearchAccounts)
-		mux.HandleFunc("PATCH /accounts/{id}", accountHandler.PatchAccountTeams)
+		mux.HandleFunc("GET /accounts/{id}", internalOnly(accessSvc, accountHandler.GetAccount))
+		mux.HandleFunc("POST /accounts/search", internalOnly(accessSvc, accountHandler.SearchAccounts))
+		mux.HandleFunc("PATCH /accounts/{id}", internalOnly(accessSvc, accountHandler.PatchAccountTeams))
 	}
 	if teamHandler != nil {
 		mux.HandleFunc("GET /teams/{id}/members", teamHandler.GetTeamMembers)
 	}
-	mux.HandleFunc("POST /accounts/{id}/contacts/search", accountContactHandler.SearchAccountContacts)
+	mux.HandleFunc("POST /accounts/{id}/contacts/search", internalOnly(accessSvc, accountContactHandler.SearchAccountContacts))
 	if opportunityHandler != nil {
 		mux.HandleFunc("POST /opportunities/search", opportunityHandler.SearchOpportunities)
 		mux.HandleFunc("GET /opportunities/{id}", opportunityHandler.GetOpportunity)
@@ -1300,8 +1300,8 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	}
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
-	mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
-	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
+	mux.HandleFunc("POST /projects/{id}/contacts/search", projectMemberOnly(accessSvc, projectContactHandler.SearchProjectContacts))
+	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectMemberOnly(accessSvc, projectContactHandler.GetProjectContact))
 	if projectMembershipHandler != nil {
 		// Beside the search and get above, in the same namespace. {email}
 		// keys a membership; {contactId} on the GET above is a user id, and
