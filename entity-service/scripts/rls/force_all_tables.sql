@@ -4,6 +4,9 @@
 -- Dissemination of any information or reproduction of any material contained
 -- herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
 
+-- Stop at the first error instead of carrying on with a half-applied script.
+\set ON_ERROR_STOP on
+
 -- Switch row-level security back ON (23 tables), exactly as the PR's migrations left it (ENABLE + FORCE).
 -- Schema: defaults to csmpd_stg_user. For a different database/schema run:
 --   psql -X -v schema=<schema_name> -f "<this file>"

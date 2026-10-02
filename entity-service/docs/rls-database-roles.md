@@ -129,6 +129,19 @@ APP_ROLE=csm_entity_app
         -f scripts/rls/create_app_role.sql
    ```
 
+   The login that runs this needs `CREATEROLE`, and must be able to grant on
+   the owner's tables and set default privileges *for* the owner: a superuser,
+   the owner itself (if it has `CREATEROLE`), or a role that is a member of the
+   owner role (`GRANT <owner_role> TO <admin_role>` first). Tested locally on
+   PostgreSQL 17 with a non-superuser `CREATEROLE` admin: **without** that
+   membership every grant fails with `permission denied for schema` (the script
+   stops there and the role exists without privileges; re-run it after fixing
+   the membership); **with** it everything succeeds. A
+   `WARNING: no privileges were granted for "<db>"` on the `CONNECT` line is
+   harmless (`CONNECT` is already granted to `PUBLIC`). A managed Postgres
+   server admin is usually not a superuser, so expect to need the membership.
+   *Not run on the real Azure server; confirm there before the window.*
+
    It creates the role (`NOSUPERUSER NOBYPASSRLS`), grants `SELECT/INSERT/
    UPDATE/DELETE`, sequence usage and function execute on the schema, sets
    default privileges so tables created by later migrations are granted

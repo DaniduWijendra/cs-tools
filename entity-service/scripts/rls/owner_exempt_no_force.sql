@@ -4,6 +4,9 @@
 -- Dissemination of any information or reproduction of any material contained
 -- herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
 
+-- Stop at the first error instead of carrying on with a half-applied script.
+\set ON_ERROR_STOP on
+
 -- STEP 3: let the OWNER login see all the data (DBeaver, pgAdmin, sync/migration services) by removing FORCE.
 -- RLS stays ENABLED with all 85 policies, so every other role, i.e. the application role, is still fully bound.
 --

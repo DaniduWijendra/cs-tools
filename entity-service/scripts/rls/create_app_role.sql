@@ -4,6 +4,9 @@
 -- Dissemination of any information or reproduction of any material contained
 -- herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
 
+-- Stop at the first error instead of carrying on with a half-applied script.
+\set ON_ERROR_STOP on
+
 -- STEP 1 of the separate-application-role setup (docs/rls-database-roles.md): give the APPLICATION its own login role.
 -- Run ONCE per database, as a role that can create roles (e.g. the server admin). Safe to re-run: an existing
 -- role keeps its password; grants are re-applied.

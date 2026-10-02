@@ -4,6 +4,9 @@
 -- Dissemination of any information or reproduction of any material contained
 -- herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
 
+-- Stop at the first error instead of carrying on with a half-applied script.
+\set ON_ERROR_STOP on
+
 -- EMERGENCY: switch row-level security OFF (23 tables). Policies stay defined; behaviour returns to how dev was before the RLS PR.
 -- Schema: defaults to csmpd_stg_user. For a different database/schema run:
 --   psql -X -v schema=<schema_name> -f "<this file>"
