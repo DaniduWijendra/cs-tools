@@ -15,17 +15,14 @@
 // under the License.
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
-import { beStateFromUi, priorityFromSeverity } from "@api/backend/mappers";
-import type {
-  BeCaseSearchPayload,
-  BeCaseSearchResponse,
-} from "@api/backend/types";
 import {
+  CASE_COUNTS_QUERY_KEY,
+  fetchCaseCounts,
   MATRIX_SEVERITIES,
   MATRIX_STATES,
-} from "@features/csm-dashboard/api/useCaseCountsMatrix";
+  type CaseCountsSnapshot,
+} from "@features/csm-dashboard/api/caseCounts";
 import type {
   CaseState,
   Severity,
@@ -52,108 +49,48 @@ export interface CaseComposition {
 }
 
 /**
+ * Collapses the snapshot's severity x state counts into the pies' two 1-D
+ * breakdowns, each over the *active* cases only, with the closed count apart.
+ * A severity's count is its row of the matrix and a state's count is its
+ * column, which is exactly what the per-severity and per-state searches this
+ * replaced filtered for (a severity AND the active states; a state AND every
+ * severity), so the pies, the matrix and their totals reconcile by construction.
+ */
+function selectComposition({
+  counts,
+  closedTotal,
+}: CaseCountsSnapshot): CaseComposition {
+  const bySeverity = {} as Record<Severity, number>;
+  const byState = {} as Record<CaseState, number>;
+  COMPOSITION_STATES.forEach((st) => (byState[st] = 0));
+  for (const s of MATRIX_SEVERITIES) {
+    bySeverity[s] = 0;
+    for (const st of COMPOSITION_STATES) {
+      bySeverity[s] += counts[s][st];
+      byState[st] += counts[s][st];
+    }
+  }
+  const severityTotal = MATRIX_SEVERITIES.reduce((a, s) => a + bySeverity[s], 0);
+  const stateTotal = COMPOSITION_STATES.reduce((a, s) => a + byState[s], 0);
+  return { bySeverity, byState, severityTotal, stateTotal, closedTotal };
+}
+
+/**
  * Case composition for the dashboard pies: a 1-D breakdown by severity and a
  * 1-D breakdown by state, each over the *active* cases only (closed excluded,
  * matching the severity×state matrix). The closed count is returned separately.
  *
- * The backend has no aggregation endpoint, so — like the severity×state matrix
- * — this fans out count-only searches (`limit: 1`, read `total`): one per
- * severity (filtered by priority AND the active states) and one per active
- * state (filtered by state), plus one for the closed total.
- *
- * Severity and state each partition the same active population, so both totals
- * are equal and reconcile with the matrix's grand total.
+ * Reads the same snapshot as {@link useCaseCountsMatrix} (one shared query,
+ * six aggregate requests; see `fetchCaseCounts`), so showing both costs the
+ * same as showing either, and refreshing one refreshes the other.
  */
 export function useCaseComposition(): UseQueryResult<CaseComposition, Error> {
   const api = useBackendApi();
 
-  return useQuery<CaseComposition, Error>({
-    queryKey: [ApiQueryKeys.CSM_CASE_COUNTS, "composition"],
-    queryFn: async (): Promise<CaseComposition> => {
-      const bySeverity = {} as Record<Severity, number>;
-      const byState = {} as Record<CaseState, number>;
-      MATRIX_SEVERITIES.forEach((s) => (bySeverity[s] = 0));
-      COMPOSITION_STATES.forEach((s) => (byState[s] = 0));
-      let closedTotal = 0;
-
-      const countTotal = (payload: BeCaseSearchPayload): Promise<number> =>
-        api
-          .post<BeCaseSearchPayload, BeCaseSearchResponse>(
-            "/cases/search",
-            payload,
-          )
-          .then((r) => r.total ?? 0);
-
-      // The active states, expressed once for the severity counts so each is
-      // scoped to active cases (priority AND active-state), not the whole
-      // population.
-      const activeStateKeys = COMPOSITION_STATES.map(beStateFromUi);
-      // The state/closed counts don't filter by severity. The backend,
-      // however, counts only catastrophic cases when `severityKeys` is absent
-      // (an empty priority filter is not treated as "all"), which made the
-      // state pie show the S0 row only and disagree with the matrix totals.
-      // Pass every priority explicitly so these counts span all severities.
-      // BE follow-up: treat an absent/empty severityKeys as "all priorities".
-      const allPriorityKeys = MATRIX_SEVERITIES.map(priorityFromSeverity);
-
-      // All severity + state counts (plus the closed total) fire in one wave.
-      const [severityCounts, stateCounts, closedCount] = await Promise.all([
-        Promise.all(
-          MATRIX_SEVERITIES.map((sev) =>
-            countTotal({
-              pagination: { offset: 0, limit: 1 },
-              filters: {
-                filters: [
-                  { field: "severity", op: "in", values: [priorityFromSeverity(sev)] },
-                  { field: "state", op: "in", values: activeStateKeys },
-                  // The pies drill into the cases list, which is locked to
-                  // plain cases — pin every count to the same type so the
-                  // totals reconcile with that destination and the matrix.
-                  { field: "type", op: "in", values: ["case"] },
-                ],
-              },
-            }).then((n) => ({ key: sev, n })),
-          ),
-        ),
-        Promise.all(
-          COMPOSITION_STATES.map((st) =>
-            countTotal({
-              pagination: { offset: 0, limit: 1 },
-              filters: {
-                filters: [
-                  { field: "state", op: "in", values: [beStateFromUi(st)] },
-                  { field: "severity", op: "in", values: allPriorityKeys },
-                  { field: "type", op: "in", values: ["case"] },
-                ],
-              },
-            }).then((n) => ({ key: st, n })),
-          ),
-        ),
-        countTotal({
-          pagination: { offset: 0, limit: 1 },
-          filters: {
-            filters: [
-              { field: "state", op: "in", values: [beStateFromUi("closed")] },
-              { field: "severity", op: "in", values: allPriorityKeys },
-              { field: "type", op: "in", values: ["case"] },
-            ],
-          },
-        }),
-      ]);
-      severityCounts.forEach(({ key, n }) => (bySeverity[key] = n));
-      stateCounts.forEach(({ key, n }) => (byState[key] = n));
-      closedTotal = closedCount;
-
-      const severityTotal = MATRIX_SEVERITIES.reduce(
-        (a, s) => a + bySeverity[s],
-        0,
-      );
-      const stateTotal = COMPOSITION_STATES.reduce(
-        (a, s) => a + byState[s],
-        0,
-      );
-      return { bySeverity, byState, severityTotal, stateTotal, closedTotal };
-    },
+  return useQuery<CaseCountsSnapshot, Error, CaseComposition>({
+    queryKey: CASE_COUNTS_QUERY_KEY,
+    queryFn: () => fetchCaseCounts(api),
+    select: selectComposition,
     staleTime: 60_000,
   });
 }

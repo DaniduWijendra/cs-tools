@@ -15,28 +15,22 @@
 // under the License.
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
-import { beStateFromUi, priorityFromSeverity } from "@api/backend/mappers";
-import type {
-  BeCaseSearchPayload,
-  BeCaseSearchResponse,
-} from "@api/backend/types";
+import {
+  CASE_COUNTS_QUERY_KEY,
+  fetchCaseCounts,
+  MATRIX_SEVERITIES,
+  MATRIX_STATES,
+  type CaseCountsSnapshot,
+} from "@features/csm-dashboard/api/caseCounts";
 import type {
   CaseState,
   Severity,
 } from "@features/csm-dashboard/types/abtDashboard";
 
-export const MATRIX_SEVERITIES: Severity[] = ["S0", "S1", "S2", "S3", "S4"];
-// Closed cases are deliberately excluded: the dashboard matrix tracks active
-// work, so the totals reflect open cases only.
-export const MATRIX_STATES: CaseState[] = [
-  "open",
-  "work_in_progress",
-  "waiting_on_wso2",
-  "awaiting_info",
-  "solution_proposed",
-];
+// Kept exported from here: the composition hook, the matrix table and the
+// pies all import them from this module.
+export { MATRIX_SEVERITIES, MATRIX_STATES };
 
 export interface CaseCountsMatrix {
   /** counts[severity][state] = number of cases. */
@@ -46,78 +40,39 @@ export interface CaseCountsMatrix {
   total: number;
 }
 
-function emptyMatrix(): CaseCountsMatrix {
-  const counts = {} as Record<Severity, Record<CaseState, number>>;
+/** Adds the row, column and grand totals to a snapshot's cell counts. */
+function selectMatrix({ counts }: CaseCountsSnapshot): CaseCountsMatrix {
   const severityTotals = {} as Record<Severity, number>;
   const stateTotals = {} as Record<CaseState, number>;
+  for (const st of MATRIX_STATES) stateTotals[st] = 0;
+  let total = 0;
   for (const s of MATRIX_SEVERITIES) {
     severityTotals[s] = 0;
-    counts[s] = {} as Record<CaseState, number>;
-    for (const st of MATRIX_STATES) counts[s][st] = 0;
+    for (const st of MATRIX_STATES) {
+      const n = counts[s][st];
+      severityTotals[s] += n;
+      stateTotals[st] += n;
+      total += n;
+    }
   }
-  for (const st of MATRIX_STATES) stateTotals[st] = 0;
-  return { counts, severityTotals, stateTotals, total: 0 };
+  return { counts, severityTotals, stateTotals, total };
 }
 
 /**
- * Case counts broken down by severity × state, for the dashboard matrix.
+ * Case counts broken down by severity x state, for the dashboard matrix.
  *
- * The backend has no aggregation endpoint, so this fans out one count-only
- * `POST /cases/search` per (severity, state) cell: each request filters by the
- * cell's priority + state and asks for `limit: 1`, then reads the `total`
- * attribute off the response (the case rows themselves are discarded). Counts
- * are therefore *exact* — no sampling, no truncation. Row/column/grand totals
- * are summed from the cells.
- *
- * Trade-off: this is `MATRIX_SEVERITIES.length * MATRIX_STATES.length` requests
- * (fired in parallel) per refresh. They are cheap indexed counts; the proper
- * long-term fix is a single faceted aggregation endpoint on the backend.
- *
- * Keyed under its own root (not `CSM_CASES`) so case create/patch mutations,
- * which invalidate the `CSM_CASES` prefix, do not re-trigger this fan-out.
- * `staleTime` plus refetch-on-mount keeps it fresh enough on the dashboard.
+ * Reads the shared snapshot {@link fetchCaseCounts} fetches in six aggregate
+ * requests (see there for what it replaced and why), so it costs nothing extra
+ * when the composition pies are on the same page. Counts are exact; row, column
+ * and grand totals are summed from the cells.
  */
 export function useCaseCountsMatrix(): UseQueryResult<CaseCountsMatrix, Error> {
   const api = useBackendApi();
 
-  return useQuery<CaseCountsMatrix, Error>({
-    queryKey: [ApiQueryKeys.CSM_CASE_COUNTS],
-    queryFn: async (): Promise<CaseCountsMatrix> => {
-      const matrix = emptyMatrix();
-
-      const cells = MATRIX_SEVERITIES.flatMap((severity) =>
-        MATRIX_STATES.map((state) => ({ severity, state })),
-      );
-      const counted = await Promise.all(
-        // Each cell builds its own fresh `filters` array literal (never a
-        // shared/mutated one across iterations), so parallel requests can't
-        // clobber each other's filter criteria.
-        cells.map(({ severity, state }) =>
-          api
-            .post<BeCaseSearchPayload, BeCaseSearchResponse>("/cases/search", {
-              pagination: { offset: 0, limit: 1 },
-              filters: {
-                filters: [
-                  { field: "severity", op: "in", values: [priorityFromSeverity(severity)] },
-                  { field: "state", op: "in", values: [beStateFromUi(state)] },
-                  // Cells drill into the cases list, which is locked to plain
-                  // cases — pin the count to the same type so it reconciles.
-                  { field: "type", op: "in", values: ["case"] },
-                ],
-              },
-            })
-            .then((res) => ({ severity, state, count: res.total ?? 0 })),
-        ),
-      );
-
-      for (const { severity, state, count } of counted) {
-        matrix.counts[severity][state] = count;
-        matrix.severityTotals[severity] += count;
-        matrix.stateTotals[state] += count;
-        matrix.total += count;
-      }
-      return matrix;
-    },
+  return useQuery<CaseCountsSnapshot, Error, CaseCountsMatrix>({
+    queryKey: CASE_COUNTS_QUERY_KEY,
+    queryFn: () => fetchCaseCounts(api),
+    select: selectMatrix,
     staleTime: 60_000,
   });
 }

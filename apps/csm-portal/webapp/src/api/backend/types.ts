@@ -1107,6 +1107,20 @@ export interface BeCaseSearchFilters {
   anyOf?: { filters: BeCaseFieldFilter[] }[];
 }
 
+/**
+ * Body of `POST /cases/aggregate`: one server-side `GROUP BY` over the cases
+ * matching `filters` (the same filter object `POST /cases/search` takes),
+ * returning one bucket per value of `groupBy`. Answered with
+ * {@link BeGroupByResponse}. `groupBy: "state"` buckets are keyed by the domain
+ * state on both data sources; the other fields are not guaranteed to be.
+ */
+export interface BeCaseAggregatePayload {
+  filters?: BeCaseSearchFilters;
+  groupBy: "account" | "state" | "severity" | "type";
+  /** Caps the buckets returned; the rest fold into `othersCount`. */
+  maxGroups?: number;
+}
+
 export interface BeCaseSearchPayload {
   /** All filter fields are nested here; `sortBy`/`pagination` stay top-level. */
   filters?: BeCaseSearchFilters;
