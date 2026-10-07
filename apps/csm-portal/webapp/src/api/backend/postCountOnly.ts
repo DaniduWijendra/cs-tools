@@ -17,23 +17,25 @@
 import type { BackendApi, BackendApiPostOptions } from "@api/backend/client";
 import { createFlaggedPost } from "@api/backend/postFlaggedSearch";
 
-const skipTotal = createFlaggedPost("skipTotal");
+const countOnly = createFlaggedPost("countOnly");
 
 /** For tests: forget what an earlier request learned about the entity service. */
-export const resetSkipTotalSupport = skipTotal.reset;
+export const resetCountOnlySupport = countOnly.reset;
 
 /**
- * `api.post` for a search whose caller never shows a total (the quick-nav
- * palette lists a handful of hits): asks the server to skip counting every
- * match (`skipTotal: true`, which also frees the second pool connection the
- * count would hold), and falls back to the plain search if the entity service
- * predates the field (see {@link createFlaggedPost}).
+ * `api.post` for a search whose caller reads nothing but `total` (a dashboard
+ * count tile, a pie or bar slice): asks the server to run only the count
+ * (`countOnly: true`), so the page query is skipped and only one pool
+ * connection is held. The response still has the list field, but it is empty.
+ * Falls back to the plain search if the entity service predates the field (see
+ * {@link createFlaggedPost}). Only for endpoints that declare the field: the
+ * others reject it, which would cost every request a failed attempt first.
  */
-export function postSkippingTotal<TBody extends { skipTotal?: boolean }, TResponse>(
+export function postCountOnly<TBody extends object, TResponse>(
   api: BackendApi,
   path: string,
   body: TBody,
   options?: BackendApiPostOptions,
 ): Promise<TResponse> {
-  return skipTotal.post<TBody, TResponse>(api, path, body, options);
+  return countOnly.post<TBody, TResponse>(api, path, body, options);
 }

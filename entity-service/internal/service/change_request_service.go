@@ -150,6 +150,9 @@ func validateChangeRequestFilters(f domain.SearchChangeRequestsFilters) error {
 
 // SearchChangeRequests implements ChangeRequestService.
 func (s *changeRequestService) SearchChangeRequests(ctx context.Context, req domain.SearchChangeRequestsRequest) (domain.SearchChangeRequestsResponse, error) {
+	if err := validateSearchCountFlags(req.SkipTotal, req.CountOnly); err != nil {
+		return domain.SearchChangeRequestsResponse{}, err
+	}
 	if err := normalizePagination(&req.Pagination); err != nil {
 		return domain.SearchChangeRequestsResponse{}, err
 	}

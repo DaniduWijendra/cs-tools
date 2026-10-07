@@ -143,6 +143,9 @@ func (s *problemService) resolveActorEmail(ctx context.Context) (string, error) 
 
 // SearchProblems implements ProblemService.
 func (s *problemService) SearchProblems(ctx context.Context, req domain.SearchProblemsRequest) (domain.SearchProblemsResponse, error) {
+	if err := validateSearchCountFlags(req.SkipTotal, req.CountOnly); err != nil {
+		return domain.SearchProblemsResponse{}, err
+	}
 	if err := normalizePagination(&req.Pagination); err != nil {
 		return domain.SearchProblemsResponse{}, err
 	}

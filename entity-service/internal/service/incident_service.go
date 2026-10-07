@@ -385,6 +385,9 @@ func (s *incidentService) resolveActor(ctx context.Context) (domain.User, error)
 
 // SearchIncidents implements IncidentService.
 func (s *incidentService) SearchIncidents(ctx context.Context, req domain.SearchIncidentsRequest) (domain.SearchIncidentsResponse, error) {
+	if err := validateSearchCountFlags(req.SkipTotal, req.CountOnly); err != nil {
+		return domain.SearchIncidentsResponse{}, err
+	}
 	if err := normalizePagination(&req.Pagination); err != nil {
 		return domain.SearchIncidentsResponse{}, err
 	}

@@ -26,6 +26,7 @@ vi.mock("@api/backend/client", () => ({
 }));
 
 import { useWidgetPieData } from "@features/csm-dashboard/api/useWidgetPieData";
+import { resetCountOnlySupport } from "@api/backend/postCountOnly";
 import { CURRENT_TEAM_PLACEHOLDER } from "@features/csm-dashboard/utils/teamFilterPlaceholder";
 import { CURRENT_USER_PLACEHOLDER } from "@features/csm-dashboard/utils/currentUserFilterPlaceholder";
 
@@ -64,6 +65,7 @@ describe("useWidgetPieData", () => {
       "/cases/search",
       {
         filters: { states: ["open"], severities: "critical" },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -72,6 +74,7 @@ describe("useWidgetPieData", () => {
       "/cases/search",
       {
         filters: { states: ["open"], severities: "high" },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -132,6 +135,7 @@ describe("useWidgetPieData", () => {
             },
           ],
         },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -178,6 +182,7 @@ describe("useWidgetPieData", () => {
             },
           ],
         },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -217,6 +222,7 @@ describe("useWidgetPieData", () => {
         filters: {
           filters: [{ field: "state", op: "in", values: ["open"] }],
         },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -264,6 +270,7 @@ describe("useWidgetPieData", () => {
             },
           ],
         },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -319,5 +326,49 @@ describe("useWidgetPieData", () => {
     );
 
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+});
+
+describe("useWidgetPieData count-only requests", () => {
+  beforeEach(() => {
+    postMock.mockReset();
+    resetCountOnlySupport();
+  });
+
+  it("a slice of a resource whose search does not declare the field sends none", async () => {
+    postMock.mockResolvedValue({ total: 2 });
+
+    const { result } = renderHook(
+      () => useWidgetPieData("widget-acc", "account", {}, [{ label: "A", query: { a: "1" } }]),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(postMock.mock.calls[0][0]).toBe("/accounts/search");
+    expect(postMock.mock.calls[0][1]).not.toHaveProperty("countOnly");
+  });
+
+  it("falls back to the plain per-slice search when the entity service rejects the field, then stops asking", async () => {
+    postMock.mockImplementation((_path: string, body: { countOnly?: boolean; filters: { s: string } }) => {
+      if (body.countOnly) return Promise.reject(Object.assign(new Error("unknown field countOnly"), { status: 400 }));
+      return Promise.resolve({ total: body.filters.s === "a" ? 4 : 6 });
+    });
+
+    const { result } = renderHook(
+      () =>
+        useWidgetPieData("widget-old", "case", {}, [
+          { label: "A", query: { s: "a" } },
+          { label: "B", query: { s: "b" } },
+        ]),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.slices.map((s) => s.value)).toEqual([4, 6]);
+    // One failed attempt for the first slice, its plain retry, then the second
+    // slice goes straight to the plain search.
+    const withFlag = postMock.mock.calls.filter(([, body]) => (body as { countOnly?: boolean }).countOnly);
+    expect(withFlag).toHaveLength(1);
+    expect(postMock).toHaveBeenCalledTimes(3);
   });
 });

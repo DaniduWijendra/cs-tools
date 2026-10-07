@@ -17,6 +17,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
+import { postCountOnly } from "@api/backend/postCountOnly";
 import type { BeWidgetResourceType, BeWidgetShape } from "@api/backend/types";
 import { WIDGET_RESOURCE_CONFIG } from "@features/csm-dashboard/config/widgetResourceConfig";
 import {
@@ -161,6 +162,13 @@ export function useWidgetData({
     currentUserId,
   );
   const effectiveSortBy = shape === "list" ? sortBy : undefined;
+  // A count tile reads nothing but `total`, so it asks the server to run only
+  // the count and skip the page query (and the second pool connection it
+  // holds). Only for the endpoints that declare the field, and never for a
+  // resourceType with its own request builder, whose contract is not the
+  // standard one. Every other shape reads rows, so it keeps the full search.
+  const countOnly =
+    shape === "count" && !!config?.supportsCountOnly && !config.buildSearchRequestBody;
   // A `__current_user__` placeholder that survived resolution means the
   // signed-in user's profile hasn't landed yet. Sending these filters would
   // either 400 on the non-UUID value or — before this resolver started
@@ -192,6 +200,10 @@ export function useWidgetData({
       limit,
       effectiveOffset,
       effectiveSortBy,
+      // Part of the key: a count-only result carries no rows, and a list
+      // widget sharing the widget id, filters and a one-row limit must never
+      // be served it from the cache.
+      countOnly,
     ],
     enabled: enabled && !awaitingCurrentUser,
     // Self-throttling: a wallboard tile whose interval fires while the
@@ -237,11 +249,18 @@ export function useWidgetData({
               pagination: { offset: effectiveOffset, limit },
               ...(effectiveSortBy ? { sortBy: effectiveSortBy } : {}),
             };
-        const res = await api.post<Record<string, unknown>, Record<string, unknown>>(
-          config.searchEndpoint,
-          body,
-          { signal },
-        );
+        const res = countOnly
+          ? await postCountOnly<Record<string, unknown>, Record<string, unknown>>(
+              api,
+              config.searchEndpoint,
+              body,
+              { signal },
+            )
+          : await api.post<Record<string, unknown>, Record<string, unknown>>(
+              config.searchEndpoint,
+              body,
+              { signal },
+            );
         if (config.parseSearchResponse) {
           return config.parseSearchResponse(res);
         }

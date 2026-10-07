@@ -17,6 +17,7 @@
 import { useQueries } from "@tanstack/react-query";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
+import { postCountOnly } from "@api/backend/postCountOnly";
 import type { BeDashboardPieSlice, BeWidgetResourceType } from "@api/backend/types";
 import { WIDGET_RESOURCE_CONFIG } from "@features/csm-dashboard/config/widgetResourceConfig";
 import { mergeWidgetFilters } from "@features/csm-dashboard/utils/widgetFilterMerge";
@@ -150,17 +151,22 @@ export function useWidgetPieData(
           // every other widget's own call, so it needs both at least as
           // much.
           return withWidgetFetchSlot(async (signal) => {
-            const res = await api.post<
-              { filters: Record<string, unknown>; pagination: { offset: number; limit: number } },
-              Record<string, unknown>
-            >(
-              config.searchEndpoint,
-              {
-                filters,
-                pagination: { offset: 0, limit: 1 },
-              },
-              { signal },
-            );
+            // A slice reads nothing but `total`, so on an endpoint that
+            // declares `countOnly` the server runs just the count and skips
+            // the one-row page it would otherwise throw away.
+            const body = { filters, pagination: { offset: 0, limit: 1 } };
+            const res = config.supportsCountOnly
+              ? await postCountOnly<typeof body, Record<string, unknown>>(
+                  api,
+                  config.searchEndpoint,
+                  body,
+                  { signal },
+                )
+              : await api.post<typeof body, Record<string, unknown>>(
+                  config.searchEndpoint,
+                  body,
+                  { signal },
+                );
             return typeof res.total === "number" ? res.total : 0;
           }, teamKey);
         },

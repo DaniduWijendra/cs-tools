@@ -454,6 +454,13 @@ func (r *incidentRepo) SearchIncidents(ctx context.Context, req domain.SearchInc
 	}
 
 	eg.Go(func() error {
+		// CountOnly: the caller reads nothing but the total (a dashboard count
+		// tile), so the page query is not run. The list is empty, not nil, so
+		// the response carries `[]`.
+		if req.CountOnly {
+			views = []domain.SearchIncidentView{}
+			return nil
+		}
 		rows, err := r.db.Query(egCtx, dataQuery, dataArgs...)
 		if err != nil {
 			return fmt.Errorf("query incidents: %w", err)

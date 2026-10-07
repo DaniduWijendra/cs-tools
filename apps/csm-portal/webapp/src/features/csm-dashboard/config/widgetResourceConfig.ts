@@ -77,6 +77,13 @@ type WidgetItem = Record<string, unknown>;
 export interface WidgetResourceConfig {
   /** `POST` endpoint this resource's own search lives at. */
   searchEndpoint: string;
+  /** Whether `searchEndpoint` accepts `countOnly: true` (run the count, skip the
+   * page query). A count tile or a pie/bar slice reads nothing but `total`, so
+   * it asks for just that. Only the endpoints that declare the field carry
+   * this: the others reject unknown request fields, so sending it there
+   * would cost every request a failed attempt first. Omitted means not
+   * supported. */
+  supportsCountOnly?: boolean;
   /** `POST` endpoint for a server-side group-by aggregation, for a
    * `shape: "pie"`/`"bar"` widget configured with `groupBy` instead of
    * `slices` (see `useWidgetGroupByData`). Only the resourceTypes backed
@@ -672,6 +679,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
 > = {
   case: {
     searchEndpoint: "/cases/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/cases/aggregate",
     itemsKey: "cases",
     primaryLabel: numberSubjectLabel,
@@ -702,6 +710,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   // `filters` posted to that endpoint, same as it is for `/cases/search`).
   service_request: {
     searchEndpoint: "/cases/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/cases/aggregate",
     itemsKey: "cases",
     detailHref: caseDetailHref,
@@ -723,6 +732,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   security_report_analysis: {
     searchEndpoint: "/cases/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/cases/aggregate",
     itemsKey: "cases",
     detailHref: caseDetailHref,
@@ -744,6 +754,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   announcement: {
     searchEndpoint: "/cases/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/cases/aggregate",
     itemsKey: "cases",
     detailHref: caseDetailHref,
@@ -765,6 +776,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   engagement: {
     searchEndpoint: "/cases/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/cases/aggregate",
     itemsKey: "cases",
     detailHref: caseDetailHref,
@@ -780,6 +792,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   incident: {
     searchEndpoint: "/incidents/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/incidents/aggregate",
     itemsKey: "incidents",
     primaryLabel: numberSubjectLabel,
@@ -800,6 +813,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   change_request: {
     searchEndpoint: "/change-requests/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/change-requests/aggregate",
     itemsKey: "changeRequests",
     primaryLabel: numberSubjectLabel,
@@ -820,6 +834,7 @@ export const WIDGET_RESOURCE_CONFIG: Record<
   },
   problem: {
     searchEndpoint: "/problems/search",
+    supportsCountOnly: true,
     groupByEndpoint: "/problems/aggregate",
     itemsKey: "problems",
     primaryLabel: numberSubjectLabel,

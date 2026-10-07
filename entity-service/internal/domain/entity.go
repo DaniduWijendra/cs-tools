@@ -2873,6 +2873,12 @@ type SearchCasesRequest struct {
 	// ServiceNow-backed service, which always reports one, and when GroupBy is
 	// set (the totals are the bucket counts).
 	SkipTotal bool `json:"skipTotal,omitempty"`
+	// CountOnly asks the search to run only the count: the response carries the
+	// exact total and an empty list, and the page query is not run. For callers
+	// that read nothing but the total, such as a dashboard count tile. Cannot be
+	// combined with SkipTotal. Ignored by the ServiceNow-backed service, which
+	// returns its page anyway, and when GroupBy is set.
+	CountOnly bool `json:"countOnly,omitempty"`
 }
 
 // AggregateCasesRequest is the input for the dedicated case aggregate
@@ -4149,6 +4155,12 @@ type SearchChangeRequestsRequest struct {
 	// For callers that never show a total, such as global search. Ignored by the
 	// ServiceNow-backed service, which always reports one.
 	SkipTotal bool `json:"skipTotal,omitempty"`
+	// CountOnly asks the search to run only the count: the response carries the
+	// exact total and an empty list, and the page query is not run. For callers
+	// that read nothing but the total, such as a dashboard count tile. Cannot be
+	// combined with SkipTotal. Ignored by the ServiceNow-backed service, which
+	// returns its page anyway.
+	CountOnly bool `json:"countOnly,omitempty"`
 }
 
 // AggregateChangeRequestsRequest is the input for the dedicated change request
@@ -5733,6 +5745,12 @@ type SearchIncidentsRequest struct {
 	// For callers that never show a total, such as global search. Ignored by the
 	// ServiceNow-backed service, which always reports one.
 	SkipTotal bool `json:"skipTotal,omitempty"`
+	// CountOnly asks the search to run only the count: the response carries the
+	// exact total and an empty list, and the page query is not run. For callers
+	// that read nothing but the total, such as a dashboard count tile. Cannot be
+	// combined with SkipTotal. Ignored by the ServiceNow-backed service, which
+	// returns its page anyway.
+	CountOnly bool `json:"countOnly,omitempty"`
 }
 
 // AggregateIncidentsRequest is the input for the dedicated incident aggregate
@@ -6210,6 +6228,12 @@ type SearchProblemsRequest struct {
 	// For callers that never show a total, such as global search. Ignored by the
 	// ServiceNow-backed service, which always reports one.
 	SkipTotal bool `json:"skipTotal,omitempty"`
+	// CountOnly asks the search to run only the count: the response carries the
+	// exact total and an empty list, and the page query is not run. For callers
+	// that read nothing but the total, such as a dashboard count tile. Cannot be
+	// combined with SkipTotal. Ignored by the ServiceNow-backed service, which
+	// returns its page anyway.
+	CountOnly bool `json:"countOnly,omitempty"`
 }
 
 // AggregateProblemsRequest is the input for the dedicated problem aggregate

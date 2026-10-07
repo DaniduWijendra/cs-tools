@@ -14573,6 +14573,17 @@ components:
             hits). Defaults to false, which returns the exact total as before.
             Ignored on the ServiceNow data source, which always reports one,
             and for a search that sets groupBy (its totals are the bucket counts).
+        countOnly:
+          type: boolean
+          description: >-
+            When true, the search runs only the count: the response carries the
+            exact `total` and an empty list, and the page query is not run. For
+            callers that read nothing but the total, such as a dashboard count
+            tile or a pie or bar slice. Cannot be combined with skipTotal (a
+            request that sets both is a 400). Defaults to false, which returns
+            the page as before.
+            Ignored on the ServiceNow data source, which returns its page anyway,
+            and for a search that sets groupBy.
         filters:
           $ref: '#/components/schemas/CaseSearchFilters'
         sortBy:
@@ -18362,6 +18373,16 @@ components:
             callers that never show a total (global search shows a handful of
             hits). Defaults to false, which returns the exact total as before.
             Ignored on the ServiceNow data source, which always reports one.
+        countOnly:
+          type: boolean
+          description: >-
+            When true, the search runs only the count: the response carries the
+            exact `total` and an empty list, and the page query is not run. For
+            callers that read nothing but the total, such as a dashboard count
+            tile or a pie or bar slice. Cannot be combined with skipTotal (a
+            request that sets both is a 400). Defaults to false, which returns
+            the page as before.
+            Ignored on the ServiceNow data source, which returns its page anyway.
         filters:
           type: object
           properties:
@@ -20296,6 +20317,16 @@ components:
             callers that never show a total (global search shows a handful of
             hits). Defaults to false, which returns the exact total as before.
             Ignored on the ServiceNow data source, which always reports one.
+        countOnly:
+          type: boolean
+          description: >-
+            When true, the search runs only the count: the response carries the
+            exact `total` and an empty list, and the page query is not run. For
+            callers that read nothing but the total, such as a dashboard count
+            tile or a pie or bar slice. Cannot be combined with skipTotal (a
+            request that sets both is a 400). Defaults to false, which returns
+            the page as before.
+            Ignored on the ServiceNow data source, which returns its page anyway.
         filters:
           type: object
           properties:
@@ -21048,6 +21079,16 @@ components:
             callers that never show a total (global search shows a handful of
             hits). Defaults to false, which returns the exact total as before.
             Ignored on the ServiceNow data source, which always reports one.
+        countOnly:
+          type: boolean
+          description: >-
+            When true, the search runs only the count: the response carries the
+            exact `total` and an empty list, and the page query is not run. For
+            callers that read nothing but the total, such as a dashboard count
+            tile or a pie or bar slice. Cannot be combined with skipTotal (a
+            request that sets both is a 400). Defaults to false, which returns
+            the page as before.
+            Ignored on the ServiceNow data source, which returns its page anyway.
         filters:
           type: object
           properties:

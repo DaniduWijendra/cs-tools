@@ -29,6 +29,7 @@ import {
   resolveWidgetRefetchInterval,
   useWidgetData,
 } from "@features/csm-dashboard/api/useWidgetData";
+import { resetCountOnlySupport } from "@api/backend/postCountOnly";
 import {
   WIDGET_FETCH_CONCURRENCY_LIMIT,
   __resetWidgetFetchConcurrencyForTests,
@@ -75,6 +76,7 @@ describe("useWidgetData", () => {
       "/cases/search",
       {
         filters: { states: ["open"] },
+        countOnly: true,
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
@@ -338,5 +340,88 @@ describe("resolveWidgetRefetchInterval", () => {
   it("suppresses the refetch (false) while the queue still has a wave draining, so ticks don't stack", () => {
     expect(resolveWidgetRefetchInterval(60_000, 1)).toBe(false);
     expect(resolveWidgetRefetchInterval(60_000, 12)).toBe(false);
+  });
+});
+
+describe("useWidgetData count-only requests", () => {
+  beforeEach(() => {
+    postMock.mockReset();
+    __resetWidgetFetchConcurrencyForTests();
+    resetCountOnlySupport();
+  });
+
+  it("a list widget keeps the full search: no countOnly, its own page size, its rows", async () => {
+    postMock.mockResolvedValue({ total: 9, cases: [{ id: "c1" }] });
+
+    const { result } = renderHook(
+      () => useWidgetData({ widgetId: "w-list", resourceType: "case", filters: {}, shape: "list", listLimit: 4 }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.data).toBeDefined());
+    const body = postMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(body).not.toHaveProperty("countOnly");
+    expect(body.pagination).toEqual({ offset: 0, limit: 4 });
+    expect(result.current.data?.items).toHaveLength(1);
+  });
+
+  it("a count widget on a resource whose search does not declare the field sends none", async () => {
+    postMock.mockResolvedValue({ total: 5, accounts: [] });
+
+    const { result } = renderHook(
+      () => useWidgetData({ widgetId: "w-acc", resourceType: "account", filters: {}, shape: "count" }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.data?.total).toBe(5));
+    expect(postMock).toHaveBeenCalledTimes(1);
+    expect(postMock.mock.calls[0][0]).toBe("/accounts/search");
+    expect(postMock.mock.calls[0][1]).not.toHaveProperty("countOnly");
+  });
+
+  it("falls back to the plain search, and still shows the total, when the entity service rejects the field", async () => {
+    postMock
+      .mockRejectedValueOnce(Object.assign(new Error("unknown field countOnly"), { status: 400 }))
+      .mockResolvedValueOnce({ total: 5, cases: [{ id: "unused-row" }] });
+
+    const { result } = renderHook(
+      () => useWidgetData({ widgetId: "w-old", resourceType: "case", filters: {}, shape: "count" }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.data?.total).toBe(5));
+    expect(postMock).toHaveBeenCalledTimes(2);
+    expect(postMock.mock.calls[0][1]).toHaveProperty("countOnly", true);
+    expect(postMock.mock.calls[1][1]).not.toHaveProperty("countOnly");
+    // The abort signal that lets the shared queue time a request out reaches both attempts.
+    expect(postMock.mock.calls[0][2]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(postMock.mock.calls[1][2]).toEqual({ signal: expect.any(AbortSignal) });
+  });
+
+  it("never serves a count-only result, which carries no rows, to a list widget through the cache", async () => {
+    // Same widget id, filters and a one-row limit: only the count-only part of
+    // the query key keeps these two from being one cache entry.
+    postMock.mockImplementation((_path: string, body: { countOnly?: boolean }) =>
+      Promise.resolve(body.countOnly ? { total: 3, cases: [] } : { total: 3, cases: [{ id: "row" }] }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const shared = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(
+      () => ({
+        count: useWidgetData({ widgetId: "w-shared", resourceType: "case", filters: {}, shape: "count" }),
+        list: useWidgetData({ widgetId: "w-shared", resourceType: "case", filters: {}, shape: "list", listLimit: 1 }),
+      }),
+      { wrapper: shared },
+    );
+
+    await waitFor(() => {
+      expect(result.current.count.data).toBeDefined();
+      expect(result.current.list.data).toBeDefined();
+    });
+    expect(result.current.count.data?.items).toEqual([]);
+    expect(result.current.list.data?.items).toEqual([{ id: "row" }]);
   });
 });

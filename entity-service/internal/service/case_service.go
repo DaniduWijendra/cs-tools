@@ -2811,6 +2811,9 @@ func prepareCaseSearchFilters(ctx context.Context, req domain.SearchCasesRequest
 
 // SearchCases implements CaseService.
 func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesRequest) (domain.SearchCasesResponse, error) {
+	if err := validateSearchCountFlags(req.SkipTotal, req.CountOnly); err != nil {
+		return domain.SearchCasesResponse{}, err
+	}
 	if err := normalizePagination(&req.Pagination); err != nil {
 		return domain.SearchCasesResponse{}, err
 	}
