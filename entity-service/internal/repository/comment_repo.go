@@ -205,12 +205,28 @@ func (r *commentRepo) CreateComment(ctx context.Context, referenceID string, ref
 	// binding workItemTypes ([]string) directly to the enum array type has
 	// no encode plan -- same fix as every other enum array bind in this
 	// codebase (e.g. time_card_repo.go's state filter).
+	//
+	// The `touched` CTE stamps the parent work_item's updated_on/updated_by
+	// in that same statement (so the two writes commit or fail together and
+	// cost no extra round trip). A comment is activity on the case: ServiceNow
+	// advances sys_updated_on for any journal entry, and the lists' "Updated"
+	// column, their updated-date filters and the dashboard reminder widgets
+	// all read work_item.updated_on, so leaving it untouched kept a case that
+	// had just been nudged in "Request update" looking untouched. It only
+	// runs when the insert produced a row (EXISTS), and an unreferenced
+	// data-modifying CTE is still executed to completion by Postgres.
 	const query = `
-		INSERT INTO comment (id, created_on, created_by, type, work_item_id, content)
-		SELECT gen_random_uuid(), NOW(), $1, $2::comment_type_enum, wi.id, $3
-		FROM work_item wi
-		WHERE wi.id = $4 AND wi.type = ANY($5::text[]::work_item_type_enum[])
-		RETURNING ` + commentColumns
+		WITH created AS (
+			INSERT INTO comment (id, created_on, created_by, type, work_item_id, content)
+			SELECT gen_random_uuid(), NOW(), $1, $2::comment_type_enum, wi.id, $3
+			FROM work_item wi
+			WHERE wi.id = $4 AND wi.type = ANY($5::text[]::work_item_type_enum[])
+			RETURNING ` + commentColumns + `
+		), touched AS (
+			UPDATE work_item SET updated_on = NOW(), updated_by = $1
+			WHERE id = $4 AND EXISTS (SELECT 1 FROM created)
+		)
+		SELECT ` + commentColumns + ` FROM created`
 
 	c, err := scanComment(r.db.QueryRow(ctx, query, createdBy, typeEnum, content, referenceID, workItemTypes))
 	if errors.Is(err, pgx.ErrNoRows) {

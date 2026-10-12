@@ -2151,12 +2151,28 @@ func (r *caseRepo) CreateCaseComment(ctx context.Context, req domain.CreateCaseC
 	if err := r.vis.rejectHiddenChangeRequest(ctx, r.db, req.CaseID, "case not found"); err != nil {
 		return domain.CaseComment{}, err
 	}
+	//
+	// The `touched` CTE stamps the work item's updated_on/updated_by in the same
+	// statement, so a comment counts as activity on the case: ServiceNow advances
+	// sys_updated_on for any journal entry, and the lists' Updated column, their
+	// updated-date filters and the dashboard reminder widgets all read
+	// work_item.updated_on. This is what made a case nudged through "Request
+	// update" keep its old Updated date (and its place in "My Reminders"). Only
+	// for a live comment (createdOn nil): a comment carrying its own past
+	// timestamp is ServiceNow history being copied in, which is not activity
+	// happening now and must not make the case look freshly updated.
 	const query = `
-		INSERT INTO comment (id, created_on, created_by, type, work_item_id, content)
-		SELECT gen_random_uuid(), COALESCE($5, NOW()), $1, $2::comment_type_enum, w.id, $4
-		FROM work_item w
-		WHERE w.id = $3
-		RETURNING id, work_item_id, type, content, created_by, created_on`
+		WITH created AS (
+			INSERT INTO comment (id, created_on, created_by, type, work_item_id, content)
+			SELECT gen_random_uuid(), COALESCE($5, NOW()), $1, $2::comment_type_enum, w.id, $4
+			FROM work_item w
+			WHERE w.id = $3
+			RETURNING id, work_item_id, type, content, created_by, created_on
+		), touched AS (
+			UPDATE work_item SET updated_on = NOW(), updated_by = $1
+			WHERE id = $3 AND $5::timestamptz IS NULL AND EXISTS (SELECT 1 FROM created)
+		)
+		SELECT id, work_item_id, type, content, created_by, created_on FROM created`
 
 	var c domain.CaseComment
 	var typeRaw, createdByEmail string

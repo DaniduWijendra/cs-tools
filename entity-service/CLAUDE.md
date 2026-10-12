@@ -2465,6 +2465,26 @@ already use — no route path, request, or response shape changed.
   string with no name field on its wire contract at all — deliberately left
   as-is; the webapp only reads a comment's display name from `SearchComments`
   once the list is (re)fetched, never from the create response.
+- **Adding a comment stamps the parent's `updated_on`/`updated_by`.** A comment
+  is activity on the work item — ServiceNow advances `sys_updated_on` for any
+  journal entry — and the lists' Updated column, the `updatedOn` search filter
+  (relative dates such as `__daysAgo:2__` included) and the dashboard reminder
+  widgets all read `work_item.updated_on`. The insert used to leave it alone, so
+  a case nudged through "Request update" kept its old Updated date and stayed in
+  "My Reminders". Both create paths do it in the **same statement** as the insert
+  (an `UPDATE` CTE, so the two commit or fail together and cost no extra round
+  trip): `commentRepo.CreateComment` (`POST /comments`: change request, incident,
+  conversation) and `caseRepo.CreateCaseComment` (`POST /cases/{id}/comments`:
+  every case-like type — note the generic route refuses `referenceType: case`,
+  so the case route is its own code and must be kept in step). Every comment type
+  counts, work notes included, as in ServiceNow. The one exception is a comment
+  that carries its own past `createdOn`: that is ServiceNow history being
+  mirrored in at dual-write case creation (`mirrorInitialSNComments`), not
+  something happening now, so it does not move `updated_on`. The extra `UPDATE`
+  runs under the caller's own row-level security (`work_item_update` allows a
+  project member) and is skipped when the insert produced no row.
+  `comment_repo_updated_on_integration_test.go` (`CASE_STATS_TEST_DSN`, as a
+  non-superuser) pins both paths, the mirror exception and the refusals.
 - **Editing/deleting a comment, or viewing its edit history**
   (`UpdateComment`, `DeleteComment`, `GetCommentEditHistory`) performs **no
   author or role check of its own at all**. This service keeps no role table
