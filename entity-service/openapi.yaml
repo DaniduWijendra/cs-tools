@@ -1439,6 +1439,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No usable caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller. These routes are for the CSM portal backend and internal clients only.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: No such request.
           content:
@@ -1482,6 +1494,18 @@ paths:
                 $ref: '#/components/schemas/SearchAnnouncementRequestAttachmentsResponse'
         "400":
           description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No usable caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller. These routes are for the CSM portal backend and internal clients only.
           content:
             application/json:
               schema:
@@ -1534,6 +1558,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No usable caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller. These routes are for the CSM portal backend and internal clients only.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: No such request or file.
           content:
@@ -1579,6 +1615,18 @@ paths:
           description: Removed.
         "400":
           description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No usable caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller. These routes are for the CSM portal backend and internal clients only.
           content:
             application/json:
               schema:
@@ -1645,6 +1693,18 @@ paths:
                 $ref: '#/components/schemas/AttachAnnouncementRequestAttachmentsToCaseResponse'
         "400":
           description: "Bad request: the case is not an announcement case, is not one of the request's projects, or no acting user email was sent."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No usable caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller. These routes are for the CSM portal backend and internal clients only.
           content:
             application/json:
               schema:

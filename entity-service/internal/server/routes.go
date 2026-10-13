@@ -1795,11 +1795,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("GET /announcement-requests/{id}/updates", announcementRequestHandler.ListAnnouncementRequestUpdates)
 		mux.HandleFunc("POST /announcement-requests/{id}/deliveries", announcementRequestHandler.RecordAnnouncementRequestDeliveries)
 		mux.HandleFunc("GET /announcement-requests/{id}/deliveries", announcementRequestHandler.ListAnnouncementRequestDeliveries)
-		mux.HandleFunc("POST /announcement-requests/{id}/attachments", announcementRequestHandler.CreateAnnouncementRequestAttachment)
-		mux.HandleFunc("GET /announcement-requests/{id}/attachments", announcementRequestHandler.ListAnnouncementRequestAttachments)
-		mux.HandleFunc("GET /announcement-requests/{id}/attachments/{attachmentId}/content", announcementRequestHandler.GetAnnouncementRequestAttachmentContent)
-		mux.HandleFunc("DELETE /announcement-requests/{id}/attachments/{attachmentId}", announcementRequestHandler.DeleteAnnouncementRequestAttachment)
-		mux.HandleFunc("POST /announcement-requests/{id}/cases/{caseId}/attachments", announcementRequestHandler.AttachAnnouncementRequestAttachmentsToCase)
+		// A request's files (possibly an unreleased advisory) sit in a table with no
+		// row-level security, and the actor is whatever the caller names, so only an
+		// internal caller (the CSM portal backend, an internal client) may reach these
+		// five. The routes above keep their registration: they do not hold file bytes.
+		mux.HandleFunc("POST /announcement-requests/{id}/attachments", internalOnly(accessSvc, announcementRequestHandler.CreateAnnouncementRequestAttachment))
+		mux.HandleFunc("GET /announcement-requests/{id}/attachments", internalOnly(accessSvc, announcementRequestHandler.ListAnnouncementRequestAttachments))
+		mux.HandleFunc("GET /announcement-requests/{id}/attachments/{attachmentId}/content", internalOnly(accessSvc, announcementRequestHandler.GetAnnouncementRequestAttachmentContent))
+		mux.HandleFunc("DELETE /announcement-requests/{id}/attachments/{attachmentId}", internalOnly(accessSvc, announcementRequestHandler.DeleteAnnouncementRequestAttachment))
+		mux.HandleFunc("POST /announcement-requests/{id}/cases/{caseId}/attachments", internalOnly(accessSvc, announcementRequestHandler.AttachAnnouncementRequestAttachmentsToCase))
 	}
 	if customerHealthHandler != nil {
 		// internalOnly: this is internal CSM risk-tracking data with no

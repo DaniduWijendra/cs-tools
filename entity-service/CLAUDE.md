@@ -8629,11 +8629,18 @@ request and copied onto each case as it is created.
   `announcement_requests`: the CSM portal backend is the gate). It is only the pre-publish
   holding area; what customers see are the per-case copies in `case_attachment`, written
   through the ordinary case attachment path, which is ServiceNow-first under dual-write.
-- **Endpoints (internal callers only, like the rest of this entity).** `POST` and `GET
+- **Endpoints (internal callers only, enforced on the route).** `POST` and `GET
   /announcement-requests/{id}/attachments`, `GET .../attachments/{attachmentId}/content`,
   `DELETE .../attachments/{attachmentId}` and `POST /announcement-requests/{id}/cases/{caseId}/attachments`
-  (the copy). The upload takes `{name, type?, file}` with `file` a base64 data URI, like
-  `POST /attachments`, under the same 15 MiB body limit.
+  (the copy), each registered behind `internalOnly`. A request's files can be an unreleased advisory, they
+  sit in a table with no row-level security, and an upload's actor is whatever the caller names, so only an
+  internal caller gets through: the CSM portal backend (its client id plus a staff user of
+  `CSM_PORTAL_USER_DOMAIN`) and internal machine clients; the customer portal's backend and anyone
+  else get 401/403 (`announcement_attachment_routes_test.go` pins both the refusals and that the
+  CSM backend still gets through). The in-process copy `AutoPublish` makes is not a route and is
+  unaffected. The entity's older announcement-request routes are not behind `internalOnly` (the CSM
+  backend is their gate) and are unchanged by this. The upload takes `{name, type?, file}` with `file` a
+  base64 data URI, like `POST /attachments`, under the same 15 MiB body limit.
 - **What is accepted** (`announcement_request_attachment_file.go`), judged by the file's
   **name**, never its declared type: pdf, png, jpg, jpeg, gif, doc, docx, xls, xlsx, ppt, pptx,
   txt, csv, and the bytes must be that kind of file (`%PDF-` in the first KiB, the image
