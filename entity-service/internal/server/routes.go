@@ -1031,8 +1031,23 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		activitiesHandler = handler.NewCaseHandler(snAttachmentDelegate, cfg.M2MClientIDs)
 	}
 	if db != nil {
+		// A request's files are copied onto each case a publish creates through
+		// the same case service the case attachment routes use (see
+		// activeAttachmentSvc below): under dual-write that is the one that
+		// writes ServiceNow first. A data source whose case service cannot do
+		// it (plain Postgres) answers SupportsAnnouncementAttachments false,
+		// and the announcement endpoints then refuse files rather than store
+		// ones nobody could send.
+		announcementAttachSvc := activeCaseSvc
+		if caseAttachmentOverrideSvc != nil {
+			announcementAttachSvc = caseAttachmentOverrideSvc
+		}
+		announcementAttachFanOut, _ := announcementAttachSvc.(service.CaseAttachmentFanOutClient)
 		announcementRequestHandler = handler.NewAnnouncementRequestHandler(
-			service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
+			service.WithAttachmentFanOut(
+				service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
+				announcementAttachFanOut,
+			),
 		)
 		scheduleHandler = handler.NewScheduleHandler(
 			service.NewScheduleService(repository.NewScheduleRepository(db), accessSvc),
@@ -1780,6 +1795,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("GET /announcement-requests/{id}/updates", announcementRequestHandler.ListAnnouncementRequestUpdates)
 		mux.HandleFunc("POST /announcement-requests/{id}/deliveries", announcementRequestHandler.RecordAnnouncementRequestDeliveries)
 		mux.HandleFunc("GET /announcement-requests/{id}/deliveries", announcementRequestHandler.ListAnnouncementRequestDeliveries)
+		mux.HandleFunc("POST /announcement-requests/{id}/attachments", announcementRequestHandler.CreateAnnouncementRequestAttachment)
+		mux.HandleFunc("GET /announcement-requests/{id}/attachments", announcementRequestHandler.ListAnnouncementRequestAttachments)
+		mux.HandleFunc("GET /announcement-requests/{id}/attachments/{attachmentId}/content", announcementRequestHandler.GetAnnouncementRequestAttachmentContent)
+		mux.HandleFunc("DELETE /announcement-requests/{id}/attachments/{attachmentId}", announcementRequestHandler.DeleteAnnouncementRequestAttachment)
+		mux.HandleFunc("POST /announcement-requests/{id}/cases/{caseId}/attachments", announcementRequestHandler.AttachAnnouncementRequestAttachmentsToCase)
 	}
 	if customerHealthHandler != nil {
 		// internalOnly: this is internal CSM risk-tracking data with no
