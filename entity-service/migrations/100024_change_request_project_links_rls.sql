@@ -62,26 +62,35 @@ CREATE POLICY change_request_deployment_delete ON change_request_deployment
         OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_deployment.change_request_id))
     );
 
-ALTER TABLE change_request_environment ENABLE ROW LEVEL SECURITY;
-ALTER TABLE change_request_environment FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS change_request_environment_visibility ON change_request_environment;
-CREATE POLICY change_request_environment_visibility ON change_request_environment
-    FOR SELECT USING (
-        (SELECT current_setting('app.is_internal', true) = 'true')
-        OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_environment.change_request_id))
-    );
-DROP POLICY IF EXISTS change_request_environment_write ON change_request_environment;
-CREATE POLICY change_request_environment_write ON change_request_environment
-    FOR INSERT WITH CHECK (
-        (SELECT current_setting('app.is_internal', true) = 'true')
-        OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_id))
-    );
-DROP POLICY IF EXISTS change_request_environment_delete ON change_request_environment;
-CREATE POLICY change_request_environment_delete ON change_request_environment
-    FOR DELETE USING (
-        (SELECT current_setting('app.is_internal', true) = 'true')
-        OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_environment.change_request_id))
-    );
+-- Only where the table still exists. 0192_change_request_drop_environments
+-- drops it, and every runner applies this track after every 4-digit file, so
+-- on a database that has not recorded this file yet (a fresh one included)
+-- the table is already gone and an unguarded ALTER TABLE stops the run with
+-- `relation "change_request_environment" does not exist`.
+DO $$ BEGIN
+    IF to_regclass('change_request_environment') IS NOT NULL THEN
+        ALTER TABLE change_request_environment ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE change_request_environment FORCE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS change_request_environment_visibility ON change_request_environment;
+        CREATE POLICY change_request_environment_visibility ON change_request_environment
+            FOR SELECT USING (
+                (SELECT current_setting('app.is_internal', true) = 'true')
+                OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_environment.change_request_id))
+            );
+        DROP POLICY IF EXISTS change_request_environment_write ON change_request_environment;
+        CREATE POLICY change_request_environment_write ON change_request_environment
+            FOR INSERT WITH CHECK (
+                (SELECT current_setting('app.is_internal', true) = 'true')
+                OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_id))
+            );
+        DROP POLICY IF EXISTS change_request_environment_delete ON change_request_environment;
+        CREATE POLICY change_request_environment_delete ON change_request_environment
+            FOR DELETE USING (
+                (SELECT current_setting('app.is_internal', true) = 'true')
+                OR is_project_member((SELECT wi.project_id FROM work_item wi WHERE wi.id = change_request_environment.change_request_id))
+            );
+    END IF;
+END $$;
 
 ALTER TABLE change_request_deployed_product ENABLE ROW LEVEL SECURITY;
 ALTER TABLE change_request_deployed_product FORCE ROW LEVEL SECURITY;
