@@ -32,6 +32,11 @@
 -- already ran, and 000086 is a no-op after this one. 000086 stays as it is,
 -- since databases have it recorded by filename. See 000086 for the reasoning
 -- behind each column, the missing foreign key and the unique key.
+--
+-- One transaction, so a failure leaves no enum without its table. The plural
+-- name is 000086's and 0213 alters it under that name, so it is kept: see the
+-- table-naming note in entity-service/CLAUDE.md.
+BEGIN;
 
 DO $$ BEGIN
     -- The `event` string the webhook body carries.
@@ -69,3 +74,5 @@ CREATE TABLE IF NOT EXISTS cloud_status_events (
 CREATE INDEX IF NOT EXISTS idx_cloud_status_events_undelivered
     ON cloud_status_events (created_on)
     WHERE delivered IS FALSE;
+
+COMMIT;
