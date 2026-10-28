@@ -55,7 +55,15 @@
 -- IF EXISTS, matching every other migration in this track -- see
 -- 100002_case_escalation_rls.sql's identical note for why (Postgres has no
 -- CREATE POLICY IF NOT EXISTS).
+--
+-- ENABLE / FORCE ROW LEVEL SECURITY, DROP POLICY and CREATE POLICY each take
+-- an ACCESS EXCLUSIVE lock on their table, which waits behind every open
+-- transaction that has read or written it and holds up every reader and
+-- writer queued after it; csm-sync-service writes change_request_deployment
+-- too. lock_timeout makes a busy table fail the file instead, and the
+-- transaction keeps nothing; run it again.
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE change_request_deployment ENABLE ROW LEVEL SECURITY;
 ALTER TABLE change_request_deployment FORCE ROW LEVEL SECURITY;
