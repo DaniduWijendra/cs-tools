@@ -27,15 +27,23 @@
 -- any collation, not by a name comparison that a locale-aware sort could
 -- reorder. It needs only `outage` (0083).
 --
--- Same definition as 000105, every statement IF NOT EXISTS: a no-op wherever
--- 000105 already ran, and 000105 is a no-op after this one. 000105 stays as
--- it is, since databases have it recorded by filename. See 000105 for why
--- this is a table rather than outage.external_outage_communications.
+-- Same definition as 000105, table and index both IF NOT EXISTS: a no-op
+-- wherever 000105 already ran, and 000105 is a no-op after this one. 000105
+-- stays as it is, since databases have it recorded by filename. See 000105
+-- for why this is a table rather than outage.external_outage_communications.
 --
--- No BEGIN/COMMIT: every statement is guarded, so a run that stops partway
--- is finished by the next one, and migrate-and-seed.sh applies this file with
+-- Where the table already exists, CREATE INDEX IF NOT EXISTS still takes a
+-- SHARE lock on it before it finds the index. Where it does not, the foreign
+-- key takes a SHARE ROW EXCLUSIVE lock on outage. Either lock waits behind
+-- open writes and holds up the writes queued after it, so lock_timeout makes
+-- a busy table fail the file instead; run it again.
+--
+-- No BEGIN/COMMIT: both CREATEs are guarded, so a run that stops partway is
+-- finished by the next one, and migrate-and-seed.sh applies this file with
 -- `psql -1` in one transaction with its tracking insert, which a COMMIT here
 -- would split.
+SET lock_timeout = '5s';
+
 CREATE TABLE IF NOT EXISTS outage_communication (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     outage_id UUID NOT NULL REFERENCES outage(id) ON DELETE CASCADE,
@@ -50,3 +58,5 @@ CREATE TABLE IF NOT EXISTS outage_communication (
 -- Every read is for one outage, and the lists read its rows newest first.
 CREATE INDEX IF NOT EXISTS idx_outage_communication_outage
     ON outage_communication (outage_id, created_on DESC);
+
+RESET lock_timeout;
