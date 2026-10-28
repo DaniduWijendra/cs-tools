@@ -31,8 +31,11 @@
 -- 000105 already ran, and 000105 is a no-op after this one. 000105 stays as
 -- it is, since databases have it recorded by filename. See 000105 for why
 -- this is a table rather than outage.external_outage_communications.
-BEGIN;
-
+--
+-- No BEGIN/COMMIT: every statement is guarded, so a run that stops partway
+-- is finished by the next one, and migrate-and-seed.sh applies each file with
+-- `psql -1` in one transaction with its tracking insert, which a COMMIT here
+-- would split.
 CREATE TABLE IF NOT EXISTS outage_communication (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     outage_id UUID NOT NULL REFERENCES outage(id) ON DELETE CASCADE,
@@ -47,5 +50,3 @@ CREATE TABLE IF NOT EXISTS outage_communication (
 -- The endpoint's only access path: one outage, newest first.
 CREATE INDEX IF NOT EXISTS idx_outage_communication_outage
     ON outage_communication (outage_id, created_on DESC);
-
-COMMIT;

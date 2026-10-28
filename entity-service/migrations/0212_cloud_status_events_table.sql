@@ -33,11 +33,13 @@
 -- since databases have it recorded by filename. See 000086 for the reasoning
 -- behind each column, the missing foreign key and the unique key.
 --
--- One transaction, so a failure leaves no enum without its table. The plural
--- name is 000086's and 0213 alters it under that name, so it is kept: see the
--- table-naming note in entity-service/CLAUDE.md.
-BEGIN;
-
+-- The plural name is 000086's and 0213 alters it under that name, so it is
+-- kept: see the table-naming note in entity-service/CLAUDE.md.
+--
+-- No BEGIN/COMMIT: every statement is guarded, so a run that stops partway
+-- is finished by the next one, and migrate-and-seed.sh applies each file with
+-- `psql -1` in one transaction with its tracking insert, which a COMMIT here
+-- would split.
 DO $$ BEGIN
     -- The `event` string the webhook body carries.
     CREATE TYPE cloud_status_event_enum AS ENUM (
@@ -74,5 +76,3 @@ CREATE TABLE IF NOT EXISTS cloud_status_events (
 CREATE INDEX IF NOT EXISTS idx_cloud_status_events_undelivered
     ON cloud_status_events (created_on)
     WHERE delivered IS FALSE;
-
-COMMIT;
