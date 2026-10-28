@@ -52,9 +52,8 @@
 -- the table together with its three policies.
 --
 -- One transaction, and every CREATE POLICY preceded by its own DROP POLICY
--- IF EXISTS, matching every other migration in this track -- see
--- 100002_case_escalation_rls.sql's identical note for why (Postgres has no
--- CREATE POLICY IF NOT EXISTS).
+-- IF EXISTS, as in 100002_case_escalation_rls.sql -- see its note for why
+-- (Postgres has no CREATE POLICY IF NOT EXISTS).
 --
 -- ENABLE / FORCE ROW LEVEL SECURITY, DROP POLICY and CREATE POLICY each take
 -- an ACCESS EXCLUSIVE lock on their table, which waits behind every open
