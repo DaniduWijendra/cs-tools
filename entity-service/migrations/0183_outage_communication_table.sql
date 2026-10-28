@@ -39,9 +39,9 @@
 CREATE TABLE IF NOT EXISTS outage_communication (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     outage_id UUID NOT NULL REFERENCES outage(id) ON DELETE CASCADE,
-    -- Verbatim, including ServiceNow's [code]...[/code] wrappers around
-    -- HTML. The frontend renders what it is given, so stripping them here
-    -- would change how every existing update displays.
+    -- Verbatim, including the [code]...[/code] wrappers the backing data
+    -- source puts around HTML. The frontend renders what it is given, so
+    -- stripping them here would change how existing updates display.
     comment TEXT NOT NULL,
     created_on TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_by VARCHAR(255)
