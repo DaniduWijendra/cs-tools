@@ -19,7 +19,7 @@
 -- The table and its enum are defined by the legacy straggler
 -- 000086_create_cloud_status_events, which every runner (make migrate,
 -- generate_schema_bootstrap.sh, the compose stack's migrate-and-seed.sh)
--- applies LAST, after every 4-digit file. 0213_cloud_status_event_delivery_lease
+-- applies after every 4-digit file. 0213_cloud_status_event_delivery_lease
 -- alters this table, so on a fresh database it would run before the table
 -- existed and stop the whole run:
 -- `relation "cloud_status_events" does not exist`.
@@ -30,14 +30,14 @@
 --
 -- Same definition as 000086, every statement guarded: a no-op wherever 000086
 -- already ran, and 000086 is a no-op after this one. 000086 stays as it is,
--- since databases have it recorded by filename. See 000086 for the reasoning
--- behind each column, the missing foreign key and the unique key.
+-- since databases have it recorded by filename. See 000086 for the notes on
+-- the columns, the missing foreign key and the unique key.
 --
 -- The plural name is 000086's and 0213 alters it under that name, so it is
 -- kept: see the table-naming note in entity-service/CLAUDE.md.
 --
 -- No BEGIN/COMMIT: every statement is guarded, so a run that stops partway
--- is finished by the next one, and migrate-and-seed.sh applies each file with
+-- is finished by the next one, and migrate-and-seed.sh applies this file with
 -- `psql -1` in one transaction with its tracking insert, which a COMMIT here
 -- would split.
 DO $$ BEGIN

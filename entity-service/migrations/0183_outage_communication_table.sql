@@ -18,9 +18,9 @@
 --
 -- The table is defined by the legacy straggler 000105_outage_communications,
 -- and every runner (make migrate, generate_schema_bootstrap.sh, the compose
--- stack's migrate-and-seed.sh) applies those stragglers LAST, after every
--- 4-digit file. 0184_outage_communication_channel alters this table, so on a
--- fresh database it ran before the table existed and stopped the whole run:
+-- stack's migrate-and-seed.sh) applies those stragglers after every 4-digit
+-- file. 0184_outage_communication_channel alters this table, so on a fresh
+-- database it ran before the table existed and stopped the whole run:
 -- `relation "outage_communication" does not exist`.
 --
 -- Numbered 0183 rather than 0184 so it sorts ahead of both 0184 files under
@@ -33,7 +33,7 @@
 -- this is a table rather than outage.external_outage_communications.
 --
 -- No BEGIN/COMMIT: every statement is guarded, so a run that stops partway
--- is finished by the next one, and migrate-and-seed.sh applies each file with
+-- is finished by the next one, and migrate-and-seed.sh applies this file with
 -- `psql -1` in one transaction with its tracking insert, which a COMMIT here
 -- would split.
 CREATE TABLE IF NOT EXISTS outage_communication (
@@ -47,6 +47,6 @@ CREATE TABLE IF NOT EXISTS outage_communication (
     created_by VARCHAR(255)
 );
 
--- The endpoint's only access path: one outage, newest first.
+-- Every read is for one outage, and the lists read its rows newest first.
 CREATE INDEX IF NOT EXISTS idx_outage_communication_outage
     ON outage_communication (outage_id, created_on DESC);
