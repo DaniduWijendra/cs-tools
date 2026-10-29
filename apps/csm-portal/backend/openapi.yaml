@@ -14,7 +14,7 @@ info:
     | `view_operations` | the same reads under `/incidents`, `/change-requests`, `/problems`, `/incident-tasks`, `/outages`, `/alerts`, `/smart-alerts` | cs-engineer, admin |
     | `time_cards_and_updates` | every `/time-cards` route and `GET /updates/product-update-levels`, `POST /updates/levels/search` | cs-engineer, time-card-approver, admin |
     | `approve_time_card` | `PATCH /time-cards/{id}` when the body sets `state` (approve/reject) | time-card-approver, admin |
-    | `escalate` | `POST /cases/{id}/escalations` | cs_engineer, escalator, admin (de-escalating also requires being one of the case's ABT team leads) |
+    | `escalate` | `POST /cases/{id}/escalations` with `action=ESCALATE` (the route itself needs only `view`) | cs_engineer, escalator, admin. De-escalating does not use this permission: it requires being one of the case's ABT team leads, with no other role beyond `view`, and holding `escalate` does not substitute |
     | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` | attachment-downloader, cs-engineer, admin |
     | `create_work_note` | `POST /cases/{id}/comments` with `type=work_note` (internal note) — and nothing else | worknote-creator, cs-engineer, admin |
     | `manage_onboarding` | `PATCH /projects/{id}` when the body sets `onboardingStatus`, `onboardingOwner` or any of the four onboarding dates; any other field in that body still needs `write` | onboarding-lead, admin |
@@ -1046,6 +1046,11 @@ paths:
         Raises or lowers a case's escalation level by one step. A work note
         recording the change is added to the case automatically as a side
         effect. Supported by the ServiceNow data source only.
+
+        Authorization depends on the action. `ESCALATE` requires the
+        `escalate` permission. `DEESCALATE` requires the caller to be one of
+        the case's ABT team leads; no escalation role is needed, but holding
+        one does not substitute for being the lead.
       operationId: postCasesIdEscalations
       parameters:
         - name: id
@@ -1082,7 +1087,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
         "403":
-          description: Forbidden
+          description: Forbidden — escalating without the `escalate` permission, or de-escalating without being one of the case's team leads.
           content:
             application/json:
               schema:

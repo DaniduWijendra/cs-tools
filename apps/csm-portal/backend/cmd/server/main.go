@@ -418,7 +418,11 @@ func main() {
 	route("DELETE /comments/{id}", handler.PermUpdateDeleteComment, commentHandler.DeleteComment)
 	route("POST /cases/{id}/activities/search", handler.PermView, caseHandler.SearchCaseActivities)
 	route("GET /cases/{id}/escalations", handler.PermView, caseHandler.GetCaseEscalations)
-	route("POST /cases/{id}/escalations", handler.PermEscalate, caseHandler.CreateCaseEscalation)
+	// PermView is only the floor here: the action-dependent rule lives in
+	// CreateCaseEscalation (ESCALATE needs PermEscalate; DEESCALATE needs
+	// being one of the case's team leads, with no escalation role), which a
+	// route permission cannot express because it depends on the body and the case.
+	route("POST /cases/{id}/escalations", handler.PermView, caseHandler.CreateCaseEscalation)
 	route("POST /attachments", handler.PermWrite, caseHandler.CreateCaseAttachment)
 	route("POST /attachments/search", handler.PermView, caseHandler.SearchCaseAttachments)
 	route("GET /attachments/{id}/content", handler.PermDownloadAttachment, caseHandler.GetCaseAttachmentContent)
