@@ -306,10 +306,10 @@ func (c *WSClient) SendSideChannel(ctx context.Context, sessionID, payload strin
 // caller and would panic on a nil one, so this exists rather than a nil check
 // that quietly changes what that function means.
 //
-// Errors only when the message could not be delivered. A read timeout is not an
-// error: the write succeeded, so the agent most likely recorded it, and the
-// caller is a best-effort notification that must not fail the operation it
-// reports on.
+// Errors when the message could not be delivered, or when the agent answers
+// with an error event. A read timeout is not an error: the write succeeded, so
+// the agent most likely recorded it, and the caller is a best-effort
+// notification that must not fail the operation it reports on.
 func (c *WSClient) NotifyAgent(ctx context.Context, sessionID, payload string) error {
 	conn, err := c.dial(ctx, sessionID)
 	if err != nil {
@@ -322,14 +322,18 @@ func (c *WSClient) NotifyAgent(ctx context.Context, sessionID, payload string) e
 		return fmt.Errorf("aichatagent: write notification: %w", err)
 	}
 
+	// One deadline for the whole exchange, set before the loop rather than
+	// inside it. Refreshing it per frame would let an upstream sending
+	// non-terminal frames faster than sideChannelTimeout keep this waiting
+	// indefinitely — and the caller is on a request path.
+	deadline := time.Now().Add(sideChannelTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	_ = conn.SetReadDeadline(deadline)
+
 	acknowledged := false
 	for {
-		deadline := time.Now().Add(sideChannelTimeout)
-		if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-			deadline = dl
-		}
-		_ = conn.SetReadDeadline(deadline)
-
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			// Includes the read timeout and a normal upstream close.
@@ -343,7 +347,13 @@ func (c *WSClient) NotifyAgent(ctx context.Context, sessionID, payload string) e
 		if raw, ok := parsed[eventTypeKey]; ok {
 			_ = json.Unmarshal(raw, &evtType)
 		}
-		if evtType == eventEscalationAck || evtType == eventError {
+		if evtType == eventError {
+			// The agent received the message and refused it. Distinct from
+			// silence, and the only way the caller learns the notification was
+			// rejected rather than merely unacknowledged.
+			return fmt.Errorf("aichatagent: agent returned an error for the notification")
+		}
+		if evtType == eventEscalationAck {
 			acknowledged = true
 			break
 		}
