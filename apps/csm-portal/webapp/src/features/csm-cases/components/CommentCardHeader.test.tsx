@@ -60,4 +60,15 @@ describe("CommentCardHeader", () => {
     // Both columns share one row.
     expect(content.parentElement).toBe(first.parentElement?.parentElement);
   });
+
+  it("lets a long unbroken token wrap, so it cannot run under the actions", () => {
+    render(
+      <CommentCardHeader actions={<button type="button">Act</button>}>
+        <span>Averyveryverylongunbrokenname1234567890</span>
+      </CommentCardHeader>,
+    );
+    const content = screen.getByText("Averyveryverylongunbrokenname1234567890")
+      .parentElement as HTMLElement;
+    expect(content).toHaveStyle({ overflowWrap: "anywhere" });
+  });
 });

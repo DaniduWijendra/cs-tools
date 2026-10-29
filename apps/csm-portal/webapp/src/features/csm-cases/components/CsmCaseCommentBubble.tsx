@@ -393,14 +393,27 @@ export default function CsmCaseCommentBubble({
             dangerouslySetInnerHTML={{ __html: renderHtml }}
           />
         )}
-        <Typography variant="caption" color="text.secondary">
-          <RelativeTime
-            iso={comment.createdAt}
-            href={`#${comment.id}`}
-            hideCopyButton
-          />
-        </Typography>
-        <CopyPermalinkButton href={`#${comment.id}`} />
+        {/* Top-aligned, so a message that wraps onto several lines keeps the
+            time and the copy-link button in the row's top-right corner (the
+            row itself centres its other items). */}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            alignSelf: "flex-start",
+            flexShrink: 0,
+            gap: 1,
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            <RelativeTime
+              iso={comment.createdAt}
+              href={`#${comment.id}`}
+              hideCopyButton
+            />
+          </Typography>
+          <CopyPermalinkButton href={`#${comment.id}`} />
+        </Box>
       </Box>
     );
   }

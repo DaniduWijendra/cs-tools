@@ -634,6 +634,10 @@ describe("CsmCaseCommentBubble", () => {
         permalink.compareDocumentPosition(copy) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
+      // The time and the button are one right-hand block (top-aligned in the
+      // row, so a wrapping message keeps them in the corner), not two loose
+      // items of the row.
+      expect(permalink.parentElement?.parentElement).toBe(copy.parentElement);
     });
   });
 

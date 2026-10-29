@@ -48,6 +48,11 @@ export default function CommentCardHeader({
           gap: 1,
           flex: 1,
           minWidth: 0,
+          // One long unbroken token (an author name) breaks anywhere rather
+          // than running out of the column and under the actions. `anywhere`,
+          // unlike `break-word`, also lowers the token's min-content width, so
+          // the column can shrink to fit.
+          overflowWrap: "anywhere",
           // The height of a small icon-button, so a one-line header centres
           // on the buttons beside it instead of sitting a few pixels above.
           minHeight: 26,
