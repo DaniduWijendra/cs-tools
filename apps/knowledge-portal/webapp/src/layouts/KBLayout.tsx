@@ -16,7 +16,6 @@
 
 import {
   Box,
-  Button,
   ColorSchemeToggle,
   Container,
   GlobalStyles,
@@ -66,8 +65,9 @@ const isEditable = (target: EventTarget | null): boolean => {
 
 /**
  * Shell for every page of the public knowledge portal. The site is public:
- * no sign-in, no user menu. A sticky header with the brand, a search box on
- * pages that lack their own, the page content and a footer.
+ * no sign-in, no user menu, no navigation beyond the brand. A sticky header
+ * with the brand and a search box on pages that lack their own, the page
+ * content and a footer.
  */
 export default function KBLayout(): JSX.Element {
   const mainRef = useRef<HTMLElement>(null);
@@ -212,15 +212,6 @@ export default function KBLayout(): JSX.Element {
               />
             </Box>
           )}
-          <Button
-            component={Link}
-            to={browseUrl()}
-            color="inherit"
-            size="small"
-            sx={{ display: { xs: "none", sm: "inline-flex" }, mr: 1, fontWeight: 600 }}
-          >
-            Browse all
-          </Button>
           <ColorSchemeToggle />
         </HeaderUI>
       </Box>
