@@ -29,6 +29,7 @@ import { useEffect, useRef, useState, type JSX, type MouseEvent } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router";
 import BackToTop from "@components/BackToTop";
 import { accessibleLinkSx } from "@config/a11yThemeOverrides";
+import { opaquePaper } from "@config/colorUtils";
 import SearchBox, { SEARCH_INPUT_ATTR } from "@features/kb/components/SearchBox";
 import { useRouteChangeReset } from "@hooks/useRouteChangeReset";
 import { browseUrl } from "@utils/browseUrl";
@@ -133,17 +134,21 @@ export default function KBLayout(): JSX.Element {
         href={`#${MAIN_ID}`}
         onClick={skipToContent}
         sx={[
-          {
+          (theme) => ({
             position: "absolute",
             left: 8,
             top: -64,
-            zIndex: (theme) => theme.zIndex.tooltip + 1,
+            zIndex: theme.zIndex.tooltip + 1,
             px: 2,
             py: 1,
             borderRadius: 1,
-            bgcolor: "background.paper",
+            border: 1,
+            borderColor: "divider",
+            boxShadow: 3,
+            fontWeight: 600,
+            bgcolor: opaquePaper(theme, 1),
             "&:focus": { top: 8 },
-          },
+          }),
           accessibleLinkSx,
         ]}
       >
