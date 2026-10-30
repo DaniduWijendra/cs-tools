@@ -16,7 +16,15 @@
 
 /* eslint-disable react-refresh/only-export-components -- Provider component and its useXxx hook are colocated per the repo's context idiom (fast-refresh DX only) */
 
-import { createContext, useContext, useMemo, useRef, type JSX, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  type JSX,
+  type ReactNode,
+} from "react";
 import type { EncodedAttachment } from "@components/attachments/encodeAttachment";
 
 /** The user-entered values of the New service request form. */
@@ -56,9 +64,11 @@ const NewServiceRequestDraftContext = createContext<NewServiceRequestDraftStore>
  * Keeps the New service request form's draft in memory for as long as this
  * provider stays mounted, so leaving `/operations/service-requests/new` for
  * another route (e.g. an open case tab) and coming back does not lose what was
- * entered. Deliberately in-memory only: a reload or sign-out starts with an
- * empty form. Held in a ref, not state, so saving a keystroke never re-renders
- * the tree above the routes.
+ * entered. Deliberately in-memory only: a reload starts with an empty form, and
+ * the draft is dropped when a sign-out begins (the `app:signing-out` event every
+ * manual and idle sign-out dispatches) so it never outlives the user it belongs
+ * to. Held in a ref, not state, so saving a keystroke never re-renders the tree
+ * above the routes.
  */
 export function NewServiceRequestDraftProvider({
   children,
@@ -78,6 +88,13 @@ export function NewServiceRequestDraftProvider({
     }),
     [],
   );
+  useEffect(() => {
+    const discard = (): void => {
+      draftRef.current = undefined;
+    };
+    window.addEventListener("app:signing-out", discard);
+    return () => window.removeEventListener("app:signing-out", discard);
+  }, []);
   return (
     <NewServiceRequestDraftContext.Provider value={store}>
       {children}

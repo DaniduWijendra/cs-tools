@@ -361,6 +361,65 @@ describe("CreateServiceRequestPage draft retention across in-app tab switches", 
     expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("project-value")).toBeEmptyDOMElement();
   });
+
+  it("keeps a newer draft when the create that was in flight finishes later", async () => {
+    let finishCreate: (created: { id: string }) => void = () => undefined;
+    postCaseMutateAsyncMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    );
+    renderApp();
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "Create service request" }));
+    await waitFor(() => expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(1));
+
+    // Reopened mid-create, the engineer starts a new request...
+    switchAwayAndBack();
+    fireEvent.click(screen.getByText("Pick project B"));
+
+    // ...and the first one is then created: that must not discard the new draft.
+    finishCreate({ id: "case-1" });
+    await waitFor(() => expect(navigateMock).toHaveBeenCalled());
+    switchAwayAndBack();
+
+    expect(screen.getByTestId("project-value")).toHaveTextContent("proj-b");
+  });
+
+  it("keeps a draft under the entry it was started from when the route is reached with another entry", () => {
+    renderApp();
+    fillForm();
+
+    // Same route, different entry (a locked project): the form stays mounted
+    // with what was entered, which belongs to the entry it was started from.
+    fireEvent.click(screen.getByText("Project page"));
+    switchAwayAndBack();
+
+    expect(screen.getByTestId("project-value")).toHaveTextContent("proj-a");
+    expect(screen.getByLabelText(/Request Details/)).toHaveValue("Please restart the service");
+  });
+
+  it("does not hand a draft to a different entry of the same route", () => {
+    renderApp();
+    fillForm();
+    fireEvent.click(screen.getByText("Project page"));
+    fireEvent.click(screen.getByText("Case tab"));
+    fireEvent.click(screen.getByText("Project page"));
+
+    expect(screen.getByTestId("project-value")).toHaveTextContent("proj-z");
+    expect(screen.queryByLabelText(/Request Details/)).not.toBeInTheDocument();
+  });
+
+  it("drops the draft when a sign-out begins", () => {
+    renderApp();
+    fillForm();
+
+    window.dispatchEvent(new CustomEvent("app:signing-out"));
+    switchAwayAndBack();
+
+    expect(screen.getByTestId("project-value")).toBeEmptyDOMElement();
+    expect(screen.queryByLabelText(/Request Details/)).not.toBeInTheDocument();
+  });
 });
 
 describe("CreateServiceRequestPage opened from a case", () => {

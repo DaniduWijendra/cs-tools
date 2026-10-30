@@ -123,6 +123,11 @@ export default function CreateServiceRequestPage(): JSX.Element {
     const draft = draftStore.get();
     return draft?.entryKey === entryKey ? draft : undefined;
   });
+  // The entry this form was started from. What is entered belongs to it: if the
+  // same route is reached again with another entry while the form stays mounted,
+  // the initialisers below do not run again, so the values on screen must not be
+  // saved under the new entry's key.
+  const [startedFrom] = useState(entryKey);
 
   const [projectId, setProjectId] = useState(restored?.projectId ?? lockedProjectId);
   const [deploymentId, setDeploymentId] = useState(
@@ -208,7 +213,7 @@ export default function CreateServiceRequestPage(): JSX.Element {
   // failed create flips `submitting` back and the draft is saved again.
   const submitted = useRef(false);
   useEffect(() => {
-    if (submitted.current || submitting) return;
+    if (submitted.current || submitting || entryKey !== startedFrom) return;
     draftStore.set({
       entryKey,
       projectId,
@@ -222,6 +227,7 @@ export default function CreateServiceRequestPage(): JSX.Element {
   }, [
     draftStore,
     entryKey,
+    startedFrom,
     projectId,
     deploymentId,
     deployedProductId,
@@ -376,8 +382,11 @@ export default function CreateServiceRequestPage(): JSX.Element {
         variables: variablePayload,
         relatedCaseId,
       });
+      // The draft was cleared when this create started and nothing has saved one
+      // since (the mirroring effect holds off while `submitting`), so none of this
+      // submission is left to clear. Clearing again here would discard a draft
+      // that a form reopened mid-create has started since.
       submitted.current = true;
-      draftStore.clear();
       // The create endpoint doesn't attach files for service requests, so upload
       // them to the new case afterwards. A partial failure still lands the case.
       const failed = await uploadAttachmentsToCase(
