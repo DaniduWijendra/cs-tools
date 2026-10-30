@@ -52,7 +52,7 @@ export default function KBBrowsePage(): JSX.Element {
   const search = useArticleSearch({ knowledgeBaseId, searchQuery });
 
   const knowledgeBases = kbData?.knowledgeBases ?? [];
-  const counts = useKnowledgeBaseCounts(knowledgeBases.map((kb) => kb.id));
+  const { counts } = useKnowledgeBaseCounts(knowledgeBases.map((kb) => kb.id));
   const selectedKb = knowledgeBases.find((kb) => kb.id === knowledgeBaseId);
   const kbTitle = (id: string): string | undefined => knowledgeBases.find((kb) => kb.id === id)?.title;
 

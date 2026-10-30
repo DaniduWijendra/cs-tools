@@ -237,16 +237,20 @@ function ArticleView({ article, knowledgeBaseTitle, relatedArticles }: ArticleVi
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>(`[${CODE_COPY_ATTR}]`);
     if (!button) return;
     const code = button.parentElement?.querySelector("pre")?.textContent ?? "";
-    void navigator.clipboard
-      .writeText(code)
-      .then(() => {
+    // navigator.clipboard is undefined outside a secure context (plain http),
+    // so the call itself can throw: catch synchronously as well as the promise.
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(code);
         button.textContent = "Copied";
         window.setTimeout(() => {
           button.textContent = "Copy";
         }, 2000);
         setNotice("Code copied to clipboard");
-      })
-      .catch(() => setNotice("The code could not be copied"));
+      } catch {
+        setNotice("The code could not be copied");
+      }
+    })();
   };
 
   const rail = (

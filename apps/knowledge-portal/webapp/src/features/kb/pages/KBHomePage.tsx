@@ -63,7 +63,7 @@ export default function KBHomePage(): JSX.Element {
   const featured = allKnowledgeBases.slice(0, FEATURED_KB_LIMIT);
   const quickLinks = allKnowledgeBases.slice(0, QUICK_LINK_LIMIT);
   const hasMore = allKnowledgeBases.length > FEATURED_KB_LIMIT;
-  const counts = useKnowledgeBaseCounts(featured.map((kb) => kb.id));
+  const { counts, pending: countPending } = useKnowledgeBaseCounts(featured.map((kb) => kb.id));
   const kbTitle = (id: string): string | undefined => allKnowledgeBases.find((kb) => kb.id === id)?.title;
 
   const recentArticles = recent.articles.slice(0, RECENT_LIMIT);
@@ -191,7 +191,7 @@ export default function KBHomePage(): JSX.Element {
                   id={kb.id}
                   title={kb.title}
                   count={counts[kb.id]}
-                  countLoading={counts[kb.id] === undefined && kbs.isSuccess}
+                  countLoading={counts[kb.id] === undefined && countPending[kb.id] === true}
                 />
               </Grid>
             ))}

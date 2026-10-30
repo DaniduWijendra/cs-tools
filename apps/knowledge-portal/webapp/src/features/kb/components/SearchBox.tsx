@@ -95,10 +95,17 @@ export default function SearchBox({
   const { data: kbData } = useKnowledgeBases();
   const kbTitle = (id: string): string | undefined => kbData?.knowledgeBases.find((kb) => kb.id === id)?.title;
 
-  const articles = suggestActive && debounced.length >= MIN_SUGGESTION_CHARS ? (results.data?.articles ?? []) : [];
+  // Options come only from results for the current draft. While the debounce
+  // or the request is still catching up, the previous query's results (kept as
+  // placeholder data) must not be selectable, or Enter could open an article
+  // that matched an earlier draft.
+  const resultsCurrent = typed === debounced && !results.isPlaceholderData;
+  const articles =
+    suggestActive && resultsCurrent && debounced.length >= MIN_SUGGESTION_CHARS ? (results.data?.articles ?? []) : [];
   const options: Option[] = articles.length > 0 ? [...articles.map((article) => ({ kind: "article" as const, article })), { kind: "all" }] : [];
-  const settledEmpty = suggestActive && results.isSuccess && !results.isFetching && articles.length === 0;
-  const open = suggestActive && (options.length > 0 || results.isFetching || settledEmpty);
+  const settledEmpty = suggestActive && resultsCurrent && results.isSuccess && !results.isFetching && articles.length === 0;
+  // Stay open (showing "Searching") while catching up, so the list does not flicker closed between keystrokes.
+  const open = suggestActive && (options.length > 0 || results.isFetching || settledEmpty || !resultsCurrent);
   const optionId = (index: number): string => `${listId}-option-${index}`;
 
   const close = (): void => {

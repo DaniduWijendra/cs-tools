@@ -123,7 +123,9 @@ export default function KBLayout(): JSX.Element {
     <Box sx={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <GlobalStyles
         styles={{
-          "@media (prefers-reduced-motion: no-preference)": { html: { scrollBehavior: "smooth" } },
+          // No global smooth scrolling: useRouteChangeReset must land at the top
+          // instantly on navigation. The outline and Back to top ask for smooth
+          // scrolling explicitly where it helps.
           "@media print": {
             ".kb-no-print": { display: "none !important" },
             body: { background: "#fff" },

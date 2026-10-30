@@ -170,16 +170,25 @@ export function useSearchSuggestions(query: string, enabled: boolean) {
 
 export type KnowledgeBaseCounts = Record<string, number | undefined>;
 
+export interface KnowledgeBaseCountsResult {
+  /** Loaded counts by knowledge base id; absent while loading or after a failure. */
+  counts: KnowledgeBaseCounts;
+  /** True for a knowledge base whose count is still being fetched, so a failed one is not mistaken for a pending one. */
+  pending: Record<string, boolean>;
+}
+
 /**
  * Article count per knowledge base, one request each, cached for five
  * minutes. A count that fails to load is simply absent: the cards and filters
  * render without a number rather than with an error.
  */
-export function useKnowledgeBaseCounts(ids: readonly string[]): KnowledgeBaseCounts {
+export function useKnowledgeBaseCounts(ids: readonly string[]): KnowledgeBaseCountsResult {
   const key = ids.join("\u0000");
   const combine = useCallback(
-    (results: UseQueryResult<number>[]): KnowledgeBaseCounts =>
-      Object.fromEntries(ids.map((id, index) => [id, results[index]?.data])),
+    (results: UseQueryResult<number>[]): KnowledgeBaseCountsResult => ({
+      counts: Object.fromEntries(ids.map((id, index) => [id, results[index]?.data])),
+      pending: Object.fromEntries(ids.map((id, index) => [id, results[index]?.isPending ?? false])),
+    }),
     // `key` stands in for the array identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key],

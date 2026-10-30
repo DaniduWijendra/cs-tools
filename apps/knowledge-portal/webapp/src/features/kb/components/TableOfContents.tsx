@@ -35,8 +35,14 @@ export default function TableOfContents({ headings, minHeadings = 2 }: TableOfCo
     const target = document.getElementById(id);
     if (!target) return; // let the browser handle the hash
     event.preventDefault();
+    // Headings come from article HTML and are not focusable; make this one
+    // programmatically focusable so the next Tab continues from the section
+    // the reader chose, not from the outline.
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
     target.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
-    window.history.replaceState(null, "", `#${id}`);
+    target.focus({ preventScroll: true });
+    // Keep the router's own history state; only the fragment changes.
+    window.history.replaceState(window.history.state, "", `#${id}`);
   };
 
   return (

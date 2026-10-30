@@ -104,6 +104,35 @@ describe("SearchBox suggestions", () => {
     expect(onSearch).not.toHaveBeenCalled();
   });
 
+  it("never offers the previous query's articles while a newer draft is still loading", async () => {
+    vi.mocked(searchArticles).mockResolvedValue({
+      articles: [article("a1", "Gateway timeout")],
+      total: 1,
+      limit: 5,
+      offset: 0,
+      hasMore: false,
+    });
+    const onSearch = renderBox();
+    const input = screen.getByRole("searchbox", { name: "Search articles" });
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "gate" } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(await screen.findAllByRole("option")).toHaveLength(2);
+
+    // Keep typing: the old options must disappear before the new request settles.
+    fireEvent.change(input, { target: { value: "gatez" } });
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.getByText("Searching…")).toBeInTheDocument();
+
+    // Enter during that window submits the draft rather than opening the stale article.
+    fireEvent.submit(input.closest("form")!);
+    expect(onSearch).toHaveBeenCalledWith("gatez");
+    expect(screen.getByTestId("location")).toHaveTextContent("/");
+  });
+
   it("submits a plain search when nothing is highlighted and does not query for one character", async () => {
     vi.mocked(searchArticles).mockResolvedValue({ articles: [], total: 0, limit: 5, offset: 0, hasMore: false });
     const onSearch = renderBox();
