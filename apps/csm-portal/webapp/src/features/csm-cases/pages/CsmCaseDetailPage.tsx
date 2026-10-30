@@ -130,9 +130,9 @@ import { useAddCaseTag, useRemoveCaseTag } from "@features/csm-cases/api/useCase
 import { useGetCsmCaseEscalations } from "@features/csm-cases/api/useGetCsmCaseEscalations";
 import { usePostCsmCaseEscalation } from "@features/csm-cases/api/usePostCsmCaseEscalation";
 import {
-  canDeescalate,
-  canEscalateFurther,
   isEscalationLevelUnset,
+  showDeescalateAction,
+  showEscalateAction,
 } from "@features/csm-cases/utils/escalationLevel";
 import { ChildCasesWidget } from "@features/csm-cases/components/ChildCasesWidget";
 import { LinkedServiceRequestsWidget } from "@features/csm-cases/components/LinkedServiceRequestsWidget";
@@ -3071,14 +3071,14 @@ export default function CsmCaseDetailPage(): JSX.Element {
               // Visibility is level-eligibility only -- isClosed disables
               // via actionDisabledReason below instead of hiding the button,
               // so its tooltip still has something to anchor to.
-              canEscalate && canEscalateFurther(c.escalationLevel)
+              showEscalateAction(canEscalate, c.escalationLevel)
                 ? () => setEscalationDialogAction("ESCALATE")
                 : undefined
             }
             onDeescalate={
-              canEscalate &&
-              canDeescalate(c.escalationLevel) &&
-              callerIsCaseTeamLead
+              // Team-lead only, no portal role needed: the backend
+              // authorizes a de-escalation on lead membership alone.
+              showDeescalateAction(callerIsCaseTeamLead, c.escalationLevel)
                 ? () => setEscalationDialogAction("DEESCALATE")
                 : undefined
             }

@@ -169,7 +169,7 @@ Shutdown is graceful (15 s) on `SIGINT`/`SIGTERM`.
   choosing one.
 - **Record-level authorization** is resolved from platform data, not from the token: for example,
   posting a public case comment requires being the case's assigned engineer, and de-escalating
-  requires being one of the case's team leads. Handlers read the record from the entity-service for
+  requires being one of the case's team leads (and nothing more than a portal role). Handlers read the record from the entity-service for
   these checks. A caller whose token grants a limited role but has no platform user record is
   provisioned one on first use from their own token.
 - `GET /users/me` reports the caller's portal roles from the same guard that enforces the routes, so
@@ -444,7 +444,7 @@ Permissions and the routes they guard (`internal/handler/access.go` is the sourc
 | `view_operations` | Operations reads: incidents, change requests, problems, incident tasks, outages, alerts. `cs_engineer`, `admin`, `security_team` |
 | `time_cards_and_updates` | Time-card routes and update-level lookups. `cs_engineer`, `admin`, time-card approver |
 | `approve_time_card` | `PATCH /time-cards/{id}` when the body sets `state`; checked inside the handler. Time-card approver and `admin` |
-| `escalate` | `POST /cases/{id}/escalations`; de-escalating also requires being one of the case's team leads |
+| `escalate` | Escalating via `POST /cases/{id}/escalations` (the route itself only needs `view`; the handler checks this for `ESCALATE`). De-escalating does not use it: it requires being one of the case's team leads, whatever the caller's other roles, and holding `escalate` does not substitute |
 | `download_attachment` | `GET /attachments/{id}/content`, `POST /attachments/{id}/share` |
 | `write` | Every other `POST`/`PATCH`/`DELETE` |
 | `admin` | Admin-only routes such as `POST /users`, `POST /users/{id}/roles`, `GET /roles/grantable`, knowledge-base administration |

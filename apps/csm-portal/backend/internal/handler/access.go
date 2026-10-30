@@ -48,12 +48,14 @@ const (
 	// broader than approving one — see PermApproveTimeCard below, which is what's
 	// actually narrowed to the approver role.
 	PermTimeCardsAndUpdates
-	// PermEscalate is escalating or de-escalating a case. Held by the CS
-	// engineer, the escalator role and admin: any internal engineer may
-	// escalate, as in ServiceNow (whose escalation API lets every internal
-	// user escalate). De-escalating additionally requires being one of the
-	// case's ABT team leads -- CaseHandler.CreateCaseEscalation checks that
-	// itself, since a route permission can't see the case.
+	// PermEscalate is escalating a case. Held by the CS engineer, the
+	// escalator role and admin. It is NOT a route permission: POST
+	// /cases/{id}/escalations only requires PermView, and
+	// CaseHandler.CreateCaseEscalation enforces the rest because the rule
+	// depends on the body's action and on the case. ESCALATE needs this
+	// permission; DEESCALATE needs being one of the case's team leads
+	// instead (any portal role, no escalation role), and holding this
+	// permission does not substitute for that.
 	PermEscalate
 	// PermApproveTimeCard is approving or rejecting a time card — a state
 	// transition on the same PATCH /time-cards/{id} route ordinary field edits
@@ -411,12 +413,13 @@ type portalRole struct {
 // NewAccessGuard builds a guard from cfg. Admin satisfies every permission.
 // CS engineer (renamed from support_engineer -- see AccessConfig.CsEngineer's
 // own doc comment), the role for people who work cases, satisfies every other
-// permission EXCEPT THREE: PermAdmin (admin-only, held by no other role,
-// unlike PermWrite which both share), PermEscalate, and PermApproveTimeCard —
-// escalating a case and approving a time card are each a dedicated
-// responsibility, held only by their own role (escalator / time-card
-// approver) plus admin, not by being a CS engineer alone. CS engineer DOES
-// still hold the broader PermTimeCardsAndUpdates (viewing/managing time
+// permission EXCEPT TWO: PermAdmin (admin-only, held by no other role,
+// unlike PermWrite which both share) and PermApproveTimeCard — approving a
+// time card is a dedicated responsibility, held only by its own role
+// (time-card approver) plus admin, not by being a CS engineer alone. CS
+// engineer holds PermEscalate (with the escalator role and admin); see its
+// own doc comment for how it is enforced. CS engineer also
+// holds the broader PermTimeCardsAndUpdates (viewing/managing time
 // cards short of approving them). The attachment-downloader role exists
 // separately so other staff can be granted just that one ability. The
 // usage-metrics and dashboard-designer roles gate nothing here (this backend

@@ -78,10 +78,10 @@ export interface PortalAccess {
   /** Holds at least one portal role — the minimum to use the portal at all. */
   hasAnyRole: boolean;
   /**
-   * Escalating or de-escalating a case: `admin`, `cs_engineer` and
-   * `escalator`, mirroring the backend's `PermEscalate` -- any internal
-   * engineer may escalate, as in ServiceNow. De-escalating also requires
-   * being one of the case's ABT team leads.
+   * Escalating a case: `admin`, `cs_engineer` and `escalator`, mirroring the
+   * backend's `PermEscalate`. Does NOT govern de-escalating: that is allowed
+   * only to the case's ABT team leads and needs no portal role (see
+   * CsmCaseDetailPage).
    */
   canEscalate: boolean;
   canDownloadAttachment: boolean;
@@ -359,8 +359,8 @@ export function getPortalAccess(roles: string[] | undefined): PortalAccess {
   const full = isAdmin || has(PORTAL_ROLE.csEngineer);
   return {
     hasAnyRole: ROLES_THAT_GRANT_ACCESS.some(has),
-    // Any internal engineer may escalate, as in ServiceNow; de-escalating is
-    // further limited to the case's ABT team leads (CsmCaseDetailPage).
+    // Escalating only; de-escalating is gated on the case's team lead
+    // (CsmCaseDetailPage), not on this flag.
     canEscalate: full || has(PORTAL_ROLE.escalator),
     canDownloadAttachment: full || has(PORTAL_ROLE.attachmentDownloader),
     canUseOperations: full || has(PORTAL_ROLE.securityTeam),
