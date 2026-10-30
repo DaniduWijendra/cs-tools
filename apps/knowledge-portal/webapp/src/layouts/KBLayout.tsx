@@ -207,7 +207,6 @@ export default function KBLayout(): JSX.Element {
                 key={pathname}
                 label="Search articles"
                 placeholder="Search articles"
-                shortcutHint
                 onSearch={(q) => navigate(browseUrl({ q: normalizeSearchQuery(q) }))}
               />
             </Box>

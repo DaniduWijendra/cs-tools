@@ -132,7 +132,6 @@ export default function KBBrowsePage(): JSX.Element {
               label="Search articles"
               placeholder={selectedKb ? `Search in ${selectedKb.title}` : "Search all articles"}
               initialValue={searchQuery}
-              shortcutHint
               onSearch={onSearch}
             />
             {searchQuery && (

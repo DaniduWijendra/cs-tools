@@ -37,7 +37,7 @@ be committed. Only `public/config.js.example` is tracked.
 
 - **Search with suggestions.** Every search box offers the top matching article
   titles while typing; Enter runs the full search, arrow keys and Enter open a
-  suggestion. `/` focuses the search box from anywhere on the page.
+  suggestion. Pressing `/` anywhere on the page focuses the search box.
 - **Home.** Product cards with article counts, recently published articles and
   quick links to the most common knowledge bases.
 - **Browse.** Knowledge-base filter (sidebar on wide screens, chips on narrow),

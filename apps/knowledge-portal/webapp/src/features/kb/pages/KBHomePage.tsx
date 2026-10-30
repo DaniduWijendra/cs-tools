@@ -110,7 +110,6 @@ export default function KBHomePage(): JSX.Element {
             <Box sx={{ width: "100%", maxWidth: 720, pt: 1.5 }}>
               <SearchBox
                 large
-                shortcutHint
                 label="Search all articles"
                 placeholder="Search by product, error message or topic"
                 onSearch={(q) => navigate(browseUrl({ q: normalizeSearchQuery(q) }))}
@@ -264,10 +263,7 @@ export default function KBHomePage(): JSX.Element {
                 >
                   <li>Paste the exact error code or message, for example a numeric error code.</li>
                   <li>Pick a product first to narrow the results to one knowledge base.</li>
-                  <li>
-                    Press <Box component="kbd" sx={{ fontFamily: "monospace", px: 0.5, border: 1, borderColor: "divider", borderRadius: 0.5 }}>/</Box>{" "}
-                    anywhere to jump to the search box.
-                  </li>
+                  <li>Search for the symptom, not the cause: the title of an article usually names what you see.</li>
                 </Box>
               </Box>
               <SupportCallout compact />

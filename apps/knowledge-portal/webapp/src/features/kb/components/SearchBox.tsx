@@ -53,8 +53,6 @@ interface SearchBoxProps {
   onSearch: (query: string) => void;
   /** Show matching articles while typing. On by default. */
   suggestions?: boolean;
-  /** Show the "/" shortcut hint while the field is empty. */
-  shortcutHint?: boolean;
 }
 
 type Option = { kind: "article"; article: KBArticle } | { kind: "all" };
@@ -71,7 +69,6 @@ export default function SearchBox({
   large,
   onSearch,
   suggestions = true,
-  shortcutHint,
 }: SearchBoxProps): JSX.Element {
   const [draft, setDraft] = useState(initialValue);
   const [focused, setFocused] = useState(false);
@@ -186,29 +183,6 @@ export default function SearchBox({
                   >
                     <X size={16} aria-hidden />
                   </IconButton>
-                ) : shortcutHint ? (
-                  <Box
-                    component="kbd"
-                    aria-hidden
-                    title="Press / to search"
-                    sx={{
-                      display: { xs: "none", sm: "inline-flex" },
-                      alignItems: "center",
-                      justifyContent: "center",
-                      minWidth: 22,
-                      height: 22,
-                      px: 0.75,
-                      borderRadius: 0.75,
-                      border: 1,
-                      borderColor: "divider",
-                      color: "text.secondary",
-                      fontFamily: "monospace",
-                      fontSize: "0.75rem",
-                      lineHeight: 1,
-                    }}
-                  >
-                    /
-                  </Box>
                 ) : null}
               </InputAdornment>
             ),
